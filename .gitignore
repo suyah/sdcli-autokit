@@ -1,0 +1,16 @@
+# env / secrets
+
+# logs
+*.log
+
+# temp files
+*.tmp
+*.swp
+*~
+
+# macOS
+.DS_Store
+
+# editor
+.vscode/
+.idea/
