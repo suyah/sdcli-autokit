@@ -32,6 +32,8 @@ USER root
 RUN dnf -y install \
       java-17-openjdk \
       curl \
+      wget \
+      file \
       unzip \
       which \
       findutils \
@@ -58,6 +60,17 @@ RUN curl -sSL https://packages.microsoft.com/config/rhel/9/prod.repo \
     && ACCEPT_EULA=Y dnf -y install \
          msodbcsql18 \
          mssql-tools18 \
+    && dnf clean all
+
+RUN curl -L -o /usr/local/bin/yq \
+      https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64 \
+    && chmod +x /usr/local/bin/yq
+
+RUN dnf -y install oracle-instantclient-release-el9 \
+    && dnf -y install \
+         oracle-instantclient19.30-basic.x86_64 \
+         oracle-instantclient19.30-sqlplus.x86_64 \
+         oracle-instantclient19.30-tools.x86_64 \
     && dnf clean all
 
 RUN test -n "${APP_USER}" \
@@ -99,5 +112,8 @@ RUN echo 'export HISTFILE=$HOME/.bash_history' >> "${HOME_DIR}/.bashrc" \
     && echo 'export HISTFILESIZE=20000' >> "${HOME_DIR}/.bashrc" \
     && echo 'shopt -s histappend' >> "${HOME_DIR}/.bashrc" \
     && echo 'export PROMPT_COMMAND="history -a; history -n"' >> "${HOME_DIR}/.bashrc"
+
+RUN echo 'export PATH=/usr/lib/oracle/19.30/client64/bin:$PATH' >> "${HOME_DIR}/.bashrc" \
+    && echo 'export LD_LIBRARY_PATH=/usr/lib/oracle/19.30/client64/lib:$LD_LIBRARY_PATH' >> "${HOME_DIR}/.bashrc"
 
 CMD ["/bin/bash", "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]
