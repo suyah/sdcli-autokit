@@ -1,0 +1,39 @@
+defaults:
+  driver_file: /u01/app/jtds-1.3.1.jar
+
+  paths:
+    output_root: /u01/data/sdcli-autokit/runs
+    log_root: /u01/data/sdcli-autokit/logs
+
+  source:
+    type: sqlserver
+    bcp_tls_mode: trust
+
+  target:
+    type: oracle
+
+migration_repository:
+  type: oracle
+  name: repo
+  conn: tcps://adb.ap-hyderabad-1.oraclecloud.com:1521/g207e55d6197742_test23atp_high.adb.oraclecloud.com?ssl_server_dn_match=yes
+
+  repo_user:
+    connection_name: migration_repo
+    user: migrep
+    password: "${MIGRATION_REPO_PASSWORD}"
+
+  super_user:
+    connection_name: super_migration
+    user: admin
+    password: "${MIGRATION_SUPER_PASSWORD}"
+
+migrations:
+  - name: tpcc
+    source:
+      conn: 10.0.1.165:1433:tpcc
+      user: sa
+      password: "${SOURCE_PASSWORD}"
+    target:
+      conn: tcps://adb.ap-hyderabad-1.oraclecloud.com:1521/g207e55d6197742_test23atp_high.adb.oraclecloud.com?ssl_server_dn_match=yes
+      user: dbo
+      password: "${TARGET_PASSWORD}"
