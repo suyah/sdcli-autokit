@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+find_real_sqlldr() {
+  local configured="${ORACLE_REAL_SQLLDR:-${SQLLDR_REAL:-}}"
+  if [[ -n "$configured" ]]; then
+    [[ -x "$configured" ]] || {
+      echo "ERROR: configured sqlldr binary is not executable: $configured" >&2
+      exit 127
+    }
+    printf '%s\n' "$configured"
+    return 0
+  fi
+
+  local self_dir self_path path_dir cand cand_dir cand_path
+  self_dir="$(cd "$(dirname "$0")" && pwd -P)"
+  self_path="$self_dir/$(basename "$0")"
+
+  local IFS=:
+  for path_dir in $PATH; do
+    [[ -n "$path_dir" ]] || path_dir="."
+    cand="$path_dir/sqlldr"
+    [[ -x "$cand" ]] || continue
+    cand_dir="$(cd "$(dirname "$cand")" && pwd -P)" || continue
+    cand_path="$cand_dir/$(basename "$cand")"
+    [[ "$cand_path" == "$self_path" ]] && continue
+    printf '%s\n' "$cand_path"
+    return 0
+  done
+
+  echo "ERROR: real sqlldr binary not found" >&2
+  exit 127
+}
+
+upper() {
+  printf '%s\n' "$1" | tr '[:lower:]' '[:upper:]'
+}
+
+strip_outer_quotes() {
+  local value="$1"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s\n' "$value"
+}
+
+strip_password_from_userid() {
+  local userid
+  userid="$(strip_outer_quotes "$1")"
+
+  local slash_pos=0 at_pos=0 i char
+  for ((i = 0; i < ${#userid}; i++)); do
+    if [[ "${userid:i:1}" == "/" ]]; then
+      slash_pos=$((i + 1))
+      break
+    fi
+  done
+
+  if (( slash_pos == 0 )); then
+    printf '%s\n' "$userid"
+    return 0
+  fi
+
+  for ((i = ${#userid} - 1; i >= slash_pos; i--)); do
+    char="${userid:i:1}"
+    if [[ "$char" == "@" ]]; then
+      at_pos=$((i + 1))
+      break
+    fi
+  done
+
+  if (( at_pos > slash_pos )); then
+    printf '%s%s\n' "${userid:0:slash_pos - 1}" "${userid:at_pos - 1}"
+  else
+    printf '%s\n' "$userid"
+  fi
+}
+
+is_named_arg() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]
+}
+
+control_arg() {
+  local arg lower
+  for arg in "$@"; do
+    lower="$(upper "$arg")"
+    if [[ "$lower" == CONTROL=* ]]; then
+      printf '%s\n' "${arg#*=}"
+      return 0
+    fi
+  done
+  printf '\n'
+}
+
+sqlldr_password() {
+  local fd="${SDCLI_LOAD_PASSWORD_FD:-}" password=""
+  if [[ -n "$fd" ]]; then
+    IFS= read -r password <&"$fd" || password=""
+  fi
+  printf '%s\n' "$password"
+}
+
+REAL_SQLLDR="$(find_real_sqlldr)"
+
+args=()
+userid_seen=0
+while [[ $# -gt 0 ]]; do
+  arg="$1"
+  lower="$(upper "$arg")"
+  case "$lower" in
+    DIRECT=*|ROWS=*|BINDSIZE=*|READSIZE=*|MULTITHREADING=*)
+      ;;
+    USERID=*)
+      args+=("userid=$(strip_password_from_userid "${arg#*=}")")
+      userid_seen=1
+      ;;
+    *)
+      if [[ $userid_seen -eq 0 ]] && ! is_named_arg "$arg"; then
+        args+=("userid=$(strip_password_from_userid "$arg")")
+        userid_seen=1
+      else
+        args+=("$arg")
+      fi
+      ;;
+  esac
+  shift
+done
+
+direct="$(upper "${SDCLI_SQLLDR_DIRECT:-FALSE}")"
+args+=("DIRECT=$direct")
+args+=("ROWS=${SDCLI_SQLLDR_ROWS:-50000}")
+args+=("BINDSIZE=${SDCLI_SQLLDR_BINDSIZE:-16777216}")
+args+=("READSIZE=${SDCLI_SQLLDR_READSIZE:-16777216}")
+if [[ "$direct" == "TRUE" ]]; then
+  args+=("MULTITHREADING=TRUE")
+fi
+
+control="$(control_arg "${args[@]}")"
+start_ts=$SECONDS
+
+set +e
+printf '%s\n' "$(sqlldr_password)" | "$REAL_SQLLDR" "${args[@]}"
+rc=${PIPESTATUS[1]}
+set -e
+
+echo "[SQLLDR-SUMMARY] control=$control elapsed_sec=$((SECONDS - start_ts)) rc=$rc"
+exit "$rc"

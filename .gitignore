@@ -1,0 +1,24 @@
+# Ignore everything
+*
+
+# Keep this file
+!.gitignore
+
+# Track README.md
+!README.md
+
+# Track deployment folder
+!deployment/
+!deployment/**
+
+# Track sdcli-scripts folder
+!sdcli-scripts/
+!sdcli-scripts/**
+
+# Never track backup files
+*.bak
+**/*.bak
+
+# Never track macOS metadata
+.DS_Store
+**/.DS_Store

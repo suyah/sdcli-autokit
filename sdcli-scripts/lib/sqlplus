@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+find_real_sqlplus() {
+  local configured="${ORACLE_REAL_SQLPLUS:-${SQLPLUS_REAL:-}}"
+  if [[ -n "$configured" ]]; then
+    [[ -x "$configured" ]] || {
+      echo "ERROR: configured sqlplus binary is not executable: $configured" >&2
+      exit 127
+    }
+    printf '%s\n' "$configured"
+    return 0
+  fi
+
+  local self_dir self_path path_dir cand cand_dir cand_path
+  self_dir="$(cd "$(dirname "$0")" && pwd -P)"
+  self_path="$self_dir/$(basename "$0")"
+
+  local IFS=:
+  for path_dir in $PATH; do
+    [[ -n "$path_dir" ]] || path_dir="."
+    cand="$path_dir/sqlplus"
+    [[ -x "$cand" ]] || continue
+    cand_dir="$(cd "$(dirname "$cand")" && pwd -P)" || continue
+    cand_path="$cand_dir/$(basename "$cand")"
+    [[ "$cand_path" == "$self_path" ]] && continue
+    printf '%s\n' "$cand_path"
+    return 0
+  done
+
+  echo "ERROR: real sqlplus binary not found" >&2
+  exit 127
+}
+
+strip_outer_quotes() {
+  local value="$1"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s\n' "$value"
+}
+
+load_password() {
+  local fd="${SDCLI_LOAD_PASSWORD_FD:-}" password=""
+  if [[ -n "$fd" ]]; then
+    IFS= read -r password <&"$fd" || password=""
+  fi
+  printf '%s\n' "$password"
+}
+
+parse_logon() {
+  local logon
+  logon="$(strip_outer_quotes "$1")"
+
+  SQLPLUS_USER=""
+  SQLPLUS_CONN=""
+
+  local slash_pos=0 at_pos=0 i char
+  for ((i = 0; i < ${#logon}; i++)); do
+    if [[ "${logon:i:1}" == "/" ]]; then
+      slash_pos=$((i + 1))
+      break
+    fi
+  done
+  (( slash_pos > 0 )) || return 1
+
+  for ((i = ${#logon} - 1; i >= slash_pos; i--)); do
+    char="${logon:i:1}"
+    if [[ "$char" == "@" ]]; then
+      at_pos=$((i + 1))
+      break
+    fi
+  done
+  (( at_pos > slash_pos )) || return 1
+
+  SQLPLUS_USER="${logon:0:slash_pos - 1}"
+  SQLPLUS_CONN="${logon:at_pos}"
+  [[ -n "$SQLPLUS_USER" && -n "$SQLPLUS_CONN" ]]
+}
+
+rewrite_connect_stdin() {
+  local password="$1"
+  local escaped_password
+  escaped_password="${password//\"/\"\"}"
+
+  local line prefix command logon rest command_lower
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^([[:space:]]*)([^[:space:]]+)[[:space:]]+([^[:space:]]+)(.*)$ ]]; then
+      prefix="${BASH_REMATCH[1]}"
+      command="${BASH_REMATCH[2]}"
+      logon="${BASH_REMATCH[3]}"
+      rest="${BASH_REMATCH[4]}"
+      command_lower="$(printf '%s\n' "$command" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$command_lower" == "connect" || "$command_lower" == "conn" ]]; then
+        if parse_logon "$logon"; then
+          printf '%s%s %s/"%s"@%s%s\n' "$prefix" "$command" "$SQLPLUS_USER" "$escaped_password" "$SQLPLUS_CONN" "$rest"
+          continue
+        fi
+      fi
+    fi
+    printf '%s\n' "$line"
+  done
+}
+
+REAL_SQLPLUS="$(find_real_sqlplus)"
+
+options=()
+script_args=()
+logon=""
+while [[ $# -gt 0 ]]; do
+  if [[ -z "$logon" && "$1" != -* ]] && parse_logon "$1"; then
+    logon="$1"
+    shift
+    script_args=("$@")
+    break
+  fi
+  options+=("$1")
+  shift
+done
+
+if [[ -z "${SDCLI_LOAD_PASSWORD_FD:-}" ]]; then
+  exec "$REAL_SQLPLUS" "${options[@]+"${options[@]}"}" ${logon:+"$logon"} "${script_args[@]+"${script_args[@]}"}"
+fi
+
+password="$(load_password)"
+escaped_password="${password//\"/\"\"}"
+
+if [[ -z "$logon" ]]; then
+  if [[ -t 0 ]]; then
+    exec "$REAL_SQLPLUS" "${options[@]+"${options[@]}"}"
+  fi
+  rewrite_connect_stdin "$password" | "$REAL_SQLPLUS" "${options[@]+"${options[@]}"}"
+else
+  {
+    printf 'connect %s/"%s"@%s\n' "$SQLPLUS_USER" "$escaped_password" "$SQLPLUS_CONN"
+    if [[ ${#script_args[@]} -gt 0 ]]; then
+      printf '%s\n' "${script_args[*]}"
+      printf '%s\n' 'exit'
+    elif [[ -t 0 ]]; then
+      printf '%s\n' 'exit'
+    else
+      rewrite_connect_stdin "$password"
+    fi
+  } | "$REAL_SQLPLUS" "${options[@]+"${options[@]}"}" /nolog
+fi

@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REAL_BCP="${SQLSERVER_REAL_BCP:-}"
+if [[ -n "$REAL_BCP" && ! -x "$REAL_BCP" ]]; then
+  echo "ERROR: configured bcp binary is not executable: $REAL_BCP" >&2
+  exit 127
+fi
+
+if [[ -z "$REAL_BCP" ]]; then
+  for cand in /opt/mssql-tools18/bin/bcp /opt/mssql-tools/bin/bcp; do
+    if [[ -x "$cand" ]]; then
+      REAL_BCP="$cand"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$REAL_BCP" ]]; then
+  echo "ERROR: real bcp binary not found" >&2
+  exit 127
+fi
+
+MODE="${SQLSERVER_BCP_TLS_MODE_EFFECTIVE:-trust}"
+PACKET_SIZE="${SQLSERVER_BCP_PACKET_SIZE:-}"
+BCP_PASSWORD="${SQLSERVER_BCP_PASSWORD:-}"
+
+args=()
+has_u=0
+has_Y=0
+has_a=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a)
+      has_a=1
+      args+=("$1")
+      shift
+      if [[ $# -gt 0 ]]; then
+        args+=("$1")
+        shift
+      fi
+      ;;
+    -a*)
+      has_a=1
+      args+=("$1")
+      shift
+      ;;
+    -P)
+      shift
+      if [[ -n "$BCP_PASSWORD" ]]; then
+        if [[ $# -gt 0 ]]; then
+          shift
+        fi
+      else
+        args+=("-P")
+        if [[ $# -gt 0 ]]; then
+          args+=("$1")
+          shift
+        fi
+      fi
+      ;;
+    -P*)
+      if [[ -z "$BCP_PASSWORD" ]]; then
+        args+=("$1")
+      fi
+      shift
+      ;;
+    -u)
+      has_u=1
+      args+=("$1")
+      shift
+      ;;
+    -Y)
+      has_Y=1
+      args+=("$1")
+      shift
+      if [[ $# -gt 0 ]]; then
+        args+=("$1")
+        shift
+      fi
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "$MODE" in
+  strict)
+    if [[ $has_Y -eq 0 ]]; then
+      args+=("-Ys")
+    fi
+    ;;
+  trust)
+    if [[ $has_Y -eq 0 ]]; then
+      args+=("-Ym")
+    fi
+    if [[ $has_u -eq 0 ]]; then
+      args+=("-u")
+    fi
+    ;;
+  optional)
+    if [[ $has_Y -eq 0 ]]; then
+      args+=("-Yo")
+    fi
+    ;;
+esac
+
+if [[ -n "$PACKET_SIZE" && $has_a -eq 0 ]]; then
+  args+=("-a" "$PACKET_SIZE")
+fi
+
+if [[ -n "$BCP_PASSWORD" ]]; then
+  unset SQLSERVER_BCP_PASSWORD
+  printf '%s\n' "$BCP_PASSWORD" | "$REAL_BCP" "${args[@]}"
+else
+  exec "$REAL_BCP" "${args[@]}"
+fi
