@@ -1,8 +1,10 @@
-# sdcli-scripts
+# DASOM
 
-A repeatable SQL Server to Oracle migration runner built around Oracle SQL Developer CLI (`sdcli`) and a Podman-based execution environment.
+**DASOM** — **Deterministic AST SQLServer to Oracle Migrator** — is a containerized automation toolkit for SQL Server to Oracle migrations using Oracle SQL Developer CLI (`sdcli`).
 
-Use this project to prepare a reusable migration container, define one or more SQL Server to Oracle migrations, initialize the SQL Developer migration repository, create SDCLI connections, run full migrations or individual phases, and keep each run's logs and generated files organized.
+The project is delivered through the `sdcli-autokit` repository and provides a repeatable workflow for preparing the migration runtime, configuring migrations, initializing the SQL Developer migration repository, creating SDCLI connections, running full migrations or individual phases, and organizing each run's logs and generated artifacts.
+
+Use DASOM to automate and standardize SQL Server to Oracle migration workflows that would otherwise require many manual `sdcli` commands and generated script execution steps.
 
 The project assumes:
 
