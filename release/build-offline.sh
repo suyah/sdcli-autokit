@@ -24,6 +24,26 @@ BUNDLE_NAME="sdcli-autokit-$VERSION-linux-amd64"
 BUNDLE_PATH="$DIST_DIR/$BUNDLE_NAME.tar.gz"
 CHECKSUM_PATH="$BUNDLE_PATH.sha256"
 
+CONTAINER_ENGINE="${CONTAINER_ENGINE:-}"
+if [[ -z "$CONTAINER_ENGINE" ]]; then
+  if command -v podman >/dev/null 2>&1; then
+    CONTAINER_ENGINE="podman"
+  elif command -v docker >/dev/null 2>&1; then
+    CONTAINER_ENGINE="docker"
+  else
+    echo "Error: neither podman nor docker is installed. Install Podman or start Rancher Desktop." >&2
+    exit 1
+  fi
+fi
+
+case "$CONTAINER_ENGINE" in
+  podman|docker) ;;
+  *)
+    echo "Error: CONTAINER_ENGINE must be podman or docker, not '$CONTAINER_ENGINE'" >&2
+    exit 1
+    ;;
+esac
+
 [[ ! -e "$BUNDLE_PATH" && ! -e "$CHECKSUM_PATH" ]] || {
   echo "Error: release output already exists: $BUNDLE_PATH" >&2
   exit 1
@@ -35,8 +55,12 @@ trap 'rm -rf "$stage_dir"' EXIT
 bundle_dir="$stage_dir/$BUNDLE_NAME"
 mkdir -p "$bundle_dir/deployment" "$bundle_dir/sdcli-scripts"
 
-bash "$ROOT_DIR/deployment/build.sh" "$IMAGE_NAME"
-podman save --format oci-archive --output "$bundle_dir/image.tar" "$IMAGE_NAME"
+CONTAINER_ENGINE="$CONTAINER_ENGINE" bash "$ROOT_DIR/deployment/build.sh" "$IMAGE_NAME"
+if [[ "$CONTAINER_ENGINE" == "podman" ]]; then
+  "$CONTAINER_ENGINE" save --format oci-archive --output "$bundle_dir/image.tar" "$IMAGE_NAME"
+else
+  "$CONTAINER_ENGINE" image save --output "$bundle_dir/image.tar" "$IMAGE_NAME"
+fi
 printf '%s\n' "$VERSION" > "$bundle_dir/VERSION"
 
 cp "$ROOT_DIR/README.md" "$bundle_dir/README.md"

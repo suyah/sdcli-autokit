@@ -61,7 +61,7 @@ Use this directory inside the migration working area/container to configure and 
 
 On the host machine, you need:
 
-- Podman installed
+- Podman installed on the customer VM; Podman or Docker/Rancher Desktop on the connected build machine
 - network access to the source SQL Server database
 - network access to the target Oracle database
 - a `.env` file in the `deployment/` directory for container settings
@@ -105,6 +105,14 @@ On a connected Linux/amd64 build host, create a versioned bundle:
 ~~~bash
 ./release/build-offline.sh 1.0.0
 ~~~
+
+The scripts prefer Podman when both tools are installed. To build with Rancher Desktop/Docker explicitly, use:
+
+~~~bash
+CONTAINER_ENGINE=docker ./release/build-offline.sh 1.0.0
+~~~
+
+Rancher Desktop must be running with its Docker engine available before starting the build.
 
 Transfer `dist/sdcli-autokit-1.0.0-linux-amd64.tar.gz` and its adjacent `.sha256` file through any approved cloud, on-premises, or physical method. On the customer VM:
 
