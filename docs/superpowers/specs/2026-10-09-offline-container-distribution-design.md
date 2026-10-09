@@ -2,9 +2,9 @@
 
 ## Summary
 
-`sdcli-autokit` will support a build-once, run-offline delivery model for customer VMs that can read from Azure Blob Storage but cannot reach container registries or public package repositories. An internet-enabled release machine builds a complete Podman image, packages it with the deployment scripts as a versioned release bundle, calculates a SHA-256 checksum, and uploads the release files to a private Azure Blob container. The customer downloads the bundle, verifies it, loads the image into Podman, and starts it without building an image or accessing an external network resource.
+`sdcli-autokit` will support a build-once, run-offline delivery model for customer VMs that cannot reach container registries or public package repositories. A trusted release machine builds a complete Podman image, packages it with the deployment scripts as a versioned release bundle, and calculates a SHA-256 checksum. The two ordinary release files can be transferred through Azure Blob Storage, Amazon S3, Google Cloud Storage, OCI Object Storage, an on-premises artifact store or file share, SCP/SFTP, or removable media. The customer verifies the bundle, loads the image into Podman, and starts it without building an image or accessing an external software source.
 
-The existing online development workflow remains available to maintainers. The customer runtime path is explicitly network-independent except for the required connections to the source SQL Server, target Oracle database, migration repository, and Azure Blob Storage used to obtain the release.
+The existing online development workflow remains available to maintainers. The customer runtime path is independent of the release transport and public internet. It requires only the approved mechanism used to receive the bundle and the runtime connections to the source SQL Server, target Oracle database, and migration repository.
 
 ## Problem
 
@@ -19,20 +19,20 @@ The current layout also mounts a named volume at `/u01`. SQL Developer and jTDS 
 
 ## Goals
 
-- Build the complete runtime once on an approved internet-enabled Linux `amd64` release machine.
+- Build the complete runtime once on an approved Linux `amd64` release machine that can obtain its inputs from public sources, approved internal mirrors, or pre-staged artifacts; the isolated customer VM never builds the image.
 - Produce one versioned customer bundle and a separate SHA-256 checksum file.
-- Allow a customer VM with Podman and Azure Blob access to install and run the bundle without `podman build`, `podman pull`, `curl`, `wget`, `dnf`, or access to public repositories.
+- Allow a customer VM with Podman to install and run a transferred bundle without `podman build`, `podman pull`, `curl`, `wget`, `dnf`, or access to public repositories.
 - Include SQL Developer, jTDS, Oracle client tools, SQL Server client tools, `yq`, and the current `sdcli-scripts` release in the delivered materials.
 - Persist migration data and logs independently from immutable application binaries.
 - Detect corrupt, incomplete, incompatible, or incorrectly tagged bundles before creating the container.
 - Retain `deployment/start.sh` and `deployment/stop.sh` for daily lifecycle operations.
-- Document the release, Azure upload, customer installation, upgrade, and rollback procedures.
+- Document release, transport options, customer installation, upgrade, and rollback procedures for public cloud and fully on-premises environments.
 
 ## Non-goals
 
 - Installing Podman on the customer VM.
 - Providing database credentials or embedding customer configuration in the image.
-- Replacing Azure Blob Storage with a container registry.
+- Mandating, hosting, or configuring a particular cloud or on-premises transfer service.
 - Supporting CPU architectures other than `linux/amd64` in the first release.
 - Providing cryptographic publisher identity in the first release. SHA-256 detects corruption; a later release may add detached signatures after a signing authority and key-distribution process are selected.
 - Automating public distribution of Oracle or Microsoft software. Distribution must remain private and must pass the organization's software-license review.
@@ -41,7 +41,7 @@ The current layout also mounts a named volume at `/u01`. SQL Developer and jTDS 
 
 ### Release side
 
-The release machine runs `release/build-offline-bundle.sh VERSION`. The script validates the version and required tools, obtains the pinned SQL Developer RPM and jTDS JAR into a gitignored artifact directory, invokes the normal image build, verifies the image contents, saves the image as an OCI archive, and creates the customer bundle.
+The release machine runs `release/build-offline-bundle.sh VERSION`. The script validates the version and required tools, obtains the pinned SQL Developer RPM and jTDS JAR into a gitignored artifact directory, invokes the normal image build, verifies the image contents, saves the image as an OCI archive, and creates the customer bundle. A release machine may use direct internet access, organization-controlled mirrors, or pre-staged inputs; that choice does not change the resulting bundle or customer installation flow.
 
 The build context changes from `deployment/` to the repository root so the Dockerfile can copy both `deployment/artifacts/` and `sdcli-scripts/`. External access remains permitted during the image build for the base image and package installation, but every runtime dependency needed by the customer is present in the final image.
 
@@ -83,11 +83,13 @@ IMAGE_ARCHIVE_SHA256=<sha256>
 
 The image uses the version tag and also receives the local `sdcli-autokit:latest` tag only after it is loaded successfully. The version tag is the authoritative identity for installation and rollback.
 
-`release/upload-azure-blob.sh` uploads the bundle and checksum with `azcopy`. It accepts the local bundle path and an explicit destination URL, checks that both files exist, and never stores the SAS token in the repository or logs it deliberately. Blob retention, access policy, and deletion are controlled outside this project.
+`release/verify-offline-bundle.sh` validates the outer checksum and required archive layout before publication or installation. Publication is deliberately outside the core build: cloud CLIs, on-premises repository clients, file-copy tools, and removable-media procedures all transfer the same unchanged bundle and checksum. This keeps the release artifact portable and avoids embedding provider credentials or SDK dependencies in the project.
+
+The operational runbook provides tested command patterns for Azure Blob Storage, Amazon S3, Google Cloud Storage, OCI Object Storage, mounted on-premises shares, SCP/SFTP, and removable media. Provider access policy, retention, replication, and deletion remain the responsibility of the selected transport platform.
 
 ### Customer side
 
-The customer downloads the `.tar.gz` bundle and `.sha256` file from Azure Blob Storage. After `sha256sum -c` succeeds, they extract the bundle and run `deployment/install-offline.sh`.
+The customer receives the `.tar.gz` bundle and `.sha256` file through an approved transport. After `release/verify-offline-bundle.sh` or `sha256sum -c` succeeds, they extract the bundle and run `deployment/install-offline.sh`. The receiving VM does not need a cloud CLI when another system, mounted share, or removable medium delivers the files.
 
 The installer:
 
@@ -138,7 +140,7 @@ The container retains `--network host` because migrations need access to custome
 - Copy `sdcli-scripts/` as an immutable release copy.
 - Keep package-repository operations on the release side only.
 - Add OCI labels for the release version, source revision, and supported architecture.
-- Do not include secrets, SAS tokens, database passwords, migration output, or customer configuration.
+- Do not include provider credentials, signed access tokens, database passwords, migration output, or customer configuration.
 
 ### `deployment/build.sh`
 
@@ -155,10 +157,10 @@ The container retains `--network host` because migrations need access to custome
 - Preserve container reuse, SQL Developer preference setup, script synchronization, and health checks.
 - Fail clearly when the local image is incomplete.
 
-### Release scripts
+### Release and verification scripts
 
 - `release/build-offline-bundle.sh` owns artifact acquisition, image creation, image validation, OCI export, manifest generation, bundle packaging, and checksums.
-- `release/upload-azure-blob.sh` owns Azure upload only. Keeping upload separate lets a release be inspected or scanned before publication and avoids rebuilding during upload retries.
+- `release/verify-offline-bundle.sh` owns provider-neutral checksum and archive-layout verification. Upload and copying remain separate from building and verification, so publication retries never rebuild a release.
 
 ### Customer installer
 
@@ -209,15 +211,15 @@ Schema or data-format migrations are outside this design. If a future release ch
 
 ## Security and Licensing
 
-- Azure Blob access should use a private container and a read-only, time-limited SAS URL or an approved managed-identity flow.
-- URLs containing SAS query strings must not be echoed, committed, written to manifests, or included in image layers.
+- Cloud object stores and on-premises repositories should use private locations and least-privilege identities, signed URLs, access tokens, or service accounts approved for that platform.
+- Provider credentials, signed URL query strings, tokens, repository passwords, and private endpoint details must not be echoed, committed, written to manifests, or included in image layers.
 - Checksums provide integrity against accidental corruption. They are not a substitute for signed releases or a trusted out-of-band checksum channel.
 - Container images should be scanned on the release machine before upload, using the organization's approved scanner.
-- Oracle SQL Developer, Oracle Instant Client, Microsoft drivers/tools, and other bundled software must be reviewed for redistribution rights before a customer bundle is uploaded. If redistribution is not permitted, the same workflow can run in a customer-controlled build environment or consume customer-provided artifacts from their private Blob container.
+- Oracle SQL Developer, Oracle Instant Client, Microsoft drivers/tools, and other bundled software must be reviewed for redistribution rights before a customer bundle is transferred. If redistribution is not permitted, the same workflow can run in a customer-controlled build environment or consume customer-provided artifacts from an approved private source.
 
 ## Testing and Acceptance Criteria
 
-Shell-level tests use fake `podman`, downloader, and `azcopy` commands so failure paths can be tested without network access or a container daemon. The test suite covers:
+Shell-level tests use fake `podman` and downloader commands so failure paths can be tested without network access or a container daemon. The test suite covers:
 
 - rejecting an invalid release version;
 - rejecting missing or checksum-mismatched artifacts;
@@ -227,13 +229,15 @@ Shell-level tests use fake `podman`, downloader, and `azcopy` commands so failur
 - loading and running a valid bundle without invoking `build`, `pull`, `curl`, `wget`, or `dnf` on the customer path;
 - preserving an existing container and volumes when its image does not match;
 - treating repeated installation of the same version as success; and
-- refusing upload when either the bundle or checksum is missing.
+- refusing verification or publication handoff when either the bundle or checksum is missing;
+- proving the generated artifact and verification command contain no Azure, AWS, GCP, OCI, or on-premises transport dependency; and
+- documenting transfer and retrieval patterns for each supported environment without changing the bundle.
 
 Static verification runs `bash -n` on every shell script. `shellcheck` runs when available and is required in CI before release publication.
 
 The feature is accepted when a clean test VM with Podman, no registry credentials, and public internet blocked can:
 
-1. download a private bundle and checksum from Azure Blob Storage;
+1. receive a private bundle and checksum through any documented cloud, on-premises, or physical transfer method;
 2. verify and extract the bundle;
 3. load the image;
 4. create and start the container;

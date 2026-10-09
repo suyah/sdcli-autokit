@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Produce a versioned, checksummed `sdcli-autokit` bundle on an internet-enabled release machine that a registry-isolated customer VM can verify, load, and run with Podman without building or downloading software.
+**Goal:** Produce a versioned, checksummed `sdcli-autokit` bundle that can be transferred unchanged through any cloud or on-premises channel and that a registry-isolated customer VM can verify, load, and run with Podman without building or downloading software.
 
-**Architecture:** Bake SQL Developer, jTDS, and the migration scripts into the image during the trusted release build, then export the tagged image as an OCI archive inside a customer bundle. Keep immutable tools below `/u01/app`, mount only data and log volumes, and give the customer a strict installer that validates the bundle, loads the local image, and starts the existing Podman lifecycle without external downloads.
+**Architecture:** Bake SQL Developer, jTDS, and the migration scripts into the image during the trusted release build, then export the tagged image as an OCI archive inside a provider-neutral customer bundle. Keep immutable tools below `/u01/app`, mount only data and log volumes, and give the customer strict verification and installation scripts that work regardless of whether the files arrived through Azure, AWS, GCP, OCI, an on-premises service, a file share, or removable media.
 
-**Tech Stack:** Bash, Podman, OCI image archive, Dockerfile, SHA-256, tar/gzip, AzCopy, fake-command shell tests
+**Tech Stack:** Bash, Podman, OCI image archive, Dockerfile, SHA-256, tar/gzip, provider CLI examples, fake-command shell tests
 
 **Spec:** `docs/superpowers/specs/2026-10-09-offline-container-distribution-design.md`
 
@@ -17,7 +17,7 @@
 - The release bundle is `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` with checksum file `dist/sdcli-autokit-<version>-linux-amd64.tar.gz.sha256`.
 - The authoritative image tag is `sdcli-autokit:<version>`; version values are restricted to `[A-Za-z0-9._-]+`.
 - Immutable tools remain under `/u01/app`; only `sdcli-autokit_data:/u01/data` and `sdcli-autokit_log:/u01/log` are persistent mounts.
-- Customer configuration, database passwords, Azure SAS tokens, migration output, and logs must never be added to an image layer or release manifest.
+- Customer configuration, database passwords, cloud credentials, signed URLs, access tokens, private endpoint details, migration output, and logs must never be added to an image layer or release manifest.
 - Parse `manifest.env` as an allowlisted data format; never execute it with `source`, `.`, or `eval`.
 - Installation and release scripts must not delete or silently replace images, containers, volumes, bundles, logs, or migration data.
 - Software redistribution must be approved before upload; release automation must not make the bundle public.
@@ -28,7 +28,7 @@
 - An existing same-named container using a different image must remain unchanged and cause an actionable Task 2 failure.
 - A partial, corrupt, or checksum-mismatched software artifact, OCI archive, or outer bundle must fail before use in Tasks 1–3.
 - Release versions with whitespace, slashes, shell metacharacters, or an empty value must be rejected by Task 3 before filesystem or Podman mutations.
-- Azure destinations containing SAS secrets must not appear in script-generated output, manifests, or repository files, as tested in Task 4.
+- The build, verification, and installation scripts must have no dependency on Azure, AWS, GCP, OCI, or an on-premises product; provider credentials and endpoints must not appear in generated output, manifests, or repository files, as tested in Task 4.
 
 ---
 
@@ -201,7 +201,7 @@ Use fake `curl` and `podman` commands plus real `sha256sum` and `tar`. Assert:
 - the OCI archive is saved with `podman save --format oci-archive` using the versioned image;
 - the bundle contains exactly the documented image, manifest, deployment scripts, and editable `sdcli-scripts/` tree;
 - both the embedded archive checksum and outer bundle checksum match their files;
-- the generated manifest contains only the five allowlisted keys and no URL, SAS token, password, local absolute path, or customer value.
+- the generated manifest contains only the five allowlisted keys and no URL, cloud credential, signed token, password, local absolute path, or customer value.
 
 - [ ] **Step 2: Run the release-builder tests and verify failure**
 
@@ -211,7 +211,7 @@ Expected: FAIL because the release builder does not exist.
 
 - [ ] **Step 3: Document release inputs**
 
-Create `release/release.env.example` with placeholder URLs and mandatory 64-character checksum placeholders for SQL Developer and jTDS. State that maintainers copy values into their environment or a non-tracked local file and must confirm redistribution approval before upload. Do not include live SAS URLs or secrets.
+Create `release/release.env.example` with placeholder URLs and mandatory 64-character checksum placeholders for SQL Developer and jTDS. State that maintainers copy values into their environment or a non-tracked local file and must confirm redistribution approval before transfer. Do not include signed cloud URLs, access tokens, or secrets.
 
 - [ ] **Step 4: Implement `release/build-offline-bundle.sh <version> [--force]`**
 
@@ -232,42 +232,42 @@ git add release/build-offline-bundle.sh release/release.env.example tests
 git commit -m "feat: package versioned offline release bundle"
 ```
 
-### Task 4: Upload release files safely to Azure Blob Storage
+### Task 4: Verify release files independently of transport
 
 **Files:**
-- Create: `release/upload-azure-blob.sh`
-- Create: `tests/deployment/test_azure_upload.sh`
+- Create: `release/verify-offline-bundle.sh`
+- Create: `tests/deployment/test_bundle_transport.sh`
 - Modify: `tests/run.sh`
 
 **Interfaces:**
-- Consumes: `release/upload-azure-blob.sh <bundle.tar.gz> <azure-destination-url>` and adjacent `<bundle.tar.gz>.sha256`; installed `azcopy`.
-- Produces: two private Blob uploads using the supplied destination and unchanged basenames; concise output that does not print the destination URL or SAS query.
+- Consumes: `release/verify-offline-bundle.sh <bundle.tar.gz>` and adjacent `<bundle.tar.gz>.sha256`; standard `sha256sum`, `tar`, and `gzip` tools.
+- Produces: provider-neutral confirmation of the outer checksum, safe archive paths, exact top-level bundle directory, required manifest/image/deployment/migration entries, and no embedded transport configuration.
 
-- [ ] **Step 1: Add failing Azure upload tests**
+- [ ] **Step 1: Add failing provider-neutral verification tests**
 
-With a fake `azcopy`, assert that missing arguments, a non-`.tar.gz` bundle, a missing checksum, an invalid local checksum, or missing `azcopy` fails before upload. For a valid bundle, assert exactly two `azcopy copy` calls with the bundle and checksum basenames. Capture stdout/stderr and assert that a destination such as `https://account.blob.core.windows.net/private/path?sig=TOPSECRET` and `TOPSECRET` never appear.
+Assert that missing arguments, a non-`.tar.gz` bundle, a missing checksum, an invalid local checksum, an archive whose root does not match its versioned filename, absolute paths, `..` path traversal, symlinks, missing required entries, or extra top-level entries all fail. A valid release must pass unchanged when copied to a new local directory. Scan the core build, verification, and deployment scripts and assert that none invoke `azcopy`, `aws`, `gcloud`, `gsutil`, `oci`, `scp`, `sftp`, or a vendor SDK.
 
-- [ ] **Step 2: Run the Azure upload tests and verify failure**
+- [ ] **Step 2: Run the bundle transport tests and verify failure**
 
-Run: `bash tests/deployment/test_azure_upload.sh`
+Run: `bash tests/deployment/test_bundle_transport.sh`
 
-Expected: FAIL because the upload script does not exist.
+Expected: FAIL because the provider-neutral verification script does not exist.
 
-- [ ] **Step 3: Implement `release/upload-azure-blob.sh`**
+- [ ] **Step 3: Implement `release/verify-offline-bundle.sh <bundle.tar.gz>`**
 
-Validate local inputs and their checksum, require `azcopy`, split an optional query string from the destination without evaluating it, append each safe local basename before restoring that query string, and call `azcopy copy` once per file. Suppress AzCopy command output, remove any temporary AzCopy logs, and print only sanitized success or failure messages containing filenames. Do not persist or echo the supplied destination.
+Validate the filename and adjacent checksum before reading the archive. Inspect the tar member list without extracting it; require every member to be a regular file or directory beneath the exact `sdcli-autokit-<version>/` root, reject absolute paths, `..`, links, devices, and extra roots, then require the documented manifest, image archive, deployment scripts, and migration-script entries. Print only the verified bundle name and SHA-256. Do not accept or call a transport CLI.
 
-- [ ] **Step 4: Run upload and full tests**
+- [ ] **Step 4: Run transport-neutral and full tests**
 
-Run: `bash tests/deployment/test_azure_upload.sh && bash tests/run.sh`
+Run: `bash tests/deployment/test_bundle_transport.sh && bash tests/run.sh`
 
-Expected: PASS, with no SAS token in captured output.
+Expected: PASS. The same copied bundle verifies without a provider tool, and core scripts contain no provider command.
 
 - [ ] **Step 5: Commit Task 4**
 
 ```bash
-git add release/upload-azure-blob.sh tests
-git commit -m "feat: upload offline releases to Azure Blob"
+git add release/verify-offline-bundle.sh tests
+git commit -m "feat: verify offline bundles independently of transport"
 ```
 
 ### Task 5: Document operations and prove the offline boundary
@@ -281,11 +281,11 @@ git commit -m "feat: upload offline releases to Azure Blob"
 
 **Interfaces:**
 - Consumes: the scripts and release contract from Tasks 1–4.
-- Produces: maintainer release/upload instructions, customer download/install instructions, upgrade/rollback guidance, licensing gate, and a static/runtime guard against customer-side download commands.
+- Produces: maintainer release/transfer instructions, customer receive/install instructions, upgrade/rollback guidance, licensing gate, provider command examples, and a static/runtime guard against customer-side software downloads.
 
 - [ ] **Step 1: Add a failing offline-boundary test**
 
-Assert that `deployment/install-offline.sh`, `deployment/run.sh`, `deployment/start.sh`, and `deployment/stop.sh` contain no executable calls to `podman build`, `podman pull`, `curl`, `wget`, or `dnf`. Execute the valid fake-customer flow and apply the same assertion to its command log. Also assert that runtime volume arguments never target `/u01` and that the README names the release builder, Azure uploader, checksum verification, and installer commands.
+Assert that `deployment/install-offline.sh`, `deployment/run.sh`, `deployment/start.sh`, and `deployment/stop.sh` contain no executable calls to `podman build`, `podman pull`, `curl`, `wget`, or `dnf`. Execute the valid fake-customer flow and apply the same assertion to its command log. Also assert that runtime volume arguments never target `/u01` and that the README names the release builder, provider-neutral verifier, installer, and Azure/AWS/GCP/OCI/on-premises transfer options.
 
 - [ ] **Step 2: Run the boundary test and verify failure**
 
@@ -299,30 +299,29 @@ Add a narrow `.gitignore` exception for `docs/offline-release-runbook.md`. Separ
 
 ```bash
 ./release/build-offline-bundle.sh 1.2.3
-./release/upload-azure-blob.sh dist/sdcli-autokit-1.2.3-linux-amd64.tar.gz '<private-blob-destination>'
-azcopy copy '<private-bundle-url>' .
-azcopy copy '<private-checksum-url>' .
+./release/verify-offline-bundle.sh dist/sdcli-autokit-1.2.3-linux-amd64.tar.gz
+# Transfer the .tar.gz and .sha256 through the approved provider or offline channel.
 sha256sum -c sdcli-autokit-1.2.3-linux-amd64.tar.gz.sha256
 tar -xzf sdcli-autokit-1.2.3-linux-amd64.tar.gz
 cd sdcli-autokit-1.2.3
 ./deployment/install-offline.sh
 ```
 
-Explain the `linux/amd64`, Podman, Blob access, and database-network prerequisites; editable configuration; start/stop behavior; and the fact that customer installation does not build or pull.
+Add a transfer matrix with upload and retrieval examples for Azure Blob (`azcopy`), Amazon S3 (`aws s3 cp`), Google Cloud Storage (`gcloud storage cp`), OCI Object Storage (`oci os object put/get`), an on-premises repository or mounted file share, SCP/SFTP, and removable media. Each example transfers the same `.tar.gz` and `.sha256` without repackaging. Explain the `linux/amd64`, Podman, approved file-transfer, and database-network prerequisites; editable configuration; start/stop behavior; and the fact that customer installation does not build or pull.
 
 - [ ] **Step 4: Add the operational runbook**
 
-Document release approval, license approval, image scanning, artifact checksums, Blob upload, customer verification, clean-VM acceptance, upgrade, rollback, troubleshooting, and retention. Make removal/replacement of a stopped container an explicit operator command; never place it inside installation automation. State that the checksum should be shared through an approved trusted channel when tamper resistance is required.
+Document release approval, license approval, image scanning, artifact checksums, provider-neutral transfer, customer verification, clean-VM acceptance, upgrade, rollback, troubleshooting, and retention. Include authentication and least-privilege notes for Azure, AWS, GCP, OCI, and on-premises repositories without storing credentials in project files. Make removal/replacement of a stopped container an explicit operator command; never place it inside installation automation. State that the checksum should be shared through an approved independent channel when tamper resistance is required.
 
 - [ ] **Step 5: Run all automated verification**
 
 Run: `bash tests/run.sh`
 
-Expected: PASS for syntax, build contract, offline install, release bundle, Azure upload, and offline boundary suites. `shellcheck` reports no errors.
+Expected: PASS for syntax, build contract, offline install, release bundle, provider-neutral transport, and offline boundary suites. `shellcheck` reports no errors.
 
 - [ ] **Step 6: Perform release-machine integration verification**
 
-On an approved internet-enabled `linux/amd64` machine with Podman and licensed artifact access, run:
+On an approved `linux/amd64` machine with Podman and access to licensed inputs through public sources, internal mirrors, or pre-staged artifacts, run:
 
 ```bash
 ./release/build-offline-bundle.sh 0.0.0-acceptance
@@ -333,7 +332,7 @@ Expected: the real image builds, required in-image tools pass, and the bundle ch
 
 - [ ] **Step 7: Perform isolated customer-VM acceptance**
 
-On a clean `linux/amd64` VM with Podman, Azure Blob access, required database routes, no registry credentials, and public software repositories blocked, download the acceptance bundle and run `deployment/install-offline.sh`.
+On a clean `linux/amd64` VM with Podman, access to one approved transfer method, required database routes, no registry credentials, and public software repositories blocked, receive the acceptance bundle and run `deployment/install-offline.sh`. Repeat the file-transfer/verification portion with at least one cloud object store and one non-cloud method such as a mounted share or removable media.
 
 Expected: the image loads, container starts, every tool health check passes, no public endpoint is contacted, and data/log files survive stop/start and an operator-controlled container replacement.
 
@@ -349,5 +348,5 @@ git commit -m "docs: add offline release and installation runbook"
 - [ ] Run `git diff --check main...HEAD` and expect no whitespace errors.
 - [ ] Run `bash tests/run.sh` and expect every suite plus `shellcheck` to pass.
 - [ ] Run `git status --short` and confirm only intentionally uncommitted local artifact or `dist/` files are ignored.
-- [ ] Review the branch for secrets with `git grep -nE '(sig=|password=|SAS|BEGIN .*PRIVATE KEY)' HEAD`; inspect every match and confirm no credential is committed.
-- [ ] Confirm the design's acceptance test has been completed or clearly record that real release/customer VM verification remains pending because the required Linux/Podman/Azure environment is external to the repository.
+- [ ] Review the branch for secrets with `git grep -nE '(sig=|password=|token=|secret=|BEGIN .*PRIVATE KEY)' HEAD`; inspect every match and confirm no credential is committed.
+- [ ] Confirm the design's acceptance test has been completed or clearly record that real release/customer VM verification remains pending because the required Linux/Podman/transfer environments are external to the repository.
