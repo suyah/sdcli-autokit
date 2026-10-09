@@ -76,7 +76,9 @@ while IFS= read -r script_file; do
 done < <(cd "$ROOT_DIR" && git ls-files 'sdcli-scripts/**')
 chmod 0755 "$bundle_dir/sdcli-scripts/migrate.sh" "$bundle_dir/sdcli-scripts/lib/bcp" "$bundle_dir/sdcli-scripts/lib/load_wrappers.sh" "$bundle_dir/sdcli-scripts/lib/sqlldr" "$bundle_dir/sdcli-scripts/lib/sqlplus"
 
-tar -C "$stage_dir" -czf "$BUNDLE_PATH" "$BUNDLE_NAME"
+# macOS attaches Finder/provenance extended attributes to copied files. Excluding
+# them keeps Linux GNU tar output clean when customers unpack the bundle.
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage_dir" -czf "$BUNDLE_PATH" "$BUNDLE_NAME"
 
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$DIST_DIR" && sha256sum "$BUNDLE_NAME.tar.gz" > "$BUNDLE_NAME.tar.gz.sha256")
