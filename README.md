@@ -283,6 +283,16 @@ For normal daily use after the container already exists:
 
 In `sdcli-scripts/`, update `config.yaml` for your repository connection, source database, target database, migration name, password placeholder names, and optional load/offload preferences.
 
+For an offline bundle, `run.sh` starts the container and copies this directory into the container on its first run. You can then configure it interactively inside the running container:
+
+```bash
+podman exec -it --user sduser sdcli-autokit bash
+cd ~/sdcli-scripts
+vi config.yaml
+```
+
+Exit the shell after saving. The configuration remains in the existing container; keep a copy of the edited `config.yaml` outside the container as well, so it can be reused if the container is deliberately recreated for an image upgrade.
+
 ### 3. Set password variables
 
 Export the password variables described in [Password variables](#password-variables).

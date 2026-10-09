@@ -52,6 +52,7 @@ RUN dnf -y install \
       bind-utils \
       nmap-ncat \
       tree \
+      vim-minimal \
       iputils \
       rpm \
     && dnf clean all
