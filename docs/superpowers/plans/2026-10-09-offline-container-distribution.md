@@ -2,220 +2,80 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a portable, versioned runner image without Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver 18, or Microsoft `mssql-tools18`, then install those packages from customer-owned files on an isolated VM.
+**Goal:** Build the runner on a connected machine and run it on an offline customer VM using customer-supplied Oracle and Microsoft RPMs.
 
-**Architecture:** A trusted release host builds an OCI image containing the approved base/runtime and project scripts. A reviewed lock file pins the customer-supplied RPMs; the customer installer validates them before mutation, mounts their directory read-only, installs locally with repositories disabled, and checks the running tools. The bundle and checksum work with cloud, on-premises, or physical transfer.
+**Architecture:** Export one versioned Podman image with the deployment and migration scripts in a checksum-protected tarball. The customer verifies and loads it, then `run.sh` mounts a local RPM directory and installs only from those files. No cloud-specific code or release service is involved.
 
-**Tech Stack:** Bash, Oracle Linux 9, Podman, RPM/DNF offline installation, OCI archive, SHA-256, tar/gzip, shell tests with fake commands
+**Tech Stack:** Bash, Podman, Oracle Linux 9, RPM/DNF, tar, SHA-256
 
 **Spec:** `docs/superpowers/specs/2026-10-09-offline-container-distribution-design.md`
 
 ## Global Constraints
 
-- The released image and `.tar.gz` contain no SQL Developer, Oracle Instant Client, `msodbcsql18`, or `mssql-tools18` payloads or RPMs.
-- The customer VM never calls `podman build`, `podman pull`, a vendor downloader, or an enabled public package repository.
-- The first release targets `linux/amd64`; the accepted host names are `x86_64` and `amd64`.
-- The bundle is `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` plus `.sha256`; its image tag is `sdcli-autokit:<version>`.
-- Versions match `[A-Za-z0-9._-]+`; manifest and lock files are parsed as data, never sourced or evaluated.
-- Customer packages stay in a directory outside the release bundle; only a read-only bind mount exposes them to the container.
-- Persistent mounts are `sdcli-autokit_data:/u01/data` and `sdcli-autokit_log:/u01/log`; no mount covers `/u01/app`.
-- No script deletes or silently replaces a customer container, image, volume, RPM, or migration output.
-- A package inventory, notices, and license review are required before an image is handed to a customer.
+- Customer VM: Linux/amd64 with Podman; no image build, registry pull, vendor download, or enabled package repository.
+- Do not put Oracle SQL Developer, Oracle Instant Client, `msodbcsql18`, or `mssql-tools18` in the distributed image or tarball.
+- Customer RPMs stay in a separate directory mounted read-only at `/vendor-rpms`; no script uploads them.
+- Preserve `/u01/data` and `/u01/log` in separate volumes. Never mount over `/u01/app` or silently delete/replace a container or volume.
+- Keep official customer-download links and tested RPM versions in the README. Do not claim all versions are legally barred from redistribution.
 
 ## Review Focus
 
-- Missing, duplicate, extra, malformed, symlinked, or checksum-mismatched customer RPMs fail before `podman load` or container creation.
-- A forged lock or manifest with shell syntax or unsafe paths is rejected without execution.
-- A container with another image or package fingerprint is preserved and produces an actionable error.
-- Local RPM installation fails when dependencies are missing; it never enables repositories or silently downloads them.
-- A complete image and bundle scan finds no four-family vendor payload, even when build context contains an unrelated local RPM.
+- A missing RPM, wrong architecture, or unsatisfied dependency produces a clear local failure, not a download.
+- A different existing container image is left alone with instructions for operator-controlled replacement.
+- A failed install cannot be reported as a ready migration environment.
+- The exported image and tarball contain no customer-supplied Oracle/Microsoft payloads.
+- The bundle checksum and offline `podman load` work after transfer to another machine.
 
 ---
 
-### Task 1: Pin and validate customer package inputs
+### Task 1: Run with customer RPMs and no network downloads
 
 **Files:**
-- Create: `release/vendor-artifacts.lock`
-- Create: `deployment/check-vendor-artifacts.sh`
-- Create: `tests/lib/test_helpers.sh`
-- Create: `tests/deployment/test_vendor_precheck.sh`
-- Create: `tests/run.sh`
-- Modify: `.gitignore`
+- Modify: `deployment/run.sh`, `deployment/start.sh`, `deployment/.env`
+- Create: `deployment/install-vendor.sh`, `tests/test_offline_run.sh`
 
 **Interfaces:**
-- Consumes: `deployment/check-vendor-artifacts.sh --validate-lock <lock-file>` on the release host, or `deployment/check-vendor-artifacts.sh <lock-file> <absolute-artifact-directory>` on the customer host; the latter uses `sha256sum`, `rpm -qp`, and customer files.
-- Produces: strict lock validation in either mode, and a SHA-256 fingerprint of the exact sorted lock rows on stdout when customer files pass; no mutations. Each tab-separated lock row is `role<TAB>rpm_name<TAB>version_release<TAB>arch<TAB>filename<TAB>sha256`.
+- Consumes: a local image tagged `sdcli-autokit:<version>`, a plain `VERSION` file in the bundle root, and `deployment/run.sh --vendor-dir <absolute-directory> --accept-microsoft-eula`.
+- Produces: a running container with working `sdcli`, `sqlcmd`, `bcp`, `sqlplus`, and `sqlldr`; `start.sh`/`stop.sh` control it afterward.
 
-- [ ] **Step 1: Add failing precheck tests**
+- [ ] **Step 1: Write a failing run test.** Use a fixture `VERSION` and fake Podman/RPM/DNF commands to cover absent image or directory, missing required RPM filenames before container creation, wrong RPM architecture after mounting, missing EULA acknowledgement, read-only mount, narrow data/log volumes, and image mismatch on an existing container. Assert no `wget`, `curl`, `podman pull`, `podman build`, or enabled repository path is used. Assert a failed local install stops the container and does not report readiness.
+- [ ] **Step 2: Run `bash tests/test_offline_run.sh`.** Expected: FAIL because `run.sh` still downloads SQL Developer/jTDS and mounts over `/u01`.
+- [ ] **Step 3: Add the local installer.** In `install-vendor.sh`, inspect every staged RPM header, require SQL Developer, Instant Client Basic/SQL*Plus/Tools, `msodbcsql18`, and `mssql-tools18`, and reject other architectures. Reuse the existing SQL Developer RPM extraction into `SD_HOME`. Install the other RPMs and staged dependencies using only local paths and `dnf --disablerepo='*'`, passing Microsoft's EULA setting only after the operator's flag. Fail with the DNF error if offline dependencies are missing.
+- [ ] **Step 4: Update `run.sh` and configuration.** Read `VERSION` as a simple validated value to choose the loaded image; retain `.env` for existing settings but remove download URLs. Check for the six expected RPM filenames before container creation, then mount `/vendor-rpms` read-only and separate `/u01/data` and `/u01/log` volumes. Invoke the installer for a new or incomplete same-version container, remove first-run downloads, keep the existing script-copy/preferences behavior, and check the tool binaries. Stop the container if installation fails. Refuse another image version; never auto-remove it. Point `start.sh` at `run.sh` when a container is missing.
+- [ ] **Step 5: Run `bash tests/test_offline_run.sh && git diff --check`.** Expected: PASS. Then test with real RPMs on an isolated Linux/amd64 Podman VM; record any package-layout or dependency correction instead of guessing it from fixtures.
+- [ ] **Step 6: Commit the offline-run change.** Commit only the files from this task.
 
-Test the six required roles `sqldeveloper`, `instantclient-basic`, `instantclient-sqlplus`, `instantclient-tools`, `msodbcsql18`, and `mssql-tools18`. Assert `--validate-lock` works without RPM files but rejects incomplete or malformed locks. Use fixture RPM headers through a fake `rpm -qp --queryformat` command for customer mode. Assert acceptance of an exact set and rejection of missing, duplicate, extra, zero-length, symlinked, wrong-name, wrong-version, wrong-architecture, or wrong-hash files. Include shell metacharacters and `../` in lock fields and assert that no supplied text executes. Assert no Podman call occurs in a failing precheck.
-
-- [ ] **Step 2: Verify the tests fail on the absent script**
-
-Run: `bash tests/deployment/test_vendor_precheck.sh`
-
-Expected: FAIL because the validator does not exist.
-
-- [ ] **Step 3: Implement the strict validator and test runner**
-
-`check-vendor-artifacts.sh` accepts only the six known roles plus explicitly locked dependency rows; rejects empty/duplicate fields, comments that mask required rows, unsafe filenames, and non-lowercase 64-character hashes. In customer mode it also validates the RPM header for every locked row and prints only the package-set fingerprint. The program never uses `source` or `eval`. `tests/run.sh` runs `bash -n`, the shell test files, and `shellcheck` when available. Add ignore rules so customer artifacts and `dist/` cannot enter git.
-
-- [ ] **Step 4: Pin the release package set**
-
-Choose the supported SQL Developer, Instant Client, Microsoft ODBC, and Microsoft tools RPM versions using the vendor pages in `README.md`. Capture exact filenames and verified SHA-256 values in `release/vendor-artifacts.lock`; inspect `rpm -qp` name, version-release, and architecture for each. If approved inputs are unavailable, leave the lock unfilled and make the release script fail closed; record that a real release cannot be produced yet. Do not invent hashes or copy customer RPMs into the repository.
-
-- [ ] **Step 5: Verify and commit**
-
-Run: `bash tests/deployment/test_vendor_precheck.sh && bash tests/run.sh`
-
-Expected: PASS for all fixture cases. Commit: `git add .gitignore release/vendor-artifacts.lock deployment/check-vendor-artifacts.sh tests && git commit -m "feat: validate customer vendor artifacts"`.
-
-### Task 2: Build a runner image without proprietary packages
+### Task 2: Build and export the small offline bundle
 
 **Files:**
-- Create: `.dockerignore`
-- Modify: `deployment/Dockerfile`
-- Modify: `deployment/build.sh`
-- Modify: `deployment/.env`
-- Modify: `.gitignore`
-- Create: `tests/deployment/test_runner_image.sh`
+- Modify: `deployment/Dockerfile`, `deployment/build.sh`, `.gitignore`
+- Create: `release/build-offline.sh`, `tests/test_offline_bundle.sh`
 
 **Interfaces:**
-- Consumes: `deployment/build.sh [image-tag]`, `RELEASE_VERSION`, `VCS_REF`, approved `jtds-1.3.1.jar` input and its pinned release-side SHA-256, and the repository's scripts.
-- Produces: local `sdcli-autokit:<version>` image with open-source runtime, jTDS, immutable scripts, RPM/DNF local-install capability, and no four-family vendor payload.
+- Consumes: `release/build-offline.sh <version>` on a connected Linux/amd64 Podman host.
+- Produces: `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` and its `.sha256`. The tarball has `image.tar`, `VERSION`, `README.md`, `sdcli-scripts/`, and only `deployment/.env`, `run.sh`, `start.sh`, `stop.sh`, and `install-vendor.sh` under `deployment/`.
 
-- [ ] **Step 1: Add failing image-contract tests**
+- [ ] **Step 1: Write a failing bundle test.** With a fake Podman command, assert that the version becomes image tag `sdcli-autokit:<version>`, `podman save` creates `image.tar`, the tarball has the named files, and the checksum verifies. Assert invalid versions and an existing output fail without overwriting it. Stage an unrelated RPM in the source tree and assert it is excluded from the tarball. Check that Dockerfile no longer installs Oracle Instant Client or Microsoft packages.
+- [ ] **Step 2: Run `bash tests/test_offline_bundle.sh`.** Expected: FAIL against the current build script and missing release script.
+- [ ] **Step 3: Implement the build/export path.** Keep the existing Dockerfile runtime, remove proprietary package/repository steps, and obtain jTDS during this connected build instead of at customer startup. Check jTDS distribution terms and retain required notices before publication; if it cannot be included, change the spec to make it customer supplied. Make `build.sh` accept a versioned tag and stop creating volumes. Make `build-offline.sh` validate a simple version string, build, `podman save`, stage only the named files and tracked `sdcli-scripts` files, archive them, and write the checksum. Do not add a manifest, lockfile, cloud uploader, scanner, or signing framework.
+- [ ] **Step 4: Run `bash tests/test_offline_bundle.sh && git diff --check`.** Expected: PASS. On a real build host, inspect the saved image for the four excluded package families; the fake test does not prove image contents.
+- [ ] **Step 5: Commit the build/export change.** Commit only the files from this task.
 
-Use fake Podman to assert build context is the repo root, the image tag and OCI labels are passed, required jTDS/script files are copied, and no vendor RPM is copied. Assert `.dockerignore` allowlists only the Dockerfile, jTDS input, and release-ready `sdcli-scripts/` contents, so a staged vendor RPM and other untracked files are excluded. Scan Dockerfile commands for Microsoft/Oracle vendor repo setup and `dnf install` of proprietary packages. Assert the build fails if jTDS input or its verified hash is absent. Assert no runtime volume is created by `build.sh`.
-
-- [ ] **Step 2: Verify the test fails against the current Dockerfile**
-
-Run: `bash tests/deployment/test_runner_image.sh`
-
-Expected: FAIL on existing Microsoft and Instant Client build steps.
-
-- [ ] **Step 3: Update the image and build script**
-
-Remove Microsoft repository/install and Instant Client repository/install commands. Keep `java-17-openjdk`, `unixODBC`, `rpm`, `dnf`, local RPM dependencies, `jq`, and other needed open-source packages. Copy the approved jTDS JAR to `/u01/app/jtds-1.3.1.jar` and scripts to `/home/sduser/sdcli-autokit-release`. Add a root `.dockerignore` allowlist for exactly those required build inputs. Retain customer-installed tool paths in `PATH`, but do not create fake binaries. Add version/revision labels. Make `build.sh` use `deployment/Dockerfile` with repo-root context and create no volumes. Replace `VOLUME_NAME` in `.env` with `DATA_VOLUME_NAME` and `LOG_VOLUME_NAME`; remove `SD_RPM_URL`, `JTDS_URL`, and `ARTIFACT_DIR` from runtime configuration.
-
-- [ ] **Step 4: Check actual image contents and commit**
-
-Run: `bash tests/deployment/test_runner_image.sh && bash tests/run.sh`
-
-Expected: PASS. On a Podman-equipped build host, run `podman run --rm <tag> rpm -qa` and inspect a saved OCI archive's layer tar entries to confirm the four families are absent from both the final filesystem and image history. Record the result. Commit: `git add .gitignore .dockerignore deployment/Dockerfile deployment/build.sh deployment/.env tests && git commit -m "feat: build vendor-free runner image"`.
-
-### Task 3: Install customer RPMs locally and run the container
-
-**Files:**
-- Create: `deployment/install-vendor.sh`
-- Create: `deployment/install-offline.sh`
-- Modify: `deployment/run.sh`
-- Modify: `deployment/start.sh`
-- Create: `tests/deployment/test_offline_install.sh`
-
-**Interfaces:**
-- Consumes: extracted bundle containing `manifest.env`, `vendor-artifacts.lock`, `image.oci.tar`; `install-offline.sh --artifacts <absolute-directory> --accept-microsoft-eula`; Task 1 precheck; local Podman.
-- Produces: a version-matched running container with the artifact directory mounted `/vendor-artifacts:ro,Z`, persistent data/log volumes, a local installation fingerprint, and successful `sdcli`, `sqlcmd`, `bcp`, `sqlplus`, `sqlldr`, `jq`, `yq`, and jTDS checks.
-
-- [ ] **Step 1: Add failing installer tests**
-
-Use fake Podman/RPM commands to assert precheck and explicit Microsoft EULA acknowledgement occur before any `podman load`, volume create, or run. Assert load uses `podman load -i image.oci.tar`, image architecture is checked, the artifact bind mount is read-only, data/log mounts are narrow, and the container is not started for migrations until local package install succeeds. Cover repeat install with identical fingerprint, conflicting image/fingerprint, wrong architecture, corrupt archive, partial local package install, and missing files. Assert no `podman build`, `podman pull`, download command, or enabled repo is invoked.
-
-- [ ] **Step 2: Verify installer tests fail**
-
-Run: `bash tests/deployment/test_offline_install.sh`
-
-Expected: FAIL because the offline installer is absent and `run.sh` downloads tools.
-
-- [ ] **Step 3: Implement manifest and image validation**
-
-In `install-offline.sh`, parse exactly `BUNDLE_VERSION`, `IMAGE_NAME`, `IMAGE_ARCH`, `IMAGE_ARCHIVE`, and `IMAGE_ARCHIVE_SHA256` as data. Require `IMAGE_NAME=sdcli-autokit:<version>`, `IMAGE_ARCH=amd64`, and `IMAGE_ARCHIVE=image.oci.tar`; reject duplicates, unknown keys, shell syntax, and unsafe values. Require the explicit `--accept-microsoft-eula` flag, then verify archive hash, host architecture, and Task 1 package precheck before Podman mutation.
-
-- [ ] **Step 4: Implement local vendor installation**
-
-Inspect the chosen RPM payload paths and dependencies with `rpm -qpl`/`rpm -qpR` on the approved packages. Install all locked files inside the customer container with repository access disabled, for example `dnf --disablerepo='*' --setopt=install_weak_deps=False install <explicit staged RPM paths>`; pass Microsoft's EULA acceptance only after the customer explicitly acknowledges its terms. Adapt the SQL Developer extraction/configuration to the exact RPM layout and set Java 17. Record the package-set fingerprint after all tools pass. If a selected RPM cannot install without an unstaged dependency, add that dependency to the lock and precheck, then rerun the failing test.
-
-- [ ] **Step 5: Update Podman lifecycle scripts**
-
-`run.sh` checks local image/container identity, creates only data/log volumes, mounts the customer directory read-only, runs `install-vendor.sh` as container root, copies editable scripts, and fails hard on missing tool checks. Remove SQL Developer/jTDS downloads. Reuse a container only when image and recorded package fingerprint match. Update `start.sh` guidance for a missing container; keep `stop.sh` unchanged unless testing finds a concrete issue.
-
-- [ ] **Step 6: Verify and commit**
-
-Run: `bash tests/deployment/test_offline_install.sh && bash tests/run.sh`
-
-Expected: PASS. Commit: `git add deployment/install-vendor.sh deployment/install-offline.sh deployment/run.sh deployment/start.sh tests && git commit -m "feat: install customer packages offline"`.
-
-### Task 4: Package and verify the transport-neutral release
-
-**Files:**
-- Create: `release/build-offline-bundle.sh`
-- Create: `release/verify-offline-bundle.sh`
-- Create: `tests/deployment/test_release_bundle.sh`
-- Modify: `.gitignore`
-
-**Interfaces:**
-- Consumes: `release/build-offline-bundle.sh <version> [--force]`, reviewed `release/vendor-artifacts.lock`, local runner image, approved jTDS input, project scripts.
-- Produces: `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` plus `.sha256`; `release/verify-offline-bundle.sh <bundle.tar.gz>` validates the pair and archive contents without a cloud CLI.
-
-- [ ] **Step 1: Add failing release and verification tests**
-
-Assert rejection of empty/unsafe versions, incomplete lock, a sample `config.yaml` containing literal credentials, existing output without `--force`, checksum mismatch, traversal/symlink tar members, missing bundle entries, and any vendor RPM or installed vendor payload in a staged bundle. Assert the same bundle verifies after copying it to an unrelated directory. Test that `manifest.env` contains only the five defined keys and the OCI archive uses the versioned image tag.
-
-- [ ] **Step 2: Verify release tests fail**
-
-Run: `bash tests/deployment/test_release_bundle.sh`
-
-Expected: FAIL because release scripts are absent.
-
-- [ ] **Step 3: Implement release build and verification**
-
-Run `bash tests/run.sh`; require the reviewed lock; build/tag the runner; inspect the final image and saved OCI layers for forbidden packages and paths; generate `sbom.json` from the actual image with an approved scanner; require reviewed `THIRD_PARTY_NOTICES.md` and the image-inventory signoff before publication; stage only the documented deployment/scripts/lock files, SBOM, and notices; generate a strict manifest; tar the versioned directory; write the outer checksum; and publish both files atomically to `dist/`. `verify-offline-bundle.sh` checks the adjacent checksum, safe member types/paths, exact root, required files, and absence of vendor payloads. No cloud CLI or customer artifact path is used by either script.
-
-- [ ] **Step 4: Verify and commit**
-
-Run: `bash tests/deployment/test_release_bundle.sh && bash tests/run.sh && git diff --check`
-
-Expected: PASS. Commit: `git add .gitignore release/build-offline-bundle.sh release/verify-offline-bundle.sh tests && git commit -m "feat: package vendor-free offline runner"`.
-
-### Task 5: Reconcile documentation, license debt, and acceptance evidence
+### Task 3: Document and smoke-test the handoff
 
 **Files:**
 - Modify: `README.md`
-- Modify: `.gitignore`
-- Create: `docs/offline-release-runbook.md`
-- Create: `docs/license-review-debt.md`
-- Create: `tests/deployment/test_offline_boundary.sh`
 
 **Interfaces:**
-- Consumes: Tasks 1–4 and the approved vendor package set.
-- Produces: truthful release and customer instructions, official vendor links, transport examples, explicit open license-review work, and clean-VM acceptance evidence.
+- Consumes: Tasks 1 and 2 plus the RPM versions actually tested on an isolated VM.
+- Produces: copyable maintainer/customer commands and honest acceptance notes.
 
-- [ ] **Step 1: Add the offline-boundary test**
+- [ ] **Step 1: Update README.** Replace the “planned workflow” wording only after the scripts exist. Show build, checksum verification, extraction, `podman load`, vendor RPM placement, `run.sh`, start/stop, and manual container replacement commands. Keep official vendor links and state the exact RPM versions tested together. Say any cloud or on-premises transfer method may carry the same tarball and checksum; do not add provider-specific scripts.
+- [ ] **Step 2: Verify the actual handoff.** Build and inspect the image on a connected host. Check bundled `config.yaml` for customer-specific values, and check jTDS and other software notices before distribution. Transfer the tarball/checksum to a clean isolated VM, verify checksum, load, install from customer RPMs, run the tool health checks and a migration smoke test, and confirm data/logs survive stop/start. Record which checks ran and which remain unverified.
+- [ ] **Step 3: Run `bash tests/test_offline_run.sh && bash tests/test_offline_bundle.sh && git diff --check`.** Expected: PASS. Commit the README change.
 
-Assert that the release bundle excludes all customer RPMs, the README describes `--artifacts` and `--accept-microsoft-eula`, and runtime scripts cannot download vendor packages or pull an image. Check that the README vendor links and the lock roles match the installer contract. Run the test and observe failure until docs and scripts align.
+## Completion check
 
-- [ ] **Step 2: Update README and runbook**
-
-Replace the README's “planned workflow” caveat when the installer exists. Give exact release, verification, artifact precheck, and install commands. Keep official Oracle SQL Developer, Oracle Instant Client, and Microsoft offline package links; explain that the customer obtains the exact versions named in `vendor-artifacts.lock` and provides any locked dependencies. Provide transfer examples for Azure Blob, Amazon S3, Google Cloud Storage, OCI Object Storage, on-premises shares, SCP/SFTP, and removable media, always transferring the same bundle/checksum pair. Explain upgrade and rollback without automatic deletion.
-
-- [ ] **Step 3: Record license-review debt**
-
-Document the exact-version legal review still needed for Oracle SQL Developer, Instant Client, Microsoft ODBC, and Microsoft tools. Note that newer SQL Developer releases may use Oracle Free Use terms while older releases may have different terms; do not declare all versions nonredistributable. Explain how the Task 4 SBOM, notices, and source offers for Oracle Linux, Java, OS packages, `yq`, jTDS, and transitive components are reviewed. Record the review owner/status and the runner-image inventory signoff required before publication.
-
-- [ ] **Step 4: Verify and exercise on real hosts**
-
-Run: `bash tests/run.sh && git diff --check && git diff --check main...HEAD`
-
-Expected: PASS. On an approved release host, build and inspect the real image and verify that proprietary packages are absent. On an isolated Podman VM, stage the exact customer RPMs, run the precheck and installer, verify every executable, and confirm data/log persistence across stop/start and operator-controlled container replacement. Repeat bundle transfer through at least one cloud and one on-premises/physical method. Record results and any unavailable environment as unverified rather than claiming acceptance.
-
-- [ ] **Step 5: Commit documentation and tests**
-
-Commit: `git add .gitignore README.md docs/offline-release-runbook.md docs/license-review-debt.md tests && git commit -m "docs: describe customer-supplied offline installation"`.
-
-## Final verification
-
-- [ ] `git diff --check main...HEAD` reports no whitespace errors.
-- [ ] `bash tests/run.sh` passes all meaningful shell tests; `shellcheck` has no errors when installed.
-- [ ] The final image and bundle inventory contain no four-family vendor RPM or installed payload.
-- [ ] `git status --short` has no unexpected changes, and no customer RPM is tracked.
-- [ ] Actual Linux/Podman and transfer acceptance results are recorded; missing external access is reported as a remaining validation gap.
+- [ ] The real image and tarball have no customer-supplied Oracle/Microsoft packages.
+- [ ] The customer VM can verify, load, install, and run without a registry or software-repository connection.
+- [ ] README commands match the shipped files, and untested steps are labeled unverified.
