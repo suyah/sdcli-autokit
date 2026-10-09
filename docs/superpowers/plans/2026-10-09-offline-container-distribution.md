@@ -2,351 +2,220 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Produce a versioned, checksummed `sdcli-autokit` bundle that can be transferred unchanged through any cloud or on-premises channel and that a registry-isolated customer VM can verify, load, and run with Podman without building or downloading software.
+**Goal:** Ship a portable, versioned runner image without Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver 18, or Microsoft `mssql-tools18`, then install those packages from customer-owned files on an isolated VM.
 
-**Architecture:** Bake SQL Developer, jTDS, and the migration scripts into the image during the trusted release build, then export the tagged image as an OCI archive inside a provider-neutral customer bundle. Keep immutable tools below `/u01/app`, mount only data and log volumes, and give the customer strict verification and installation scripts that work regardless of whether the files arrived through Azure, AWS, GCP, OCI, an on-premises service, a file share, or removable media.
+**Architecture:** A trusted release host builds an OCI image containing the approved base/runtime and project scripts. A reviewed lock file pins the customer-supplied RPMs; the customer installer validates them before mutation, mounts their directory read-only, installs locally with repositories disabled, and checks the running tools. The bundle and checksum work with cloud, on-premises, or physical transfer.
 
-**Tech Stack:** Bash, Podman, OCI image archive, Dockerfile, SHA-256, tar/gzip, provider CLI examples, fake-command shell tests
+**Tech Stack:** Bash, Oracle Linux 9, Podman, RPM/DNF offline installation, OCI archive, SHA-256, tar/gzip, shell tests with fake commands
 
 **Spec:** `docs/superpowers/specs/2026-10-09-offline-container-distribution-design.md`
 
 ## Global Constraints
 
-- The customer runtime path must not call `podman build`, `podman pull`, `curl`, `wget`, `dnf`, or any public package repository.
-- The first supported platform is exactly `linux/amd64`; accept host machine names `x86_64` and `amd64` and reject all others.
-- The release bundle is `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` with checksum file `dist/sdcli-autokit-<version>-linux-amd64.tar.gz.sha256`.
-- The authoritative image tag is `sdcli-autokit:<version>`; version values are restricted to `[A-Za-z0-9._-]+`.
-- Immutable tools remain under `/u01/app`; only `sdcli-autokit_data:/u01/data` and `sdcli-autokit_log:/u01/log` are persistent mounts.
-- Customer configuration, database passwords, cloud credentials, signed URLs, access tokens, private endpoint details, migration output, and logs must never be added to an image layer or release manifest.
-- Parse `manifest.env` as an allowlisted data format; never execute it with `source`, `.`, or `eval`.
-- Installation and release scripts must not delete or silently replace images, containers, volumes, bundles, logs, or migration data.
-- Software redistribution must be approved before upload; release automation must not make the bundle public.
+- The released image and `.tar.gz` contain no SQL Developer, Oracle Instant Client, `msodbcsql18`, or `mssql-tools18` payloads or RPMs.
+- The customer VM never calls `podman build`, `podman pull`, a vendor downloader, or an enabled public package repository.
+- The first release targets `linux/amd64`; the accepted host names are `x86_64` and `amd64`.
+- The bundle is `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` plus `.sha256`; its image tag is `sdcli-autokit:<version>`.
+- Versions match `[A-Za-z0-9._-]+`; manifest and lock files are parsed as data, never sourced or evaluated.
+- Customer packages stay in a directory outside the release bundle; only a read-only bind mount exposes them to the container.
+- Persistent mounts are `sdcli-autokit_data:/u01/data` and `sdcli-autokit_log:/u01/log`; no mount covers `/u01/app`.
+- No script deletes or silently replaces a customer container, image, volume, RPM, or migration output.
+- A package inventory, notices, and license review are required before an image is handed to a customer.
 
 ## Review Focus
 
-- A crafted manifest containing shell syntax, duplicate keys, unknown keys, or path traversal must be rejected as data by Task 2 tests, never executed.
-- An existing same-named container using a different image must remain unchanged and cause an actionable Task 2 failure.
-- A partial, corrupt, or checksum-mismatched software artifact, OCI archive, or outer bundle must fail before use in Tasks 1–3.
-- Release versions with whitespace, slashes, shell metacharacters, or an empty value must be rejected by Task 3 before filesystem or Podman mutations.
-- The build, verification, and installation scripts must have no dependency on Azure, AWS, GCP, OCI, or an on-premises product; provider credentials and endpoints must not appear in generated output, manifests, or repository files, as tested in Task 4.
+- Missing, duplicate, extra, malformed, symlinked, or checksum-mismatched customer RPMs fail before `podman load` or container creation.
+- A forged lock or manifest with shell syntax or unsafe paths is rejected without execution.
+- A container with another image or package fingerprint is preserved and produces an actionable error.
+- Local RPM installation fails when dependencies are missing; it never enables repositories or silently downloads them.
+- A complete image and bundle scan finds no four-family vendor payload, even when build context contains an unrelated local RPM.
 
 ---
 
-### Task 1: Build a self-contained image
+### Task 1: Pin and validate customer package inputs
 
 **Files:**
+- Create: `release/vendor-artifacts.lock`
+- Create: `deployment/check-vendor-artifacts.sh`
+- Create: `tests/lib/test_helpers.sh`
+- Create: `tests/deployment/test_vendor_precheck.sh`
+- Create: `tests/run.sh`
 - Modify: `.gitignore`
+
+**Interfaces:**
+- Consumes: `deployment/check-vendor-artifacts.sh --validate-lock <lock-file>` on the release host, or `deployment/check-vendor-artifacts.sh <lock-file> <absolute-artifact-directory>` on the customer host; the latter uses `sha256sum`, `rpm -qp`, and customer files.
+- Produces: strict lock validation in either mode, and a SHA-256 fingerprint of the exact sorted lock rows on stdout when customer files pass; no mutations. Each tab-separated lock row is `role<TAB>rpm_name<TAB>version_release<TAB>arch<TAB>filename<TAB>sha256`.
+
+- [ ] **Step 1: Add failing precheck tests**
+
+Test the six required roles `sqldeveloper`, `instantclient-basic`, `instantclient-sqlplus`, `instantclient-tools`, `msodbcsql18`, and `mssql-tools18`. Assert `--validate-lock` works without RPM files but rejects incomplete or malformed locks. Use fixture RPM headers through a fake `rpm -qp --queryformat` command for customer mode. Assert acceptance of an exact set and rejection of missing, duplicate, extra, zero-length, symlinked, wrong-name, wrong-version, wrong-architecture, or wrong-hash files. Include shell metacharacters and `../` in lock fields and assert that no supplied text executes. Assert no Podman call occurs in a failing precheck.
+
+- [ ] **Step 2: Verify the tests fail on the absent script**
+
+Run: `bash tests/deployment/test_vendor_precheck.sh`
+
+Expected: FAIL because the validator does not exist.
+
+- [ ] **Step 3: Implement the strict validator and test runner**
+
+`check-vendor-artifacts.sh` accepts only the six known roles plus explicitly locked dependency rows; rejects empty/duplicate fields, comments that mask required rows, unsafe filenames, and non-lowercase 64-character hashes. In customer mode it also validates the RPM header for every locked row and prints only the package-set fingerprint. The program never uses `source` or `eval`. `tests/run.sh` runs `bash -n`, the shell test files, and `shellcheck` when available. Add ignore rules so customer artifacts and `dist/` cannot enter git.
+
+- [ ] **Step 4: Pin the release package set**
+
+Choose the supported SQL Developer, Instant Client, Microsoft ODBC, and Microsoft tools RPM versions using the vendor pages in `README.md`. Capture exact filenames and verified SHA-256 values in `release/vendor-artifacts.lock`; inspect `rpm -qp` name, version-release, and architecture for each. If approved inputs are unavailable, leave the lock unfilled and make the release script fail closed; record that a real release cannot be produced yet. Do not invent hashes or copy customer RPMs into the repository.
+
+- [ ] **Step 5: Verify and commit**
+
+Run: `bash tests/deployment/test_vendor_precheck.sh && bash tests/run.sh`
+
+Expected: PASS for all fixture cases. Commit: `git add .gitignore release/vendor-artifacts.lock deployment/check-vendor-artifacts.sh tests && git commit -m "feat: validate customer vendor artifacts"`.
+
+### Task 2: Build a runner image without proprietary packages
+
+**Files:**
+- Create: `.dockerignore`
 - Modify: `deployment/Dockerfile`
 - Modify: `deployment/build.sh`
 - Modify: `deployment/.env`
-- Create: `deployment/artifacts/README.md`
-- Create: `tests/lib/test_helpers.sh`
-- Create: `tests/deployment/test_image_build.sh`
-- Create: `tests/run.sh`
+- Modify: `.gitignore`
+- Create: `tests/deployment/test_runner_image.sh`
 
 **Interfaces:**
-- Consumes: `deployment/artifacts/sqldeveloper.rpm`, `deployment/artifacts/jtds-1.3.1.jar`, optional `IMAGE_NAME`, `RELEASE_VERSION`, and `VCS_REF` environment values.
-- Produces: `deployment/build.sh [image_name]`, which builds from the repository root using `deployment/Dockerfile`; a complete local image containing `/u01/app/sqldeveloper/sqldeveloper/bin/sdcli`, `/u01/app/jtds-1.3.1.jar`, and `/home/sduser/sdcli-autokit-release/migrate.sh`; `tests/run.sh`, the repository test entry point.
+- Consumes: `deployment/build.sh [image-tag]`, `RELEASE_VERSION`, `VCS_REF`, approved `jtds-1.3.1.jar` input and its pinned release-side SHA-256, and the repository's scripts.
+- Produces: local `sdcli-autokit:<version>` image with open-source runtime, jTDS, immutable scripts, RPM/DNF local-install capability, and no four-family vendor payload.
 
-- [ ] **Step 1: Add failing build-contract tests**
+- [ ] **Step 1: Add failing image-contract tests**
 
-In `tests/deployment/test_image_build.sh`, use a temporary fake `podman` on `PATH` and assert:
+Use fake Podman to assert build context is the repo root, the image tag and OCI labels are passed, required jTDS/script files are copied, and no vendor RPM is copied. Assert `.dockerignore` allowlists only the Dockerfile, jTDS input, and release-ready `sdcli-scripts/` contents, so a staged vendor RPM and other untracked files are excluded. Scan Dockerfile commands for Microsoft/Oracle vendor repo setup and `dnf install` of proprietary packages. Assert the build fails if jTDS input or its verified hash is absent. Assert no runtime volume is created by `build.sh`.
 
-- missing SQL Developer or jTDS input fails before `podman` is called and names the missing path;
-- `deployment/build.sh sdcli-autokit:1.2.3` invokes `podman build --file <repo>/deployment/Dockerfile --tag sdcli-autokit:1.2.3 <repo>`;
-- the command supplies `RELEASE_VERSION` and `VCS_REF` build arguments;
-- build does not create a volume;
-- the Dockerfile copies the two artifacts and `sdcli-scripts/`, verifies `sdcli`, and contains no first-run installer command.
+- [ ] **Step 2: Verify the test fails against the current Dockerfile**
 
-Add reusable `fail`, `assert_eq`, `assert_contains`, `assert_not_contains`, and isolated fake-command helpers to `tests/lib/test_helpers.sh`. Add `tests/run.sh` to run `bash -n` on tracked shell scripts, execute each `tests/deployment/test_*.sh`, and run `shellcheck` when installed.
+Run: `bash tests/deployment/test_runner_image.sh`
 
-- [ ] **Step 2: Run the new tests and verify the expected failure**
+Expected: FAIL on existing Microsoft and Instant Client build steps.
 
-Run: `bash tests/deployment/test_image_build.sh`
+- [ ] **Step 3: Update the image and build script**
 
-Expected: FAIL because artifact validation and repository-root build behavior do not exist.
+Remove Microsoft repository/install and Instant Client repository/install commands. Keep `java-17-openjdk`, `unixODBC`, `rpm`, `dnf`, local RPM dependencies, `jq`, and other needed open-source packages. Copy the approved jTDS JAR to `/u01/app/jtds-1.3.1.jar` and scripts to `/home/sduser/sdcli-autokit-release`. Add a root `.dockerignore` allowlist for exactly those required build inputs. Retain customer-installed tool paths in `PATH`, but do not create fake binaries. Add version/revision labels. Make `build.sh` use `deployment/Dockerfile` with repo-root context and create no volumes. Replace `VOLUME_NAME` in `.env` with `DATA_VOLUME_NAME` and `LOG_VOLUME_NAME`; remove `SD_RPM_URL`, `JTDS_URL`, and `ARTIFACT_DIR` from runtime configuration.
 
-- [ ] **Step 3: Expose only safe new paths through `.gitignore`**
+- [ ] **Step 4: Check actual image contents and commit**
 
-Allow `release/` and `tests/`, ignore `dist/`, ignore every file under `deployment/artifacts/`, and re-include only `deployment/artifacts/README.md`. The artifact README must list the exact required filenames and state that licensed binaries must never be committed.
+Run: `bash tests/deployment/test_runner_image.sh && bash tests/run.sh`
 
-- [ ] **Step 4: Make `deployment/Dockerfile` self-contained at runtime**
+Expected: PASS. On a Podman-equipped build host, run `podman run --rm <tag> rpm -qa` and inspect a saved OCI archive's layer tar entries to confirm the four families are absent from both the final filesystem and image history. Record the result. Commit: `git add .gitignore .dockerignore deployment/Dockerfile deployment/build.sh deployment/.env tests && git commit -m "feat: build vendor-free runner image"`.
 
-Keep all existing package installation on the release/build side. Add `ARG RELEASE_VERSION` and `ARG VCS_REF` plus OCI labels. Copy and extract `deployment/artifacts/sqldeveloper.rpm` during the image build using the current RPM extraction method, set `product.conf` to Java 17, copy jTDS to `/u01/app/jtds-1.3.1.jar`, and copy `sdcli-scripts/` to `/home/sduser/sdcli-autokit-release/`. Set ownership to `sduser` and fail the build unless `sdcli`, jTDS, and `migrate.sh` are present.
-
-- [ ] **Step 5: Change `deployment/build.sh [image_name]` to build from the repository root**
-
-Resolve `REPO_ROOT`, validate both artifact files before invoking Podman, choose the positional image name before `IMAGE_NAME` from `.env`, require nonempty `RELEASE_VERSION` and `VCS_REF` values with development-safe defaults, and call:
-
-```text
-podman build --file <repo>/deployment/Dockerfile --tag <image> \
-  --build-arg ... --build-arg RELEASE_VERSION=... --build-arg VCS_REF=... <repo>
-```
-
-Remove volume creation from this script. Keep the current user, UID/GID, home, and tool-path build arguments.
-
-- [ ] **Step 6: Update default deployment settings**
-
-In `deployment/.env`, replace `VOLUME_NAME` with:
-
-```text
-DATA_VOLUME_NAME=sdcli-autokit_data
-LOG_VOLUME_NAME=sdcli-autokit_log
-```
-
-Keep `IMAGE_NAME=sdcli-autokit:latest` for the maintainer workflow. Remove `SD_RPM_URL`, `JTDS_URL`, and `ARTIFACT_DIR` from `deployment/.env`; Task 3 moves release-side URL and checksum documentation to `release/release.env.example`.
-
-- [ ] **Step 7: Run the build-contract tests**
-
-Run: `bash tests/deployment/test_image_build.sh`
-
-Expected: PASS, including the missing-artifact and fake-Podman cases.
-
-- [ ] **Step 8: Commit Task 1**
-
-```bash
-git add .gitignore deployment/Dockerfile deployment/build.sh deployment/.env deployment/artifacts/README.md tests
-git commit -m "feat: build self-contained migration image"
-```
-
-### Task 2: Make customer installation network-free and idempotent
+### Task 3: Install customer RPMs locally and run the container
 
 **Files:**
+- Create: `deployment/install-vendor.sh`
+- Create: `deployment/install-offline.sh`
 - Modify: `deployment/run.sh`
 - Modify: `deployment/start.sh`
-- Create: `deployment/install-offline.sh`
 - Create: `tests/deployment/test_offline_install.sh`
-- Modify: `tests/run.sh`
 
 **Interfaces:**
-- Consumes: bundle-root `manifest.env`, `image.oci.tar`, `deployment/.env`, and `sdcli-scripts/`; local Podman; existing container and volume state.
-- Produces: `deployment/install-offline.sh` with no arguments when run inside the extracted bundle; network-free `deployment/run.sh`; existing `start.sh` and `stop.sh` lifecycle compatibility.
+- Consumes: extracted bundle containing `manifest.env`, `vendor-artifacts.lock`, `image.oci.tar`; `install-offline.sh --artifacts <absolute-directory> --accept-microsoft-eula`; Task 1 precheck; local Podman.
+- Produces: a version-matched running container with the artifact directory mounted `/vendor-artifacts:ro,Z`, persistent data/log volumes, a local installation fingerprint, and successful `sdcli`, `sqlcmd`, `bcp`, `sqlplus`, `sqlldr`, `jq`, `yq`, and jTDS checks.
 
-- [ ] **Step 1: Add failing offline-install tests**
+- [ ] **Step 1: Add failing installer tests**
 
-In `tests/deployment/test_offline_install.sh`, create a temporary bundle and fake `podman`, `uname`, and `sha256sum` commands. Add named cases asserting:
+Use fake Podman/RPM commands to assert precheck and explicit Microsoft EULA acknowledgement occur before any `podman load`, volume create, or run. Assert load uses `podman load -i image.oci.tar`, image architecture is checked, the artifact bind mount is read-only, data/log mounts are narrow, and the container is not started for migrations until local package install succeeds. Cover repeat install with identical fingerprint, conflicting image/fingerprint, wrong architecture, corrupt archive, partial local package install, and missing files. Assert no `podman build`, `podman pull`, download command, or enabled repo is invoked.
 
-- a valid bundle verifies `image.oci.tar`, loads `sdcli-autokit:1.2.3`, applies the convenience tag `sdcli-autokit:latest` only after successful validation, creates the two volumes, starts the container, and passes health checks;
-- `manifest.env` rejects unknown keys, duplicate keys, shell syntax, missing values, invalid image names, and an `IMAGE_ARCHIVE` containing `/`, `..`, or anything other than `image.oci.tar`;
-- `arm64` is rejected before Podman mutation;
-- a wrong embedded archive checksum is rejected before `podman load`;
-- an existing container using another image fails without `rm`, `rmi`, `volume rm`, or container replacement;
-- rerunning the same version succeeds without loading the archive again;
-- Podman arguments mount only `<data-volume>:/u01/data:Z` and `<log-volume>:/u01/log:Z`, never a volume at `/u01`;
-- the complete customer command log contains none of `build`, `pull`, `curl`, `wget`, or `dnf`.
-
-- [ ] **Step 2: Run the installer tests and verify they fail**
+- [ ] **Step 2: Verify installer tests fail**
 
 Run: `bash tests/deployment/test_offline_install.sh`
 
-Expected: FAIL because `install-offline.sh` does not exist and `run.sh` still performs downloads.
+Expected: FAIL because the offline installer is absent and `run.sh` downloads tools.
 
-- [ ] **Step 3: Remove runtime software acquisition from `deployment/run.sh`**
+- [ ] **Step 3: Implement manifest and image validation**
 
-Delete `SD_RPM_URL`, `JTDS_URL`, `ARTIFACT_DIR`, `install_sd_if_needed`, and `install_jtds_if_needed` runtime behavior. Require `IMAGE_NAME`, `DATA_VOLUME_NAME`, and `LOG_VOLUME_NAME`; fail if the local image is absent; create the two named volumes; mount them at `/u01/data:Z` and `/u01/log:Z`; retain host networking, container reuse, SQL Developer preference configuration, script copy, and local health checks. Add checks for `yq` and the immutable release copy.
+In `install-offline.sh`, parse exactly `BUNDLE_VERSION`, `IMAGE_NAME`, `IMAGE_ARCH`, `IMAGE_ARCHIVE`, and `IMAGE_ARCHIVE_SHA256` as data. Require `IMAGE_NAME=sdcli-autokit:<version>`, `IMAGE_ARCH=amd64`, and `IMAGE_ARCHIVE=image.oci.tar`; reject duplicates, unknown keys, shell syntax, and unsafe values. Require the explicit `--accept-microsoft-eula` flag, then verify archive hash, host architecture, and Task 1 package precheck before Podman mutation.
 
-When a same-named container exists, inspect its image reference. Reuse it only when it matches `IMAGE_NAME`; otherwise print both references and exit without modifying the container.
+- [ ] **Step 4: Implement local vendor installation**
 
-- [ ] **Step 4: Implement strict manifest parsing in `deployment/install-offline.sh`**
+Inspect the chosen RPM payload paths and dependencies with `rpm -qpl`/`rpm -qpR` on the approved packages. Install all locked files inside the customer container with repository access disabled, for example `dnf --disablerepo='*' --setopt=install_weak_deps=False install <explicit staged RPM paths>`; pass Microsoft's EULA acceptance only after the customer explicitly acknowledges its terms. Adapt the SQL Developer extraction/configuration to the exact RPM layout and set Java 17. Record the package-set fingerprint after all tools pass. If a selected RPM cannot install without an unstaged dependency, add that dependency to the lock and precheck, then rerun the failing test.
 
-Resolve the bundle root as the parent of the script's `deployment/` directory. Read `manifest.env` line-by-line without `source`, `.`, command substitution from file content, or `eval`. Accept exactly one value for each of `BUNDLE_VERSION`, `IMAGE_NAME`, `IMAGE_ARCH`, `IMAGE_ARCHIVE`, and `IMAGE_ARCHIVE_SHA256`, reject every other record, and validate:
+- [ ] **Step 5: Update Podman lifecycle scripts**
 
-```text
-BUNDLE_VERSION: [A-Za-z0-9._-]+
-IMAGE_NAME: sdcli-autokit:<BUNDLE_VERSION>
-IMAGE_ARCH: amd64
-IMAGE_ARCHIVE: image.oci.tar
-IMAGE_ARCHIVE_SHA256: 64 lowercase hexadecimal characters
-```
+`run.sh` checks local image/container identity, creates only data/log volumes, mounts the customer directory read-only, runs `install-vendor.sh` as container root, copies editable scripts, and fails hard on missing tool checks. Remove SQL Developer/jTDS downloads. Reuse a container only when image and recorded package fingerprint match. Update `start.sh` guidance for a missing container; keep `stop.sh` unchanged unless testing finds a concrete issue.
 
-Require an `x86_64` or `amd64` host, verify the embedded archive, load only when the versioned image is absent, confirm the image exists, apply the local `sdcli-autokit:latest` convenience tag, set the bundle-local `.env` image tag without accepting arbitrary shell content, invoke `run.sh`, and print the installed version and lifecycle commands.
-
-- [ ] **Step 5: Align lifecycle messages**
-
-Update `deployment/start.sh` so a missing container directs the customer to `./install-offline.sh` for a bundle installation or `./run.sh` for a locally built image. Preserve current start/stop behavior and do not introduce image or volume deletion.
-
-- [ ] **Step 6: Run Task 2 and regression tests**
+- [ ] **Step 6: Verify and commit**
 
 Run: `bash tests/deployment/test_offline_install.sh && bash tests/run.sh`
 
-Expected: PASS. The fake command log contains no customer-side external acquisition command.
+Expected: PASS. Commit: `git add deployment/install-vendor.sh deployment/install-offline.sh deployment/run.sh deployment/start.sh tests && git commit -m "feat: install customer packages offline"`.
 
-- [ ] **Step 7: Commit Task 2**
-
-```bash
-git add deployment/run.sh deployment/start.sh deployment/install-offline.sh tests
-git commit -m "feat: install and run image offline"
-```
-
-### Task 3: Build a reproducible customer bundle
+### Task 4: Package and verify the transport-neutral release
 
 **Files:**
 - Create: `release/build-offline-bundle.sh`
-- Create: `release/release.env.example`
+- Create: `release/verify-offline-bundle.sh`
 - Create: `tests/deployment/test_release_bundle.sh`
-- Modify: `tests/run.sh`
+- Modify: `.gitignore`
 
 **Interfaces:**
-- Consumes: `release/build-offline-bundle.sh <version> [--force]`; `SD_RPM_URL`, `SD_RPM_SHA256`, `JTDS_URL`, and `JTDS_SHA256` environment variables; Git revision; Podman; release-side `curl`, `sha256sum`, `tar`, `gzip`, and `shellcheck`.
-- Produces: `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` and the adjacent `.sha256`; image `sdcli-autokit:<version>`; the bundle layout and strict `manifest.env` defined by the spec.
+- Consumes: `release/build-offline-bundle.sh <version> [--force]`, reviewed `release/vendor-artifacts.lock`, local runner image, approved jTDS input, project scripts.
+- Produces: `dist/sdcli-autokit-<version>-linux-amd64.tar.gz` plus `.sha256`; `release/verify-offline-bundle.sh <bundle.tar.gz>` validates the pair and archive contents without a cloud CLI.
 
-- [ ] **Step 1: Add failing release-builder tests**
+- [ ] **Step 1: Add failing release and verification tests**
 
-Use fake `curl` and `podman` commands plus real `sha256sum` and `tar`. Assert:
+Assert rejection of empty/unsafe versions, incomplete lock, a sample `config.yaml` containing literal credentials, existing output without `--force`, checksum mismatch, traversal/symlink tar members, missing bundle entries, and any vendor RPM or installed vendor payload in a staged bundle. Assert the same bundle verifies after copying it to an unrelated directory. Test that `manifest.env` contains only the five defined keys and the OCI archive uses the versioned image tag.
 
-- empty versions and values containing spaces, `/`, `;`, `$`, or backticks fail before downloads, file creation, or Podman calls;
-- downloads go to temporary files, a mismatched checksum leaves no artifact at its final path, and a valid checksum atomically installs the artifact;
-- `--force` is required to replace an existing bundle or checksum;
-- image validation checks `sdcli`, `sqlcmd`, `bcp`, `jq`, `yq`, jTDS, and the immutable migration script before `podman save`;
-- the OCI archive is saved with `podman save --format oci-archive` using the versioned image;
-- the bundle contains exactly the documented image, manifest, deployment scripts, and editable `sdcli-scripts/` tree;
-- both the embedded archive checksum and outer bundle checksum match their files;
-- the generated manifest contains only the five allowlisted keys and no URL, cloud credential, signed token, password, local absolute path, or customer value.
-
-- [ ] **Step 2: Run the release-builder tests and verify failure**
+- [ ] **Step 2: Verify release tests fail**
 
 Run: `bash tests/deployment/test_release_bundle.sh`
 
-Expected: FAIL because the release builder does not exist.
+Expected: FAIL because release scripts are absent.
 
-- [ ] **Step 3: Document release inputs**
+- [ ] **Step 3: Implement release build and verification**
 
-Create `release/release.env.example` with placeholder URLs and mandatory 64-character checksum placeholders for SQL Developer and jTDS. State that maintainers copy values into their environment or a non-tracked local file and must confirm redistribution approval before transfer. Do not include signed cloud URLs, access tokens, or secrets.
+Run `bash tests/run.sh`; require the reviewed lock; build/tag the runner; inspect the final image and saved OCI layers for forbidden packages and paths; generate `sbom.json` from the actual image with an approved scanner; require reviewed `THIRD_PARTY_NOTICES.md` and the image-inventory signoff before publication; stage only the documented deployment/scripts/lock files, SBOM, and notices; generate a strict manifest; tar the versioned directory; write the outer checksum; and publish both files atomically to `dist/`. `verify-offline-bundle.sh` checks the adjacent checksum, safe member types/paths, exact root, required files, and absence of vendor payloads. No cloud CLI or customer artifact path is used by either script.
 
-- [ ] **Step 4: Implement `release/build-offline-bundle.sh <version> [--force]`**
+- [ ] **Step 4: Verify and commit**
 
-Validate all arguments and tool prerequisites first. Require `shellcheck`, run `bash tests/run.sh`, download each missing or mismatched software artifact through a `mktemp` file, verify its expected checksum, and atomically move it into `deployment/artifacts/`. Never accept a zero-length artifact.
+Run: `bash tests/deployment/test_release_bundle.sh && bash tests/run.sh && git diff --check`
 
-Build `sdcli-autokit:<version>` through `deployment/build.sh`, label it with `git rev-parse HEAD`, and validate its required commands/files with a disposable `podman run --rm` before export. Stage the documented layout in `mktemp -d`, generate the strict manifest, save `image.oci.tar`, calculate its checksum, copy only the required deployment and migration files, create the outer `.tar.gz`, calculate the adjacent checksum, and move both completed outputs into `dist/` only after every check passes. Use a trap to clean temporary files.
+Expected: PASS. Commit: `git add .gitignore release/build-offline-bundle.sh release/verify-offline-bundle.sh tests && git commit -m "feat: package vendor-free offline runner"`.
 
-- [ ] **Step 5: Run release-builder and full shell tests**
-
-Run: `bash tests/deployment/test_release_bundle.sh && bash tests/run.sh`
-
-Expected: PASS, including invalid-version, corrupt-download, no-overwrite, bundle-layout, and checksum tests.
-
-- [ ] **Step 6: Commit Task 3**
-
-```bash
-git add release/build-offline-bundle.sh release/release.env.example tests
-git commit -m "feat: package versioned offline release bundle"
-```
-
-### Task 4: Verify release files independently of transport
+### Task 5: Reconcile documentation, license debt, and acceptance evidence
 
 **Files:**
-- Create: `release/verify-offline-bundle.sh`
-- Create: `tests/deployment/test_bundle_transport.sh`
-- Modify: `tests/run.sh`
-
-**Interfaces:**
-- Consumes: `release/verify-offline-bundle.sh <bundle.tar.gz>` and adjacent `<bundle.tar.gz>.sha256`; standard `sha256sum`, `tar`, and `gzip` tools.
-- Produces: provider-neutral confirmation of the outer checksum, safe archive paths, exact top-level bundle directory, required manifest/image/deployment/migration entries, and no embedded transport configuration.
-
-- [ ] **Step 1: Add failing provider-neutral verification tests**
-
-Assert that missing arguments, a non-`.tar.gz` bundle, a missing checksum, an invalid local checksum, an archive whose root does not match its versioned filename, absolute paths, `..` path traversal, symlinks, missing required entries, or extra top-level entries all fail. A valid release must pass unchanged when copied to a new local directory. Scan the core build, verification, and deployment scripts and assert that none invoke `azcopy`, `aws`, `gcloud`, `gsutil`, `oci`, `scp`, `sftp`, or a vendor SDK.
-
-- [ ] **Step 2: Run the bundle transport tests and verify failure**
-
-Run: `bash tests/deployment/test_bundle_transport.sh`
-
-Expected: FAIL because the provider-neutral verification script does not exist.
-
-- [ ] **Step 3: Implement `release/verify-offline-bundle.sh <bundle.tar.gz>`**
-
-Validate the filename and adjacent checksum before reading the archive. Inspect the tar member list without extracting it; require every member to be a regular file or directory beneath the exact `sdcli-autokit-<version>/` root, reject absolute paths, `..`, links, devices, and extra roots, then require the documented manifest, image archive, deployment scripts, and migration-script entries. Print only the verified bundle name and SHA-256. Do not accept or call a transport CLI.
-
-- [ ] **Step 4: Run transport-neutral and full tests**
-
-Run: `bash tests/deployment/test_bundle_transport.sh && bash tests/run.sh`
-
-Expected: PASS. The same copied bundle verifies without a provider tool, and core scripts contain no provider command.
-
-- [ ] **Step 5: Commit Task 4**
-
-```bash
-git add release/verify-offline-bundle.sh tests
-git commit -m "feat: verify offline bundles independently of transport"
-```
-
-### Task 5: Document operations and prove the offline boundary
-
-**Files:**
-- Modify: `.gitignore`
 - Modify: `README.md`
+- Modify: `.gitignore`
 - Create: `docs/offline-release-runbook.md`
+- Create: `docs/license-review-debt.md`
 - Create: `tests/deployment/test_offline_boundary.sh`
-- Modify: `tests/run.sh`
 
 **Interfaces:**
-- Consumes: the scripts and release contract from Tasks 1–4.
-- Produces: maintainer release/transfer instructions, customer receive/install instructions, upgrade/rollback guidance, licensing gate, provider command examples, and a static/runtime guard against customer-side software downloads.
+- Consumes: Tasks 1–4 and the approved vendor package set.
+- Produces: truthful release and customer instructions, official vendor links, transport examples, explicit open license-review work, and clean-VM acceptance evidence.
 
-- [ ] **Step 1: Add a failing offline-boundary test**
+- [ ] **Step 1: Add the offline-boundary test**
 
-Assert that `deployment/install-offline.sh`, `deployment/run.sh`, `deployment/start.sh`, and `deployment/stop.sh` contain no executable calls to `podman build`, `podman pull`, `curl`, `wget`, or `dnf`. Execute the valid fake-customer flow and apply the same assertion to its command log. Also assert that runtime volume arguments never target `/u01` and that the README names the release builder, provider-neutral verifier, installer, and Azure/AWS/GCP/OCI/on-premises transfer options.
+Assert that the release bundle excludes all customer RPMs, the README describes `--artifacts` and `--accept-microsoft-eula`, and runtime scripts cannot download vendor packages or pull an image. Check that the README vendor links and the lock roles match the installer contract. Run the test and observe failure until docs and scripts align.
 
-- [ ] **Step 2: Run the boundary test and verify failure**
+- [ ] **Step 2: Update README and runbook**
 
-Run: `bash tests/deployment/test_offline_boundary.sh`
+Replace the README's “planned workflow” caveat when the installer exists. Give exact release, verification, artifact precheck, and install commands. Keep official Oracle SQL Developer, Oracle Instant Client, and Microsoft offline package links; explain that the customer obtains the exact versions named in `vendor-artifacts.lock` and provides any locked dependencies. Provide transfer examples for Azure Blob, Amazon S3, Google Cloud Storage, OCI Object Storage, on-premises shares, SCP/SFTP, and removable media, always transferring the same bundle/checksum pair. Explain upgrade and rollback without automatic deletion.
 
-Expected: FAIL until the documentation and command contract are complete.
+- [ ] **Step 3: Record license-review debt**
 
-- [ ] **Step 3: Track the runbook and update `README.md` for both workflows**
+Document the exact-version legal review still needed for Oracle SQL Developer, Instant Client, Microsoft ODBC, and Microsoft tools. Note that newer SQL Developer releases may use Oracle Free Use terms while older releases may have different terms; do not declare all versions nonredistributable. Explain how the Task 4 SBOM, notices, and source offers for Oracle Linux, Java, OS packages, `yq`, jTDS, and transitive components are reviewed. Record the review owner/status and the runner-image inventory signoff required before publication.
 
-Add a narrow `.gitignore` exception for `docs/offline-release-runbook.md`. Separate maintainer/developer build instructions from customer offline installation. Include exact examples for:
+- [ ] **Step 4: Verify and exercise on real hosts**
 
-```bash
-./release/build-offline-bundle.sh 1.2.3
-./release/verify-offline-bundle.sh dist/sdcli-autokit-1.2.3-linux-amd64.tar.gz
-# Transfer the .tar.gz and .sha256 through the approved provider or offline channel.
-sha256sum -c sdcli-autokit-1.2.3-linux-amd64.tar.gz.sha256
-tar -xzf sdcli-autokit-1.2.3-linux-amd64.tar.gz
-cd sdcli-autokit-1.2.3
-./deployment/install-offline.sh
-```
+Run: `bash tests/run.sh && git diff --check && git diff --check main...HEAD`
 
-Add a transfer matrix with upload and retrieval examples for Azure Blob (`azcopy`), Amazon S3 (`aws s3 cp`), Google Cloud Storage (`gcloud storage cp`), OCI Object Storage (`oci os object put/get`), an on-premises repository or mounted file share, SCP/SFTP, and removable media. Each example transfers the same `.tar.gz` and `.sha256` without repackaging. Explain the `linux/amd64`, Podman, approved file-transfer, and database-network prerequisites; editable configuration; start/stop behavior; and the fact that customer installation does not build or pull.
+Expected: PASS. On an approved release host, build and inspect the real image and verify that proprietary packages are absent. On an isolated Podman VM, stage the exact customer RPMs, run the precheck and installer, verify every executable, and confirm data/log persistence across stop/start and operator-controlled container replacement. Repeat bundle transfer through at least one cloud and one on-premises/physical method. Record results and any unavailable environment as unverified rather than claiming acceptance.
 
-- [ ] **Step 4: Add the operational runbook**
+- [ ] **Step 5: Commit documentation and tests**
 
-Document release approval, license approval, image scanning, artifact checksums, provider-neutral transfer, customer verification, clean-VM acceptance, upgrade, rollback, troubleshooting, and retention. Include authentication and least-privilege notes for Azure, AWS, GCP, OCI, and on-premises repositories without storing credentials in project files. Make removal/replacement of a stopped container an explicit operator command; never place it inside installation automation. State that the checksum should be shared through an approved independent channel when tamper resistance is required.
+Commit: `git add .gitignore README.md docs/offline-release-runbook.md docs/license-review-debt.md tests && git commit -m "docs: describe customer-supplied offline installation"`.
 
-- [ ] **Step 5: Run all automated verification**
+## Final verification
 
-Run: `bash tests/run.sh`
-
-Expected: PASS for syntax, build contract, offline install, release bundle, provider-neutral transport, and offline boundary suites. `shellcheck` reports no errors.
-
-- [ ] **Step 6: Perform release-machine integration verification**
-
-On an approved `linux/amd64` machine with Podman and access to licensed inputs through public sources, internal mirrors, or pre-staged artifacts, run:
-
-```bash
-./release/build-offline-bundle.sh 0.0.0-acceptance
-sha256sum -c dist/sdcli-autokit-0.0.0-acceptance-linux-amd64.tar.gz.sha256
-```
-
-Expected: the real image builds, required in-image tools pass, and the bundle checksum is valid. Record the image ID and archive checksum in the release evidence; do not commit the generated bundle.
-
-- [ ] **Step 7: Perform isolated customer-VM acceptance**
-
-On a clean `linux/amd64` VM with Podman, access to one approved transfer method, required database routes, no registry credentials, and public software repositories blocked, receive the acceptance bundle and run `deployment/install-offline.sh`. Repeat the file-transfer/verification portion with at least one cloud object store and one non-cloud method such as a mounted share or removable media.
-
-Expected: the image loads, container starts, every tool health check passes, no public endpoint is contacted, and data/log files survive stop/start and an operator-controlled container replacement.
-
-- [ ] **Step 8: Commit Task 5**
-
-```bash
-git add .gitignore README.md docs/offline-release-runbook.md tests
-git commit -m "docs: add offline release and installation runbook"
-```
-
-## Final Verification
-
-- [ ] Run `git diff --check main...HEAD` and expect no whitespace errors.
-- [ ] Run `bash tests/run.sh` and expect every suite plus `shellcheck` to pass.
-- [ ] Run `git status --short` and confirm only intentionally uncommitted local artifact or `dist/` files are ignored.
-- [ ] Review the branch for secrets with `git grep -nE '(sig=|password=|token=|secret=|BEGIN .*PRIVATE KEY)' HEAD`; inspect every match and confirm no credential is committed.
-- [ ] Confirm the design's acceptance test has been completed or clearly record that real release/customer VM verification remains pending because the required Linux/Podman/transfer environments are external to the repository.
+- [ ] `git diff --check main...HEAD` reports no whitespace errors.
+- [ ] `bash tests/run.sh` passes all meaningful shell tests; `shellcheck` has no errors when installed.
+- [ ] The final image and bundle inventory contain no four-family vendor RPM or installed payload.
+- [ ] `git status --short` has no unexpected changes, and no customer RPM is tracked.
+- [ ] Actual Linux/Podman and transfer acceptance results are recorded; missing external access is reported as a remaining validation gap.

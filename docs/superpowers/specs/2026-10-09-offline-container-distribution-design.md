@@ -1,51 +1,36 @@
 # Offline Container Distribution Design
 
-## Summary
+## Decision and scope
 
-`sdcli-autokit` will support a build-once, run-offline delivery model for customer VMs that cannot reach container registries or public package repositories. A trusted release machine builds a complete Podman image, packages it with the deployment scripts as a versioned release bundle, and calculates a SHA-256 checksum. The two ordinary release files can be transferred through Azure Blob Storage, Amazon S3, Google Cloud Storage, OCI Object Storage, an on-premises artifact store or file share, SCP/SFTP, or removable media. The customer verifies the bundle, loads the image into Podman, and starts it without building an image or accessing an external software source.
+Build a versioned `linux/amd64` runner image in an approved build environment and transfer it as a checksum-protected OCI archive. The customer VM loads and runs the image with Podman and needs no registry or public software repository access. The archive and checksum are ordinary files that can travel through Azure Blob Storage, Amazon S3, Google Cloud Storage, OCI Object Storage, an on-premises share or repository, SCP/SFTP, or removable media.
 
-The existing online development workflow remains available to maintainers. The customer runtime path is independent of the release transport and public internet. It requires only the approved mechanism used to receive the bundle and the runtime connections to the source SQL Server, target Oracle database, and migration repository.
+The released image and bundle exclude Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver 18, and Microsoft `mssql-tools18`. The customer obtains the exact approved packages under its own vendor arrangements and places them in a customer-controlled directory. The offline installer verifies those files before creating or changing a container, mounts the directory read-only, and installs the packages locally inside the customer-owned container. Neither the release build nor any transfer location receives those customer packages.
 
-## Problem
+This is a conservative packaging policy, not a determination that every version of every listed product forbids redistribution. Oracle's [current SQL Developer download page](https://www.oracle.com/database/sqldeveloper/technologies/download/) links to [Free Use terms](https://www.oracle.com/downloads/licenses/oracle-free-license.html) that permit redistribution subject to conditions; [older SQL Developer Business Operations terms](https://www.oracle.com/downloads/licenses/sqldev-license.html) are more restrictive. [Instant Client has separate distribution terms](https://www.oracle.com/downloads/licenses/instant-client-lic.html). Microsoft publishes [offline package installation instructions](https://learn.microsoft.com/en-us/sql/linux/install-upgrade/setup-tools?view=sql-server-ver17#offline-installation). The applicable version, package terms, customer entitlement, and any alternate contract need separate review before the policy changes.
 
-The current deployment has two separate external-network dependencies:
-
-1. `deployment/build.sh` calls `podman build`, whose Dockerfile pulls the Oracle Linux base image and downloads operating-system packages, Microsoft SQL Server tools, `yq`, and Oracle Instant Client packages.
-2. `deployment/run.sh` downloads Oracle SQL Developer and the jTDS driver during the first container start.
-
-Consequently, copying the repository to the customer VM is insufficient. Even if the VM had all Dockerfile sources, it could neither pull the base image nor complete the runtime downloads.
-
-The current layout also mounts a named volume at `/u01`. SQL Developer and jTDS are installed below `/u01/app`, so baking those tools into the image without changing the mount would hide them when the container starts.
+The current `deployment/Dockerfile` installs Instant Client and Microsoft RPMs during image build, while `deployment/run.sh` downloads SQL Developer and jTDS at first start. The current named volume also mounts over all of `/u01`, masking any image files placed under `/u01/app`. All three behaviors must change for this design.
 
 ## Goals
 
-- Build the complete runtime once on an approved Linux `amd64` release machine that can obtain its inputs from public sources, approved internal mirrors, or pre-staged artifacts; the isolated customer VM never builds the image.
-- Produce one versioned customer bundle and a separate SHA-256 checksum file.
-- Allow a customer VM with Podman to install and run a transferred bundle without `podman build`, `podman pull`, `curl`, `wget`, `dnf`, or access to public repositories.
-- Include SQL Developer, jTDS, Oracle client tools, SQL Server client tools, `yq`, and the current `sdcli-scripts` release in the delivered materials.
-- Persist migration data and logs independently from immutable application binaries.
-- Detect corrupt, incomplete, incompatible, or incorrectly tagged bundles before creating the container.
-- Retain `deployment/start.sh` and `deployment/stop.sh` for daily lifecycle operations.
-- Document release, transport options, customer installation, upgrade, and rollback procedures for public cloud and fully on-premises environments.
+- Distribute a runner image and project scripts without the four customer-supplied proprietary package families.
+- Install those packages from files already present on the customer VM, with no image build, registry pull, vendor download, or public package repository access there.
+- Validate package identity, architecture, version, and SHA-256 before creating the application container.
+- Preserve `sdcli`, `sqlcmd`, `bcp`, `sqlplus`, `sqlldr`, jTDS, migration scripts, data, and logs in their documented roles.
+- Keep transport choice independent of the bundle format and runtime scripts.
+- Make repeated installation of the same release and same package set safe and predictable.
+- Produce a reviewed inventory and notices for software that remains in the image.
 
-## Non-goals
+## Boundaries
 
-- Installing Podman on the customer VM.
-- Providing database credentials or embedding customer configuration in the image.
-- Mandating, hosting, or configuring a particular cloud or on-premises transfer service.
-- Supporting CPU architectures other than `linux/amd64` in the first release.
-- Providing cryptographic publisher identity in the first release. SHA-256 detects corruption; a later release may add detached signatures after a signing authority and key-distribution process are selected.
-- Automating public distribution of Oracle or Microsoft software. Distribution must remain private and must pass the organization's software-license review.
+- The first release targets `linux/amd64` on an `x86_64` customer host with Podman already installed.
+- The customer needs access to SQL Server, the Oracle target, and the Oracle migration repository during migration runs.
+- Customer files are never copied into a release archive, release image, git, or a publisher-controlled artifact store. The image build context has an explicit path allowlist for vendor RPM exclusion, and the release builder validates the included `config.yaml` as a credential-free template.
+- A checksum establishes file integrity against the pinned release inputs, not legal entitlement or publisher identity. An approved trusted channel must provide or authenticate the lock file and bundle checksum.
+- This work does not install Podman, provide database credentials, decide commercial licensing, or automatically remove existing containers or volumes.
 
-## Recommended Architecture
+## Release artifact and component ownership
 
-### Release side
-
-The release machine runs `release/build-offline-bundle.sh VERSION`. The script validates the version and required tools, obtains the pinned SQL Developer RPM and jTDS JAR into a gitignored artifact directory, invokes the normal image build, verifies the image contents, saves the image as an OCI archive, and creates the customer bundle. A release machine may use direct internet access, organization-controlled mirrors, or pre-staged inputs; that choice does not change the resulting bundle or customer installation flow.
-
-The build context changes from `deployment/` to the repository root so the Dockerfile can copy both `deployment/artifacts/` and `sdcli-scripts/`. External access remains permitted during the image build for the base image and package installation, but every runtime dependency needed by the customer is present in the final image.
-
-The release output is:
+`release/build-offline-bundle.sh VERSION` produces:
 
 ```text
 dist/
@@ -53,15 +38,20 @@ dist/
 └── sdcli-autokit-<version>-linux-amd64.tar.gz.sha256
 ```
 
-The compressed customer bundle contains:
+The compressed bundle contains the approved runner image, project scripts, a package requirements lock, and generated release inventory/notices; it contains no customer-supplied vendor packages:
 
 ```text
 sdcli-autokit-<version>/
 ├── image.oci.tar
 ├── manifest.env
+├── vendor-artifacts.lock
+├── sbom.json
+├── THIRD_PARTY_NOTICES.md
 ├── deployment/
 │   ├── .env
+│   ├── check-vendor-artifacts.sh
 │   ├── install-offline.sh
+│   ├── install-vendor.sh
 │   ├── run.sh
 │   ├── start.sh
 │   └── stop.sh
@@ -71,177 +61,58 @@ sdcli-autokit-<version>/
     └── lib/
 ```
 
-`manifest.env` is machine-readable shell data generated by the release build and contains only validated values:
+The OCI archive contains Oracle Linux 9, required open-source OS/runtime packages, `yq`, an approved jTDS 1.3.1 JAR, and an immutable copy of `sdcli-scripts`. It contains no SQL Developer, Instant Client, Microsoft ODBC, or Microsoft tools binaries or RPMs. The jTDS input has its own pinned SHA-256 on the release side. Including jTDS is conditional on retaining its applicable license and notices; if that review fails, move it to the same customer-supplied artifact contract before publication. The SBOM and third-party notices in the bundle must pass the organization's review gate.
 
-```text
-BUNDLE_VERSION=<version>
-IMAGE_NAME=sdcli-autokit:<version>
-IMAGE_ARCH=amd64
-IMAGE_ARCHIVE=image.oci.tar
-IMAGE_ARCHIVE_SHA256=<sha256>
-```
+`manifest.env` contains only five allowlisted data fields: `BUNDLE_VERSION`, `IMAGE_NAME`, `IMAGE_ARCH`, `IMAGE_ARCHIVE`, and `IMAGE_ARCHIVE_SHA256`. It is parsed as data, never executed with `source` or `eval`. The version tag `sdcli-autokit:<version>` is authoritative; `latest` is only a local convenience tag applied after verification.
 
-The image uses the version tag and also receives the local `sdcli-autokit:latest` tag only after it is loaded successfully. The version tag is the authoritative identity for installation and rollback.
+`vendor-artifacts.lock` is a reviewed, text-only list with one tab-separated row per required RPM: `role`, RPM name, exact version-release, architecture, expected filename, and 64-character SHA-256. The required package roles are SQL Developer, Instant Client Basic, SQL*Plus, Tools, `msodbcsql18`, and `mssql-tools18`; any additional RPM dependencies identified during an isolated smoke test are added as explicit rows. The lock is authored from the approved package set before release and shipped with the bundle. Its hashes and filenames are not generated from whatever the customer happens to supply. A release is refused if any required row is absent, duplicated, malformed, or lacks a reviewed checksum. The release build validates the lock's structure without requiring the proprietary files; the customer precheck validates the files against it.
 
-`release/verify-offline-bundle.sh` validates the outer checksum and required archive layout before publication or installation. Publication is deliberately outside the core build: cloud CLIs, on-premises repository clients, file-copy tools, and removable-media procedures all transfer the same unchanged bundle and checksum. This keeps the release artifact portable and avoids embedding provider credentials or SDK dependencies in the project.
+## Customer installation
 
-The operational runbook provides tested command patterns for Azure Blob Storage, Amazon S3, Google Cloud Storage, OCI Object Storage, mounted on-premises shares, SCP/SFTP, and removable media. Provider access policy, retention, replication, and deletion remain the responsibility of the selected transport platform.
+The customer first obtains the RPMs from the [official vendor pages listed in the README](../../../README.md#customer-provided-proprietary-artifacts-for-offline-installation) or its approved internal mirrors and transfers them to a directory outside the extracted release. The customer also receives the release bundle and checksum through any approved channel.
 
-### Customer side
+`deployment/install-offline.sh --artifacts <absolute-directory> --accept-microsoft-eula` performs this sequence. The acknowledgement flag must be supplied by the customer operator before local installation of Microsoft RPMs; it does not replace the applicable legal terms.
 
-The customer receives the `.tar.gz` bundle and `.sha256` file through an approved transport. After `release/verify-offline-bundle.sh` or `sha256sum -c` succeeds, they extract the bundle and run `deployment/install-offline.sh`. The receiving VM does not need a cloud CLI when another system, mounted share, or removable medium delivers the files.
+1. Check Podman, `tar`, `sha256sum`, RPM query capability, host architecture, and the customer artifact directory.
+2. Parse and validate `manifest.env` and `vendor-artifacts.lock` as strict data formats. Reject duplicate/unknown manifest keys, unsafe paths, duplicate package roles, or malformed lock rows.
+3. Verify the bundle's embedded OCI archive and each customer RPM against its pinned hash, RPM header name/version/architecture, and expected role. Reject missing, extra, zero-length, or symlinked artifacts.
+4. Check that the configured container name is unused or already identifies the same versioned image and package-set fingerprint. A conflicting container is left untouched with an actionable error.
+5. Load the OCI archive if the versioned image is absent, confirm its architecture and contents, and create data/log volumes.
+6. Create the application container with the customer artifact directory mounted read-only at `/vendor-artifacts:ro,Z`. Mount only the data and log volumes at `/u01/data:Z` and `/u01/log:Z`; do not mount a volume over `/u01/app`.
+7. Run the local vendor installer inside the container before reporting installation success. Record the lock fingerprint in the container's local installation state so restarts do not reinstall and a changed package set is rejected for an existing container.
+8. Copy editable migration scripts into the customer container and run executable/file health checks. Required tools are `sdcli`, `sqlcmd`, `bcp`, `sqlplus`, `sqlldr`, `jq`, `yq`, and jTDS.
 
-The installer:
+`deployment/install-vendor.sh` installs only from `/vendor-artifacts`, with all package repositories explicitly disabled. It uses the customer-acknowledged Microsoft EULA mechanism for the pinned RPMs, lets normal RPM package scripts/configuration run where required, and fails if dependencies cannot be satisfied from the base image and staged files. The required dependency set is established through a real isolated smoke test before the lock is approved. SQL Developer is installed/extracted into the expected `SD_HOME` and configured for the image's Java 17 runtime. Installation changes only the customer container's writable layer. On explicit container replacement or image upgrade, the installer repeats from the customer-held artifact directory. Data and logs remain in volumes.
 
-1. Requires Podman, `sha256sum`, `tar`, and an `x86_64` host.
-2. Parses the bundle's generated `manifest.env` as a strict allowlist of `KEY=VALUE` records without `source` or `eval`, and validates every value before using it.
-3. Verifies the embedded OCI archive checksum.
-4. Loads the OCI archive with `podman load -i` only when the versioned image is not already present.
-5. Confirms the versioned image exists after loading.
-6. Creates the data and log volumes if necessary.
-7. Invokes the network-free `deployment/run.sh` using the versioned image.
-8. Runs health checks for `sdcli`, `sqlcmd`, `bcp`, `jq`, `yq`, the jTDS JAR, and the migration scripts.
+The application container may use `--network host` for database access, but vendor installation must run with network access disabled or otherwise prove that package-manager repositories are disabled and no download command is used. Startup scripts never fetch missing packages. A host without direct internet can receive the release bundle and RPMs through separate approved channels.
 
-Repeated installation of the same version is idempotent. If a container with the configured name already exists using another image, the installer stops with an actionable error; it does not delete or replace that container automatically.
+## Script and layout changes
 
-### Image and persistent storage layout
+- `deployment/Dockerfile` and `.dockerignore`: remove the Microsoft repository and RPM install, and the Instant Client repository and RPM install. Allowlist only required build inputs from the repository root, then copy the approved jTDS JAR and immutable migration scripts. Include local RPM installation/query prerequisites and pinned runtime paths, without vendor payloads.
+- `deployment/build.sh`: build the runner on a trusted machine, validate only redistributable inputs, and stop creating customer volumes.
+- `release/build-offline-bundle.sh`: validate the reviewed lock and sample `config.yaml`, build and inspect the runner, reject forbidden vendor package names/files in its package inventory and build context, export an OCI archive, and package scripts, lock, checksum, SBOM, and notices. It never downloads or embeds customer vendor RPMs.
+- `release/verify-offline-bundle.sh`: verify outer checksum, safe archive paths, required entries, and absence of vendor RPM payloads before publication or extraction.
+- `deployment/install-offline.sh`: perform all host-side checks before `podman load`, volume creation, or container creation; mount the customer directory read-only and coordinate installation.
+- `deployment/run.sh`: manage local container reuse, volume mounts, script copy, and health checks. Remove the first-start downloads and fail when vendor installation has not completed.
+- `deployment/start.sh` and `deployment/stop.sh`: retain daily lifecycle behavior. A missing container directs users to the offline installer.
+- `deployment/.env`: replace the broad `/u01` volume with separate `DATA_VOLUME_NAME` and `LOG_VOLUME_NAME`; remove vendor URLs and first-run download settings.
 
-Immutable software is stored in the image:
+The runner's immutable script copy is under `/home/sduser/sdcli-autokit-release`. Customer configuration is copied to `/home/sduser/sdcli-scripts` after the container is created. SQL Developer and jTDS remain accessible at `/u01/app/sqldeveloper/sqldeveloper/bin/sdcli` and `/u01/app/jtds-1.3.1.jar` respectively. Instant Client uses the pinned Oracle Linux 9 RPM paths; Microsoft tools retain `/opt/mssql-tools18/bin`. The actual RPM payload paths and dependency set must be validated with the selected packages during implementation and acceptance testing.
 
-```text
-/u01/app/sqldeveloper/                 Oracle SQL Developer
-/u01/app/jtds-1.3.1.jar               SQL Server JDBC driver
-/home/sduser/sdcli-autokit-release/   released migration scripts
-```
+## Failures, upgrades, and rollback
 
-Persistent data is stored in narrowly mounted named volumes:
+Missing, mismatched, duplicate, or unrecognized customer files cause a preflight failure before container mutation. A local RPM install failure may leave a stopped, incomplete customer container; it is reported explicitly, never marked installed, and never followed by migration execution. A retry with the same verified inputs can complete or an operator can remove that container. Automation never deletes an image, container, volume, or customer file.
 
-```text
-sdcli-autokit_data -> /u01/data
-sdcli-autokit_log  -> /u01/log
-```
+An existing container with the correct version and package fingerprint is reused without reinstallation. An existing container with another version or package fingerprint is not silently upgraded. To upgrade or roll back, an operator stops and replaces only the application container, then runs the chosen version's installer against the required customer artifact set. Named data and log volumes survive replacement. A future persistent-data schema change needs a separate migration design.
 
-Nothing mounts over `/u01/app`. This prevents runtime volumes from hiding software baked into the image.
+## Licensing and supply-chain debt
 
-The editable `sdcli-scripts/` directory remains in the customer bundle. `run.sh` copies it to `/home/sduser/sdcli-scripts` when creating the container. The immutable copy in the image provides a known-good fallback and supports image validation. Existing containers continue to retain their working copy. Updating a customer configuration never modifies the release image.
+Before release, generate an actual image inventory/SBOM, capture the RPM `License` metadata and bundled notice files, and review the Oracle Linux base, Java, OS packages, `yq`, jTDS, and transitive dependencies. Publish required notices and source offers with the runner. This inventory is a release gate; it is not a claim that an automated scan alone establishes compliance.
 
-### Runtime network behavior
+Track a separate legal review by exact product and version for SQL Developer, Instant Client, Microsoft ODBC, and Microsoft tools. Reconsider bundling a product only after legal/procurement confirms the applicable license and customer agreement. Customer supplied files are a delivery policy; the technical precheck cannot validate legal entitlement.
 
-`deployment/run.sh` becomes strictly network-free with respect to software installation. It must not download or install anything. It creates or starts the container, copies the editable migration scripts when required, configures SQL Developer preferences, and performs local health checks.
+## Verification and acceptance
 
-The container retains `--network host` because migrations need access to customer database endpoints. “Offline” means no dependency on container registries or public software repositories; it does not mean that database networking is disabled.
+Shell tests with fake Podman, RPM-query, and package-manager commands cover manifest/lock parsing, checksum and header mismatches, missing and extra files, preflight order, read-only mount arguments, offline installation commands, image identity, idempotence, and conflict safety. Static checks confirm that release artifacts and the image build exclude the four proprietary package families, and that customer scripts have no vendor-download or registry-pull path.
 
-## Component Changes
-
-### `deployment/Dockerfile`
-
-- Copy the release-supplied SQL Developer RPM and jTDS JAR into the build.
-- Extract SQL Developer during the build and verify `sdcli` is executable.
-- Copy `sdcli-scripts/` as an immutable release copy.
-- Keep package-repository operations on the release side only.
-- Add OCI labels for the release version, source revision, and supported architecture.
-- Do not include provider credentials, signed access tokens, database passwords, migration output, or customer configuration.
-
-### `deployment/build.sh`
-
-- Build from the repository root with `deployment/Dockerfile`.
-- Require the pinned input artifacts before invoking Podman.
-- Accept an explicit image tag and release metadata from the release builder.
-- Stop creating runtime volumes; volume creation belongs to installation and runtime.
-
-### `deployment/run.sh`
-
-- Remove SQL Developer and jTDS download/install functions.
-- Require the image to exist locally.
-- Mount separate data and log volumes without covering `/u01/app`.
-- Preserve container reuse, SQL Developer preference setup, script synchronization, and health checks.
-- Fail clearly when the local image is incomplete.
-
-### Release and verification scripts
-
-- `release/build-offline-bundle.sh` owns artifact acquisition, image creation, image validation, OCI export, manifest generation, bundle packaging, and checksums.
-- `release/verify-offline-bundle.sh` owns provider-neutral checksum and archive-layout verification. Upload and copying remain separate from building and verification, so publication retries never rebuild a release.
-
-### Customer installer
-
-`deployment/install-offline.sh` owns bundle validation and image loading. It does not build, pull, download, delete containers, or overwrite an existing installation using another image.
-
-## Configuration
-
-`deployment/.env` changes to use separate volume names:
-
-```text
-DATA_VOLUME_NAME=sdcli-autokit_data
-LOG_VOLUME_NAME=sdcli-autokit_log
-```
-
-`VOLUME_NAME` is retired because its `/u01` mount conflicts with immutable image content. The release builder writes the versioned `IMAGE_NAME` into the `.env` copied into the bundle. Customer database passwords remain environment variables supplied at migration execution time and never appear in `.env` or the bundle manifest.
-
-URLs and expected checksums for SQL Developer and jTDS are release inputs. They may be overridden only on the trusted release machine. Each download is written to a temporary file, checksum-verified, and atomically moved into `deployment/artifacts/`.
-
-## Error Handling
-
-Release creation fails before publishing output when:
-
-- the version is empty or contains characters outside `[A-Za-z0-9._-]`;
-- required commands or input checksums are missing;
-- an artifact checksum does not match;
-- the image build or image health check fails;
-- the bundle staging area is incomplete; or
-- a destination bundle already exists unless an explicit replacement option is supplied.
-
-Customer installation fails without deleting existing state when:
-
-- the outer bundle or embedded image archive checksum fails;
-- the host is not `x86_64`/`amd64`;
-- Podman cannot load the archive;
-- the expected versioned image is absent after loading;
-- an existing same-named container references a different image; or
-- any required executable or bundled file is absent.
-
-Temporary release directories are created with `mktemp -d` and removed with a trap. Error messages identify the failing file or prerequisite and the corrective action.
-
-## Upgrade and Rollback
-
-Every release uses an immutable version tag. To upgrade, the customer downloads and verifies the new bundle, removes or renames the stopped application container through an explicit operator action, and runs the new installer. Data and log volumes keep their names and survive container replacement.
-
-Rollback uses the same process with a previously retained bundle and image tag. Neither install nor upgrade scripts automatically delete an image, container, volume, log, or migration output.
-
-Schema or data-format migrations are outside this design. If a future release changes persistent formats, it must introduce a separately reviewed migration design.
-
-## Security and Licensing
-
-- Cloud object stores and on-premises repositories should use private locations and least-privilege identities, signed URLs, access tokens, or service accounts approved for that platform.
-- Provider credentials, signed URL query strings, tokens, repository passwords, and private endpoint details must not be echoed, committed, written to manifests, or included in image layers.
-- Checksums provide integrity against accidental corruption. They are not a substitute for signed releases or a trusted out-of-band checksum channel.
-- Container images should be scanned on the release machine before upload, using the organization's approved scanner.
-- Oracle SQL Developer, Oracle Instant Client, Microsoft drivers/tools, and other bundled software must be reviewed for redistribution rights before a customer bundle is transferred. If redistribution is not permitted, the same workflow can run in a customer-controlled build environment or consume customer-provided artifacts from an approved private source.
-
-## Testing and Acceptance Criteria
-
-Shell-level tests use fake `podman` and downloader commands so failure paths can be tested without network access or a container daemon. The test suite covers:
-
-- rejecting an invalid release version;
-- rejecting missing or checksum-mismatched artifacts;
-- producing the documented bundle layout and manifest from a fake image archive;
-- rejecting a corrupt outer bundle and a corrupt embedded image archive;
-- rejecting a non-`amd64` host;
-- loading and running a valid bundle without invoking `build`, `pull`, `curl`, `wget`, or `dnf` on the customer path;
-- preserving an existing container and volumes when its image does not match;
-- treating repeated installation of the same version as success; and
-- refusing verification or publication handoff when either the bundle or checksum is missing;
-- proving the generated artifact and verification command contain no Azure, AWS, GCP, OCI, or on-premises transport dependency; and
-- documenting transfer and retrieval patterns for each supported environment without changing the bundle.
-
-Static verification runs `bash -n` on every shell script. `shellcheck` runs when available and is required in CI before release publication.
-
-The feature is accepted when a clean test VM with Podman, no registry credentials, and public internet blocked can:
-
-1. receive a private bundle and checksum through any documented cloud, on-premises, or physical transfer method;
-2. verify and extract the bundle;
-3. load the image;
-4. create and start the container;
-5. pass all local tool health checks; and
-6. retain data and logs across stop/start and container replacement.
-
-No runtime command may attempt to contact a public software repository or container registry during this acceptance test.
+On an approved `linux/amd64` release host, build and inspect the real runner. On an isolated `linux/amd64` VM with the pinned customer RPM set, verify and load the release, install the packages from the read-only mount, start the container, exercise all tool health checks, and confirm data/log persistence across stop/start and explicit container replacement. Test transfer through one cloud channel and one on-premises or physical channel without changing the bundle. Record package versions, hashes, image ID, test results, and any license review still open.
