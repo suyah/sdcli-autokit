@@ -15,6 +15,10 @@
 !sdcli-scripts/
 !sdcli-scripts/**
 
+# Track project design and implementation documents
+!docs/
+!docs/**
+
 # Never track backup files
 *.bak
 **/*.bak
