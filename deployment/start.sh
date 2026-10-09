@@ -19,7 +19,7 @@ CONTAINER_NAME="${CONTAINER_NAME:?CONTAINER_NAME must be set in .env}"
 
 if ! podman container exists "$CONTAINER_NAME"; then
   echo "Error: container '$CONTAINER_NAME' does not exist."
-  echo "Please run ./run.sh first."
+  echo "Please run ./run.sh --vendor-dir /absolute/path/to/rpms --accept-microsoft-eula first."
   exit 1
 fi
 

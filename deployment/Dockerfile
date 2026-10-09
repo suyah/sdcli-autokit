@@ -32,7 +32,6 @@ USER root
 RUN dnf -y install \
       java-17-openjdk \
       curl \
-      wget \
       file \
       unzip \
       which \
@@ -54,25 +53,16 @@ RUN dnf -y install \
       nmap-ncat \
       tree \
       iputils \
-    && dnf clean all
-
-RUN curl -sSL https://packages.microsoft.com/config/rhel/9/prod.repo \
-      -o /etc/yum.repos.d/microsoft-prod.repo \
-    && ACCEPT_EULA=Y dnf -y install \
-         msodbcsql18 \
-         mssql-tools18 \
+      rpm \
     && dnf clean all
 
 RUN curl -L -o /usr/local/bin/yq \
       https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64 \
-    && chmod +x /usr/local/bin/yq
-
-RUN dnf -y install oracle-instantclient-release-el9 \
-    && dnf -y install \
-         oracle-instantclient19.30-basic.x86_64 \
-         oracle-instantclient19.30-sqlplus.x86_64 \
-         oracle-instantclient19.30-tools.x86_64 \
-    && dnf clean all
+    && chmod +x /usr/local/bin/yq \
+    && mkdir -p /u01/app \
+    && curl -fL -o /u01/app/jtds-1.3.1.jar \
+         https://repo1.maven.org/maven2/net/sourceforge/jtds/jtds/1.3.1/jtds-1.3.1.jar \
+    && test -s /u01/app/jtds-1.3.1.jar
 
 RUN test -n "${APP_USER}" \
  && test -n "${APP_GROUP}" \
@@ -95,7 +85,6 @@ RUN mkdir -p \
       /u01/app \
       /u01/data \
       /u01/log \
-      /u01/install \
     && chown -R "${APP_USER}:${APP_GROUP}" \
       "${HOME_DIR}" \
       "${APP_HOME}" \
@@ -113,8 +102,5 @@ RUN echo 'export HISTFILE=$HOME/.bash_history' >> "${HOME_DIR}/.bashrc" \
     && echo 'export HISTFILESIZE=20000' >> "${HOME_DIR}/.bashrc" \
     && echo 'shopt -s histappend' >> "${HOME_DIR}/.bashrc" \
     && echo 'export PROMPT_COMMAND="history -a; history -n"' >> "${HOME_DIR}/.bashrc"
-
-RUN echo 'export PATH=/usr/lib/oracle/19.30/client64/bin:$PATH' >> "${HOME_DIR}/.bashrc" \
-    && echo 'export LD_LIBRARY_PATH=/usr/lib/oracle/19.30/client64/lib:$LD_LIBRARY_PATH' >> "${HOME_DIR}/.bashrc"
 
 CMD ["/bin/bash", "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]

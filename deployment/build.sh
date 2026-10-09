@@ -1,15 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="$ROOT_DIR/.env"
+DEPLOYMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$DEPLOYMENT_DIR/.." && pwd)"
+ENV_FILE="$DEPLOYMENT_DIR/.env"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Error: .env file not found at $ENV_FILE" >&2
   exit 1
 fi
-
-cd "$ROOT_DIR"
 
 set -a
 source "$ENV_FILE"
@@ -24,8 +23,12 @@ set +a
 : "${SD_HOME:?SD_HOME must be set in .env}"
 : "${TOOL_DATA:?TOOL_DATA must be set in .env}"
 : "${TOOL_LOG:?TOOL_LOG must be set in .env}"
-: "${IMAGE_NAME:?IMAGE_NAME must be set in .env}"
-: "${VOLUME_NAME:?VOLUME_NAME must be set in .env}"
+IMAGE_TAG="${1:-${IMAGE_NAME:?IMAGE_NAME must be set in .env}}"
+
+if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]]; then
+  echo "Error: invalid image tag: $IMAGE_TAG" >&2
+  exit 1
+fi
 
 podman build \
   --build-arg APP_USER="$APP_USER" \
@@ -37,11 +40,10 @@ podman build \
   --build-arg SD_HOME="$SD_HOME" \
   --build-arg TOOL_DATA="$TOOL_DATA" \
   --build-arg TOOL_LOG="$TOOL_LOG" \
+  --arch amd64 \
   --format docker \
-  -t "$IMAGE_NAME" \
-  .
+  -t "$IMAGE_TAG" \
+  -f "$DEPLOYMENT_DIR/Dockerfile" \
+  "$ROOT_DIR"
 
-podman volume inspect "$VOLUME_NAME" >/dev/null 2>&1 || podman volume create "$VOLUME_NAME" >/dev/null
-
-echo "Build completed for image: $IMAGE_NAME"
-echo "Volume ready: $VOLUME_NAME"
+echo "Build completed for image: $IMAGE_TAG"

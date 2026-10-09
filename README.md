@@ -40,9 +40,10 @@ Use this directory on the host to build and manage the Podman environment.
 
 | File | Purpose |
 | --- | --- |
-| `build.sh` | Builds the Podman image and prepares the named Podman volume. |
+| `build.sh` | Builds a version-tagged Podman image on a connected build machine. |
 | `Dockerfile` | Defines the container image used by the migration environment. |
-| `run.sh` | Creates or reuses the container, starts it, prepares SQL Developer CLI, downloads the SQL Server driver if needed, and copies `sdcli-scripts` into the container when missing. |
+| `run.sh` | Creates or reuses the container and installs customer-staged RPMs without downloading packages. |
+| `install-vendor.sh` | Runs inside the container to install the staged Oracle and Microsoft RPMs locally. |
 | `start.sh` | Starts an existing stopped container. |
 | `stop.sh` | Stops the running container. |
 
@@ -63,24 +64,21 @@ On the host machine, you need:
 - Podman installed
 - network access to the source SQL Server database
 - network access to the target Oracle database
-- network access for first-time software downloads, unless the required artifacts are already available
 - a `.env` file in the `deployment/` directory for container settings
 
-The `.env` file is used by the deployment scripts and normally contains values such as container name, image name, volume name, user/home paths, SQL Developer download URL, and driver download URL.
+The connected build machine needs internet access for the base image, `yq`, and jTDS. The customer VM does not need registry or software-repository access. Its `.env` contains the container, image repository, separate data/log volume, and user/path settings; it has no package download URLs.
 
 ### Customer-provided proprietary artifacts for offline installation
 
-The planned offline-installation workflow will not distribute Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver, or Microsoft SQL Server command-line tool binaries in the prebuilt image. The customer must obtain the required packages through its own approved vendor account or internal software repository, accept the applicable license terms, and transfer the files to the isolated environment through its approved cloud, on-premises, or physical transfer process.
-
-This is a planned workflow: the current `deployment/build.sh` and `deployment/run.sh` do not yet implement the artifact-directory precheck or installation described below.
+The offline bundle does not distribute Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver, or Microsoft SQL Server command-line tool binaries. The customer obtains the required packages through its approved vendor account or internal software repository, accepts the applicable terms, and transfers them separately to the isolated environment.
 
 | Required software | Customer download source | Files to stage |
 | --- | --- | --- |
-| Oracle SQL Developer | [Oracle SQL Developer downloads](https://www.oracle.com/database/sqldeveloper/technologies/download/) | Linux RPM matching the version pinned by the release, for example `sqldeveloper-<version>.noarch.rpm`. |
-| Oracle Instant Client | [Oracle Instant Client for Linux x86-64 downloads](https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html) | Matching Oracle Linux 9 `x86_64` RPMs: Basic, SQL*Plus, and Tools. Select the exact version and checksums pinned by the release. |
+| Oracle SQL Developer | [Oracle SQL Developer downloads](https://www.oracle.com/database/sqldeveloper/technologies/download/) | Linux `noarch` RPM, for example `sqldeveloper-<version>.noarch.rpm`. |
+| Oracle Instant Client | [Oracle Instant Client for Linux x86-64 downloads](https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html) | Matching Oracle Linux 9 `x86_64` RPMs: Basic, SQL*Plus, and Tools. |
 | Microsoft ODBC Driver 18 and SQL Server command-line tools | [Microsoft offline installation guidance for `mssql-tools18` and `msodbcsql18`](https://learn.microsoft.com/en-us/sql/linux/install-upgrade/setup-tools?view=fabric#offline-installation) | Matching `x86_64` RPMs for `msodbcsql18` and `mssql-tools18`, plus any documented dependencies. The customer must accept the Microsoft EULA. |
 
-For the future installer, place the files in a customer-controlled directory such as:
+Place these files, plus any RPM dependencies reported by the offline install, in a customer-controlled directory such as:
 
 ```text
 customer-artifacts/
@@ -92,7 +90,33 @@ customer-artifacts/
 └── mssql-tools18-<version>.x86_64.rpm
 ```
 
-The planned precheck will validate filenames, package metadata, CPU architecture, version, and SHA-256 against the release manifest before mounting this directory read-only for installation. It verifies technical compatibility only; it does not establish the customer's legal entitlement to use or distribute any vendor software.
+`run.sh` checks that the six expected files are present before creating a container. The container then checks RPM names and CPU architecture before installing only from the read-only mount with DNF repositories disabled. This verifies technical compatibility only; it does not establish legal entitlement.
+
+The following set was smoke-tested on Oracle Linux 9 x86_64 on 2026-10-09. These are direct vendor links for convenience; customers may instead use their approved internal mirror.
+
+- [SQL Developer 26.2 RPM](https://download.oracle.com/otn_software/java/sqldeveloper/sqldeveloper-26.2.0-186.2220.noarch.rpm)
+- [Instant Client 23.26 Basic RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-basic-23.26.3.0.0-1.el9.x86_64.rpm), [SQL*Plus RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-sqlplus-23.26.3.0.0-1.el9.x86_64.rpm), and [Tools RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-tools-23.26.3.0.0-1.el9.x86_64.rpm)
+- [Microsoft ODBC Driver 18 18.7.1.1 RPM](https://packages.microsoft.com/rhel/9.0/prod/Packages/m/msodbcsql18-18.7.1.1-1.x86_64.rpm) and [mssql-tools18 18.7.1.1 RPM](https://packages.microsoft.com/rhel/9.0/prod/Packages/m/mssql-tools18-18.7.1.1-1.x86_64.rpm)
+
+### Offline handoff
+
+On a connected Linux/amd64 build host, create a versioned bundle:
+
+~~~bash
+./release/build-offline.sh 1.0.0
+~~~
+
+Transfer `dist/sdcli-autokit-1.0.0-linux-amd64.tar.gz` and its adjacent `.sha256` file through any approved cloud, on-premises, or physical method. On the customer VM:
+
+~~~bash
+sha256sum -c sdcli-autokit-1.0.0-linux-amd64.tar.gz.sha256
+tar -xzf sdcli-autokit-1.0.0-linux-amd64.tar.gz
+cd sdcli-autokit-1.0.0-linux-amd64
+podman load -i image.tar
+./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+~~~
+
+The EULA flag records the operator's acknowledgement required for the Microsoft packages; it does not replace the vendor terms. On a system where SELinux labels are not applicable, remove `,Z` from the three `-v` options in `deployment/run.sh`.
 
 ## Configure `config.yaml`
 
@@ -224,16 +248,21 @@ If your config uses different placeholder names, export those names instead. The
 
 ## First-time setup
 
-### 1. Build and start the container
+### 1. Build and start the container on a connected development machine
 
 From the `deployment/` directory:
 
 ```bash
 ./build.sh
-./run.sh
 ```
 
-`build.sh` builds the Podman image and prepares the shared volume. `run.sh` creates or reuses the container and prepares the SQL Developer CLI environment.
+For an offline customer VM, use the bundle workflow above instead. After loading the offline image, run:
+
+```bash
+./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+```
+
+`run.sh` creates the separate data/log volumes, mounts the RPM directory read-only, and prepares the SQL Developer CLI environment without network downloads.
 
 For normal daily use after the container already exists:
 
@@ -397,8 +426,9 @@ If you rerun a phase with `--run`, the new output is appended to the existing ru
 Run deployment commands from `deployment/`:
 
 ```bash
-./build.sh          # Build image and prepare volume
-./run.sh            # Create/reuse/start container and prepare sdcli environment
+./build.sh          # Build image on a connected development machine
+./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+                    # Create/reuse container and install staged RPMs locally
 ./start.sh          # Start existing container
 ./stop.sh           # Stop running container
 ```
@@ -423,7 +453,7 @@ Run migration commands from `sdcli-scripts/`:
 - Use `--dry-run` to confirm config and command construction before a real run.
 - Run `--conn-setup` again if source or target connection details changed.
 - Use `--run <run_id>` when rerunning a later phase against files from an existing run.
-- If the container does not exist, run `deployment/run.sh` before `deployment/start.sh`.
+- If the container does not exist, run `deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula` before `deployment/start.sh`.
 
 ## Notes for maintainers
 

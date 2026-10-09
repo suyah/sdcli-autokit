@@ -11,6 +11,14 @@
 !deployment/
 !deployment/**
 
+# Track the offline release script.
+!release/
+!release/**
+
+# Docker must receive only the Dockerfile build input. Vendor RPMs and
+# customer configuration cannot enter the image build context.
+!.dockerignore
+
 # Track sdcli-scripts folder
 !sdcli-scripts/
 !sdcli-scripts/**

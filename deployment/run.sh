@@ -9,172 +9,173 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-cd "$ROOT_DIR"
-
 set -a
 source "$ENV_FILE"
 set +a
 
 CONTAINER_NAME="${CONTAINER_NAME:?CONTAINER_NAME must be set in .env}"
 CONTAINER_HOSTNAME="${CONTAINER_HOSTNAME:?CONTAINER_HOSTNAME must be set in .env}"
-IMAGE_NAME="${IMAGE_NAME:?IMAGE_NAME must be set in .env}"
-VOLUME_NAME="${VOLUME_NAME:?VOLUME_NAME must be set in .env}"
-
+IMAGE_REPOSITORY="${IMAGE_REPOSITORY:?IMAGE_REPOSITORY must be set in .env}"
+DATA_VOLUME_NAME="${DATA_VOLUME_NAME:?DATA_VOLUME_NAME must be set in .env}"
+LOG_VOLUME_NAME="${LOG_VOLUME_NAME:?LOG_VOLUME_NAME must be set in .env}"
 HOME_DIR="${HOME_DIR:?HOME_DIR must be set in .env}"
 SD_HOME="${SD_HOME:?SD_HOME must be set in .env}"
-
-SD_RPM_URL="${SD_RPM_URL:?SD_RPM_URL must be set in .env}"
-JTDS_URL="${JTDS_URL:?JTDS_URL must be set in .env}"
-ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR must be set in .env}"
+APP_USER="${APP_USER:?APP_USER must be set in .env}"
+APP_GROUP="${APP_GROUP:?APP_GROUP must be set in .env}"
 
 SD_BIN="${SD_HOME%/}/sqldeveloper/bin/sdcli"
-SD_RPM_FILE="${ARTIFACT_DIR%/}/$(basename "$SD_RPM_URL")"
-JTDS_TARGET_DIR="/u01/app"
-JTDS_TARGET_FILE="${JTDS_TARGET_DIR}/jtds-1.3.1.jar"
+JTDS_TARGET_FILE="/u01/app/jtds-1.3.1.jar"
 SDCLI_SCRIPTS_SRC="$ROOT_DIR/../sdcli-scripts"
 SDCLI_SCRIPTS_DEST="${HOME_DIR%/}/sdcli-scripts"
+INSTALLER_SRC="$ROOT_DIR/install-vendor.sh"
 
-if [[ "${RUN_SH_SOURCE_ONLY:-false}" != "true" ]]; then
-  podman volume inspect "$VOLUME_NAME" >/dev/null 2>&1 || podman volume create "$VOLUME_NAME" >/dev/null
-fi
+usage() {
+  cat <<'USAGE'
+Usage: run.sh --vendor-dir /absolute/path/to/rpms --accept-microsoft-eula
+
+The RPM directory must contain SQL Developer, Oracle Instant Client Basic,
+SQL*Plus, and Tools, plus msodbcsql18 and mssql-tools18 RPMs. It may also
+contain their offline dependencies.
+USAGE
+}
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+require_value() {
+  [[ $# -ge 2 && -n "$2" ]] || fail "missing value for $1"
+}
+
+VENDOR_DIR=""
+ACCEPT_MICROSOFT_EULA=false
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --vendor-dir)
+        require_value "$1" "${2:-}"
+        VENDOR_DIR="$2"
+        shift 2
+        ;;
+      --accept-microsoft-eula)
+        ACCEPT_MICROSOFT_EULA=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "unknown option: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$VENDOR_DIR" ]] || fail "--vendor-dir is required"
+  [[ "$VENDOR_DIR" == /* ]] || fail "--vendor-dir must be an absolute path"
+  [[ "$ACCEPT_MICROSOFT_EULA" == true ]] || fail "--accept-microsoft-eula is required"
+}
+
+require_vendor_rpm() {
+  local label="$1"
+  local pattern="$2"
+  local matches=()
+
+  shopt -s nullglob
+  matches=("$VENDOR_DIR"/$pattern)
+  shopt -u nullglob
+
+  [[ ${#matches[@]} -eq 1 ]] || fail "expected exactly one $label RPM matching $pattern in $VENDOR_DIR"
+  [[ -f "${matches[0]}" && ! -L "${matches[0]}" ]] || fail "$label RPM must be a regular file: ${matches[0]}"
+}
+
+validate_vendor_dir() {
+  [[ -d "$VENDOR_DIR" ]] || fail "vendor RPM directory does not exist: $VENDOR_DIR"
+  require_vendor_rpm "SQL Developer" 'sqldeveloper-*.noarch.rpm'
+  require_vendor_rpm "Instant Client Basic" 'oracle-instantclient*-basic-*.x86_64.rpm'
+  require_vendor_rpm "Instant Client SQL*Plus" 'oracle-instantclient*-sqlplus-*.x86_64.rpm'
+  require_vendor_rpm "Instant Client Tools" 'oracle-instantclient*-tools-*.x86_64.rpm'
+  require_vendor_rpm "Microsoft ODBC Driver 18" 'msodbcsql18-*.x86_64.rpm'
+  require_vendor_rpm "Microsoft SQL Server tools" 'mssql-tools18-*.x86_64.rpm'
+}
+
+load_bundle_version() {
+  local version_file="${VERSION_FILE:-$ROOT_DIR/../VERSION}"
+  local version
+
+  [[ -f "$version_file" ]] || fail "VERSION file not found: $version_file"
+  version="$(<"$version_file")"
+  [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "invalid bundle version in $version_file"
+  IMAGE_NAME="$IMAGE_REPOSITORY:$version"
+}
+
+ensure_image() {
+  podman image exists "$IMAGE_NAME" || fail "image '$IMAGE_NAME' is not loaded; run podman load -i image.tar first"
+  IMAGE_ID="$(podman image inspect "$IMAGE_NAME" --format '{{.Id}}')"
+}
+
+ensure_volumes() {
+  podman volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1 || podman volume create "$DATA_VOLUME_NAME" >/dev/null
+  podman volume inspect "$LOG_VOLUME_NAME" >/dev/null 2>&1 || podman volume create "$LOG_VOLUME_NAME" >/dev/null
+}
+
+container_is_running() {
+  podman ps --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}' | grep -q '^Up'
+}
 
 start_or_reuse_container() {
   if podman container exists "$CONTAINER_NAME"; then
-    echo "Container '$CONTAINER_NAME' already exists."
-    if podman ps --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}' | grep -q '^Up'; then
-      echo "Container is already running."
-      return 0
-    fi
+    local existing_image_id
+    existing_image_id="$(podman container inspect "$CONTAINER_NAME" --format '{{.Image}}')"
+    [[ "$existing_image_id" == "$IMAGE_ID" ]] || fail "container '$CONTAINER_NAME' uses another image; stop and remove it yourself before changing versions"
 
-    echo "Starting existing container..."
-    podman start "$CONTAINER_NAME" >/dev/null
-    return 0
+    if ! container_is_running; then
+      echo "Starting existing container '$CONTAINER_NAME'..."
+      podman start "$CONTAINER_NAME" >/dev/null
+    fi
+    return
   fi
 
-  CMD=(
+  ensure_volumes
+
+  command=(
     podman run
     --restart=always
     --userns=keep-id
     --network host
     -d
     --hostname "$CONTAINER_HOSTNAME"
-    -v "${VOLUME_NAME}:/u01:Z"
+    -v "${DATA_VOLUME_NAME}:/u01/data:Z"
+    -v "${LOG_VOLUME_NAME}:/u01/log:Z"
+    -v "${VENDOR_DIR}:/vendor-rpms:ro,Z"
     --name "$CONTAINER_NAME"
     "$IMAGE_NAME"
   )
 
-  echo "Executing command:"
-  printf ' %q' "${CMD[@]}"
-  echo
-  "${CMD[@]}"
+  echo "Creating container '$CONTAINER_NAME'..."
+  "${command[@]}" >/dev/null
 }
 
-has_existing_sd() {
-  podman exec "$CONTAINER_NAME" bash -lc "test -x '$SD_BIN'"
-}
+install_vendor_packages() {
+  [[ -f "$INSTALLER_SRC" ]] || fail "vendor installer not found: $INSTALLER_SRC"
+  podman cp "$INSTALLER_SRC" "$CONTAINER_NAME:/tmp/install-vendor.sh"
 
-install_sd_if_needed() {
-  if has_existing_sd; then
-    echo "Existing SQL Developer installation found in volume '$VOLUME_NAME' at $SD_BIN"
-    return 0
-  fi
-
-  echo "No existing SQL Developer installation found."
-  echo "Running one-time installer from URL: $SD_RPM_URL"
-
-  podman exec \
-    --env "HOME_DIR=$HOME_DIR" \
-    --env "SD_HOME=$SD_HOME" \
-    --env "ARTIFACT_DIR=$ARTIFACT_DIR" \
-    --env "SD_RPM_URL=$SD_RPM_URL" \
-    --env "SD_RPM_FILE=$SD_RPM_FILE" \
-    "$CONTAINER_NAME" \
-    bash -lc '
-      set -euo pipefail
-
-      : "${HOME_DIR:?HOME_DIR must be set}"
-      : "${SD_HOME:?SD_HOME must be set}"
-      : "${ARTIFACT_DIR:?ARTIFACT_DIR must be set}"
-      : "${SD_RPM_URL:?SD_RPM_URL must be set}"
-      : "${SD_RPM_FILE:?SD_RPM_FILE must be set}"
-
-      mkdir -p "$ARTIFACT_DIR" "$SD_HOME" "$HOME_DIR/.sqldeveloper"
-      if [[ ! -s "$SD_RPM_FILE" ]]; then
-        wget -q -O "$SD_RPM_FILE" "$SD_RPM_URL"
-        echo "Downloaded SQL Developer RPM: $SD_RPM_FILE"
-      fi
-
-      TMP_DIR="$(mktemp -d)"
-      trap "rm -rf \"$TMP_DIR\"" EXIT
-
-      mkdir -p "$TMP_DIR/root" "$TMP_DIR/db"
-
-      rpm --root "$TMP_DIR/root" \
-          --dbpath "$TMP_DIR/db" \
-          --nodeps \
-          --noscripts \
-          --notriggers \
-          -ivh "$SD_RPM_FILE" >/dev/null
-
-      FOUND_DIR="$(find "$TMP_DIR/root" -type d -path "*/sqldeveloper" | head -n 1 || true)"
-      if [[ -z "$FOUND_DIR" ]]; then
-        echo "Error: could not locate sqldeveloper directory after installing RPM"
-        exit 1
-      fi
-
-      rm -rf "$SD_HOME"
-      mkdir -p "$SD_HOME"
-      cp -a "$FOUND_DIR/." "$SD_HOME/"
-
-      printf "SetJavaHome %s\n" "/usr/lib/jvm/java-17-openjdk" > "$HOME_DIR/.sqldeveloper/product.conf"
-
-      test -x "$SD_HOME/sqldeveloper/bin/sdcli"
-    '
-
-  if ! has_existing_sd; then
-    echo "Error: SQL Developer installation completed but sdcli is still missing at $SD_BIN"
+  if ! podman exec \
+      --user root \
+      --env "APP_USER=$APP_USER" \
+      --env "APP_GROUP=$APP_GROUP" \
+      --env "HOME_DIR=$HOME_DIR" \
+      --env "SD_HOME=$SD_HOME" \
+      "$CONTAINER_NAME" \
+      bash /tmp/install-vendor.sh \
+        --vendor-dir /vendor-rpms \
+        --accept-microsoft-eula; then
+    echo "Vendor package installation failed; stopping '$CONTAINER_NAME'." >&2
+    podman stop --time 5 "$CONTAINER_NAME" >/dev/null || true
     exit 1
   fi
-
-  echo "SQL Developer installation verified successfully."
-}
-
-has_existing_jtds() {
-  podman exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'"
-}
-
-install_jtds_if_needed() {
-  if has_existing_jtds; then
-    echo "Existing jtds jar found at $JTDS_TARGET_FILE"
-    return 0
-  fi
-
-  echo "Downloading jtds jar to: $JTDS_TARGET_FILE"
-  podman exec \
-    --env "JTDS_URL=$JTDS_URL" \
-    --env "JTDS_TARGET_DIR=$JTDS_TARGET_DIR" \
-    --env "JTDS_TARGET_FILE=$JTDS_TARGET_FILE" \
-    "$CONTAINER_NAME" \
-    bash -lc '
-      set -euo pipefail
-
-      : "${JTDS_URL:?JTDS_URL must be set}"
-      : "${JTDS_TARGET_DIR:?JTDS_TARGET_DIR must be set}"
-      : "${JTDS_TARGET_FILE:?JTDS_TARGET_FILE must be set}"
-
-      mkdir -p "$JTDS_TARGET_DIR"
-      if [[ ! -s "$JTDS_TARGET_FILE" ]]; then
-        wget -q -O "$JTDS_TARGET_FILE" "$JTDS_URL"
-        echo "Downloaded jtds jar: $JTDS_TARGET_FILE"
-      fi
-    '
-
-  if ! has_existing_jtds; then
-    echo "Error: jtds download completed but jar is still missing at $JTDS_TARGET_FILE"
-    exit 1
-  fi
-
-  echo "jtds jar download verified successfully."
 }
 
 ensure_sqldeveloper_preferences() {
@@ -184,7 +185,7 @@ ensure_sqldeveloper_preferences() {
     bash -lc '
       set -euo pipefail
 
-      : "${HOME_DIR:?HOME_DIR must be set}"
+      : "$HOME_DIR"
 
       prefs_root="$HOME_DIR/.sqldeveloper"
       if [[ ! -d "$prefs_root" ]]; then
@@ -203,7 +204,7 @@ ensure_sqldeveloper_preferences() {
         exit 0
       fi
 
-      tmp_file="$(mktemp "${preference_file}.XXXXXX")"
+      tmp_file="$(mktemp "$preference_file.XXXXXX")"
       if ! awk '\''
         BEGIN {
           in_options = 0
@@ -247,41 +248,49 @@ ensure_sqldeveloper_preferences() {
 }
 
 sync_sdcli_scripts() {
-  if [[ ! -d "$SDCLI_SCRIPTS_SRC" ]]; then
-    echo "Error: sdcli-scripts directory not found in repository: $SDCLI_SCRIPTS_SRC"
-    exit 1
-  fi
+  [[ -d "$SDCLI_SCRIPTS_SRC" ]] || fail "sdcli-scripts directory not found: $SDCLI_SCRIPTS_SRC"
 
   if podman exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' && test -f '$SDCLI_SCRIPTS_DEST/config.yaml'"; then
-    echo "Existing sdcli-scripts found at $SDCLI_SCRIPTS_DEST"
-    return 0
+    return
   fi
 
-  echo "Syncing sdcli-scripts to: $SDCLI_SCRIPTS_DEST"
   podman exec "$CONTAINER_NAME" bash -lc "mkdir -p '$SDCLI_SCRIPTS_DEST'"
   podman cp "$SDCLI_SCRIPTS_SRC/." "$CONTAINER_NAME:$SDCLI_SCRIPTS_DEST"
+}
+
+check_tools() {
+  local tool
+  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq; do
+    podman exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
+      echo "Error: $tool is missing after installation" >&2
+      return 1
+    }
+  done
+  podman exec "$CONTAINER_NAME" bash -lc 'sqlcmd -? >/dev/null 2>&1' || { echo "Error: sqlcmd did not start" >&2; return 1; }
+  podman exec "$CONTAINER_NAME" bash -lc 'bcp -v >/dev/null 2>&1' || { echo "Error: bcp did not start" >&2; return 1; }
+  podman exec "$CONTAINER_NAME" bash -lc 'sqlplus -version >/dev/null 2>&1' || { echo "Error: sqlplus did not start" >&2; return 1; }
+  podman exec "$CONTAINER_NAME" bash -lc 'sqlldr -help >/dev/null 2>&1' || { echo "Error: sqlldr did not start" >&2; return 1; }
+  podman exec "$CONTAINER_NAME" bash -lc "sdcli --help >/dev/null 2>&1" || { echo "Error: sdcli did not start" >&2; return 1; }
+  podman exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }
+  podman exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh'" || { echo "Error: migration scripts are missing" >&2; return 1; }
 }
 
 if [[ "${RUN_SH_SOURCE_ONLY:-false}" == "true" ]]; then
   return 0 2>/dev/null || exit 0
 fi
 
+parse_args "$@"
+validate_vendor_dir
+load_bundle_version
+ensure_image
 start_or_reuse_container
-install_sd_if_needed
-install_jtds_if_needed
+install_vendor_packages
 ensure_sqldeveloper_preferences
 sync_sdcli_scripts
 
-echo
-echo "=== container status ==="
-podman ps -a --filter "name=^${CONTAINER_NAME}$" || true
+if ! check_tools; then
+  podman stop --time 5 "$CONTAINER_NAME" >/dev/null || true
+  exit 1
+fi
 
-echo
-echo "=== quick checks ==="
-podman exec "$CONTAINER_NAME" bash -lc "test -x '$SD_BIN' && echo 'sdcli: OK'" || true
-podman exec "$CONTAINER_NAME" bash -lc "command -v sdcli && echo 'sdcli on PATH: OK'" || true
-podman exec "$CONTAINER_NAME" bash -lc "command -v sqlcmd && sqlcmd -? >/dev/null 2>&1 && echo 'sqlcmd: OK'" || true
-podman exec "$CONTAINER_NAME" bash -lc "command -v bcp && echo 'bcp: OK'" || true
-podman exec "$CONTAINER_NAME" bash -lc "command -v jq && echo 'jq: OK'" || true
-podman exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE' && echo 'jtds jar: OK'" || true
-podman exec "$CONTAINER_NAME" bash -lc "test -d '$SDCLI_SCRIPTS_DEST' && echo 'sdcli-scripts: OK'" || true
+echo "Container '$CONTAINER_NAME' is ready with image '$IMAGE_NAME'."
