@@ -15,9 +15,13 @@
 !sdcli-scripts/
 !sdcli-scripts/**
 
-# Track project design and implementation documents
+# Track this feature's design and implementation documents
 !docs/
-!docs/**
+!docs/superpowers/
+!docs/superpowers/specs/
+!docs/superpowers/specs/2026-10-09-offline-container-distribution-design.md
+!docs/superpowers/plans/
+!docs/superpowers/plans/2026-10-09-offline-container-distribution.md
 
 # Never track backup files
 *.bak

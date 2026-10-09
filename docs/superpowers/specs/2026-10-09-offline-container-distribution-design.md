@@ -241,4 +241,3 @@ The feature is accepted when a clean test VM with Podman, no registry credential
 6. retain data and logs across stop/start and container replacement.
 
 No runtime command may attempt to contact a public software repository or container registry during this acceptance test.
-
