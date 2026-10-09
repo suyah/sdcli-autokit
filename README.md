@@ -68,6 +68,32 @@ On the host machine, you need:
 
 The `.env` file is used by the deployment scripts and normally contains values such as container name, image name, volume name, user/home paths, SQL Developer download URL, and driver download URL.
 
+### Customer-provided proprietary artifacts for offline installation
+
+The planned offline-installation workflow will not distribute Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver, or Microsoft SQL Server command-line tool binaries in the prebuilt image. The customer must obtain the required packages through its own approved vendor account or internal software repository, accept the applicable license terms, and transfer the files to the isolated environment through its approved cloud, on-premises, or physical transfer process.
+
+This is a planned workflow: the current `deployment/build.sh` and `deployment/run.sh` do not yet implement the artifact-directory precheck or installation described below.
+
+| Required software | Customer download source | Files to stage |
+| --- | --- | --- |
+| Oracle SQL Developer | [Oracle SQL Developer downloads](https://www.oracle.com/database/sqldeveloper/technologies/download/) | Linux RPM matching the version pinned by the release, for example `sqldeveloper-<version>.noarch.rpm`. |
+| Oracle Instant Client | [Oracle Instant Client for Linux x86-64 downloads](https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html) | Matching Oracle Linux 9 `x86_64` RPMs: Basic, SQL*Plus, and Tools. Select the exact version and checksums pinned by the release. |
+| Microsoft ODBC Driver 18 and SQL Server command-line tools | [Microsoft offline installation guidance for `mssql-tools18` and `msodbcsql18`](https://learn.microsoft.com/en-us/sql/linux/install-upgrade/setup-tools?view=fabric#offline-installation) | Matching `x86_64` RPMs for `msodbcsql18` and `mssql-tools18`, plus any documented dependencies. The customer must accept the Microsoft EULA. |
+
+For the future installer, place the files in a customer-controlled directory such as:
+
+```text
+customer-artifacts/
+├── sqldeveloper-<version>.noarch.rpm
+├── oracle-instantclient<major>-basic-<version>.el9.x86_64.rpm
+├── oracle-instantclient<major>-sqlplus-<version>.el9.x86_64.rpm
+├── oracle-instantclient<major>-tools-<version>.el9.x86_64.rpm
+├── msodbcsql18-<version>.x86_64.rpm
+└── mssql-tools18-<version>.x86_64.rpm
+```
+
+The planned precheck will validate filenames, package metadata, CPU architecture, version, and SHA-256 against the release manifest before mounting this directory read-only for installation. It verifies technical compatibility only; it does not establish the customer's legal entitlement to use or distribute any vendor software.
+
 ## Configure `config.yaml`
 
 The migration runner reads migration settings from:
