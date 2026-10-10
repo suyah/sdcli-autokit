@@ -154,7 +154,7 @@ defaults:
     bcp_tls_mode: optional
   target:
     type: oracle
-    # For Autonomous Database mTLS, uncomment this and use a wallet alias below.
+    # For Autonomous Database mTLS, uncomment this and keep TCPS URLs below.
     # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_myadb
   offload_preferences:
     packet_size: 65535
@@ -167,7 +167,7 @@ defaults:
 migration_repository:
   type: oracle
   name: repo
-  conn: your_repo_service_high
+  conn: tcps://your-repo-host:1522/your_repo_service?ssl_server_dn_match=yes
   repo_user:
     connection_name: migration_repo
     user: migrep
@@ -184,7 +184,7 @@ migrations:
       user: sa
       password: "${SOURCE_PASSWORD}"
     target:
-      conn: your_target_service_high
+      conn: tcps://your-target-host:1522/your_target_service?ssl_server_dn_match=yes
       user: admin
       password: "${TARGET_PASSWORD}"
       default_schema_password: "${MIGRATED_SCHEMA_PASSWORD}"
@@ -240,9 +240,9 @@ podman cp /tmp/Wallet_myadb sdcli-autokit:/u01/data/sdcli-autokit/wallets/Wallet
 podman exec --user root sdcli-autokit chown -R sduser:sduser /u01/data/sdcli-autokit/wallets/Wallet_myadb
 ```
 
-Set `defaults.target.wallet_dir` to that directory. Then replace both `migration_repository.conn` and each `migrations[].target.conn` with the appropriate alias from the wallet's `tnsnames.ora` file, such as `your_repo_service_high`. The migration launcher sets both `TNS_ADMIN` for SQL*Plus/SQL*Loader and `oracle.net.tns_admin` for SDCLI's JDBC connections.
+Set `defaults.target.wallet_dir` to that directory. Keep `migration_repository.conn` and each `migrations[].target.conn` in the existing `tcps://host:port/service?ssl_server_dn_match=yes` form, using the host, port, and service name from the wallet's `tnsnames.ora` file. The migration launcher sets both `TNS_ADMIN` for SQL*Plus/SQL*Loader and `oracle.net.tns_admin` for SDCLI's JDBC connections.
 
-The direct `tcps://host:port/service` form does not configure the wallet. For mTLS, use the alias instead.
+Do not use a bare TNS alias in these fields: SQL Developer's SDCLI `-connDetails` parser rejects it. The wallet supplies the mTLS credentials; the TCPS URL supplies the database endpoint.
 
 ### Password variables
 

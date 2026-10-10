@@ -11,7 +11,7 @@ defaults:
   target:
     type: oracle
     # Optional. For Autonomous Database mTLS, set this to the unzipped
-    # customer wallet directory and use a tnsnames.ora alias for each Oracle conn.
+    # customer wallet directory and keep each Oracle conn in tcps:// URL form.
     # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_myadb
 
   offload_preferences:

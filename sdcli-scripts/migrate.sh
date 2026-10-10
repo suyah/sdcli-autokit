@@ -911,6 +911,11 @@ write_load_tns_alias() {
 
   tns_dir="$AUTOKIT_DIR/tns"
   mkdir -p "$tns_dir"
+  if [[ -n "$ORACLE_WALLET_DIR" ]]; then
+    # SQL*Loader uses the generated alias below. Preserve the wallet files in
+    # that generated TNS_ADMIN directory so its mTLS connection remains valid.
+    cp -a "$ORACLE_WALLET_DIR/." "$tns_dir/"
+  fi
   {
     echo "$alias_name ="
     echo "  (DESCRIPTION ="
