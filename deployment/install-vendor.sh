@@ -121,6 +121,14 @@ if [[ ! -x "$SD_HOME/sqldeveloper/bin/sdcli" ]]; then
   printf 'SetJavaHome %s\n' '/usr/lib/jvm/java-17-openjdk' > "$HOME_DIR/.sqldeveloper/product.conf"
 fi
 
+# SQL Developer 26.2 includes Windows-only directives that its Linux launcher
+# does not implement. They are irrelevant on Linux but otherwise print a shell
+# error on every sdcli invocation.
+for launcher_config in "$SD_HOME/ide/bin/jdk.conf" "$SD_HOME/sqldeveloper/bin/java11.conf"; do
+  [[ -f "$launcher_config" ]] || continue
+  sed -i -E '/^[[:space:]]*AddWindowsVM11OrHigherOption[[:space:]]/s/^/# /' "$launcher_config"
+done
+
 rpm_files=()
 shopt -s nullglob
 for rpm_file in "$VENDOR_DIR"/*.rpm; do

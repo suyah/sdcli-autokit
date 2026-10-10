@@ -9,7 +9,10 @@ defaults:
     bcp_tls_mode: optional
 
   target:
-    type: oracle    
+    type: oracle
+    # Optional. For Autonomous Database mTLS, set this to the unzipped
+    # customer wallet directory and use a tnsnames.ora alias for each Oracle conn.
+    # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_myadb
 
   offload_preferences:
     packet_size: 65535

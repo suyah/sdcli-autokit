@@ -154,6 +154,8 @@ defaults:
     bcp_tls_mode: optional
   target:
     type: oracle
+    # For Autonomous Database mTLS, uncomment this and use a wallet alias below.
+    # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_myadb
   offload_preferences:
     packet_size: 65535
   load_preferences:
@@ -165,7 +167,7 @@ defaults:
 migration_repository:
   type: oracle
   name: repo
-  conn: tcps://your-repo-host:1521/your_repo_service?ssl_server_dn_match=yes
+  conn: your_repo_service_high
   repo_user:
     connection_name: migration_repo
     user: migrep
@@ -182,7 +184,7 @@ migrations:
       user: sa
       password: "${SOURCE_PASSWORD}"
     target:
-      conn: tcps://your-target-host:1521/your_target_service?ssl_server_dn_match=yes
+      conn: your_target_service_high
       user: admin
       password: "${TARGET_PASSWORD}"
       default_schema_password: "${MIGRATED_SCHEMA_PASSWORD}"
@@ -223,6 +225,24 @@ Example:
 source:
   conn: 10.0.1.165:1433:tpcc
 ```
+
+### Autonomous Database mTLS wallet
+
+For an Autonomous Database configured for mTLS, download the database's client-credentials wallet through the customer's OCI tenancy, transfer it separately, and unzip it into the running container's persistent data volume. Do not put the wallet in the image or source repository.
+
+```bash
+# On the customer VM, after run.sh has completed:
+mkdir -p /tmp/Wallet_myadb
+unzip /path/to/Wallet_myadb.zip -d /tmp/Wallet_myadb
+
+podman exec --user root sdcli-autokit mkdir -p /u01/data/sdcli-autokit/wallets
+podman cp /tmp/Wallet_myadb sdcli-autokit:/u01/data/sdcli-autokit/wallets/Wallet_myadb
+podman exec --user root sdcli-autokit chown -R sduser:sduser /u01/data/sdcli-autokit/wallets/Wallet_myadb
+```
+
+Set `defaults.target.wallet_dir` to that directory. Then replace both `migration_repository.conn` and each `migrations[].target.conn` with the appropriate alias from the wallet's `tnsnames.ora` file, such as `your_repo_service_high`. The migration launcher sets both `TNS_ADMIN` for SQL*Plus/SQL*Loader and `oracle.net.tns_admin` for SDCLI's JDBC connections.
+
+The direct `tcps://host:port/service` form does not configure the wallet. For mTLS, use the alias instead.
 
 ### Password variables
 

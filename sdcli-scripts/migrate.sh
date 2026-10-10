@@ -23,6 +23,7 @@ RUN_LOG_FILE=""
 SDCLI_COMMAND_LOG=""
 SDCLI_SUMMARY_FILE=""
 MIGRATION_SUMMARY_FILE=""
+ORACLE_WALLET_DIR=""
 
 declare -a SDCLI_COMMANDS=()
 
@@ -230,6 +231,25 @@ get_optional_value() {
   fi
 }
 
+configure_oracle_wallet() {
+  local wallet_dir
+  wallet_dir="$(get_optional_value '.defaults.target.wallet_dir')"
+  [[ -n "$wallet_dir" ]] || return 0
+
+  [[ "$wallet_dir" == /* ]] || fail "defaults.target.wallet_dir must be an absolute path"
+  [[ "$wallet_dir" != *[[:space:]]* ]] || fail "defaults.target.wallet_dir must not contain whitespace"
+  [[ -d "$wallet_dir" ]] || fail "Oracle wallet directory does not exist: $wallet_dir"
+  [[ -f "$wallet_dir/tnsnames.ora" ]] || fail "Oracle wallet is missing tnsnames.ora: $wallet_dir"
+  [[ -f "$wallet_dir/sqlnet.ora" ]] || fail "Oracle wallet is missing sqlnet.ora: $wallet_dir"
+  [[ -f "$wallet_dir/cwallet.sso" || -f "$wallet_dir/ewallet.sso" || -f "$wallet_dir/ewallet.p12" ]] \
+    || fail "Oracle wallet is missing a wallet file (cwallet.sso, ewallet.sso, or ewallet.p12): $wallet_dir"
+
+  ORACLE_WALLET_DIR="$wallet_dir"
+  export TNS_ADMIN="$ORACLE_WALLET_DIR"
+  export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+${JAVA_TOOL_OPTIONS} }-Doracle.net.tns_admin=$ORACLE_WALLET_DIR"
+  log_info "Oracle mTLS wallet directory: $ORACLE_WALLET_DIR"
+}
+
 migration_value_path() {
   local idx="$1"
   shift
@@ -391,7 +411,7 @@ filter_sdcli_console_output() {
 
 run_sdcli() {
   local cmd=("$@")
-  local printable
+  local printable output_file rc
   printable="$(mask_sensitive "${cmd[@]}")"
 
   log_info "+ $printable"
@@ -404,8 +424,19 @@ run_sdcli() {
     return 0
   fi
 
-  "${cmd[@]}" 2>&1 | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
-  return ${PIPESTATUS[0]}
+  output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_output_XXXXXX")" || return 1
+  set +e
+  "${cmd[@]}" 2>&1 | tee -a "$RUN_LOG_FILE" | tee "$output_file" | filter_sdcli_console_output
+  rc=${PIPESTATUS[0]}
+  set -e
+
+  # SDCLI 26.2 can print a connection failure while returning zero. Treat the
+  # emitted error as a failure so a bad connection is never reported as ready.
+  if grep -q '^Error:' "$output_file"; then
+    rc=1
+  fi
+  rm -f "$output_file"
+  return "$rc"
 }
 
 ensure_connection() {
@@ -526,9 +557,8 @@ setup_repository() {
   init_conn_details="${super_name}:oracle:${super_user}/${super_password}@${repo_conn},${repo_name}:mkrepouser:${repo_user}/${repo_password}:${super_name}"
 
   log_info "Initializing repository '${repo_label}' via connection '${repo_name}'"
-  if ! run_sdcli sdcli migration -actions=init -connDetails="$init_conn_details"; then
-    log_warn "Repository init returned non-zero; continuing (it may already be initialized)"
-  fi
+  run_sdcli sdcli migration -actions=init -connDetails="$init_conn_details" \
+    || fail "Repository initialization failed; verify the Oracle connection and repository user details"
 }
 
 get_migration_index() {
@@ -1771,6 +1801,7 @@ main() {
   else
     validate_config "true"
   fi
+  configure_oracle_wallet
   log_info "Config validation passed"
   log_info "Load tuning source: config.yaml defaults.load_preferences with per-migration overrides in migrations[].load_preferences"
 
