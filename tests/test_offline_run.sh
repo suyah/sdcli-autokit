@@ -33,7 +33,8 @@ if (validate_vendor_dir) >/dev/null 2>&1; then
 fi
 
 grep -F -- '--vendor-dir /vendor-rpms' "$REPO_ROOT/deployment/run.sh" >/dev/null
-grep -F -- '/vendor-rpms:ro,Z' "$REPO_ROOT/deployment/run.sh" >/dev/null
+grep -F -- 'vendor_mount="${VENDOR_DIR}:/vendor-rpms:ro"' "$REPO_ROOT/deployment/run.sh" >/dev/null
+grep -F -- 'vendor_mount+=",Z"' "$REPO_ROOT/deployment/run.sh" >/dev/null
 grep -F -- '--disablerepo=' "$REPO_ROOT/deployment/install-vendor.sh" >/dev/null
 grep -F -- '--accept-microsoft-eula' "$REPO_ROOT/deployment/run.sh" >/dev/null
 ! grep -qE '\b(wget|curl)\b' "$REPO_ROOT/deployment/run.sh"

@@ -15,6 +15,10 @@ printf '%q ' "$@" >> "${PODMAN_LOG:?}"
 printf '\n' >> "$PODMAN_LOG"
 
 case "$1" in
+  info)
+    printf '%s\n' 'amd64'
+    exit 0
+    ;;
   build)
     exit 0
     ;;
@@ -54,7 +58,11 @@ tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/mig
 [[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/VERSION)" == "1.2.3" ]]
 
 expected_hash="$(awk '{print $1}' "$checksum")"
-actual_hash="$(shasum -a 256 "$bundle" | awk '{print $1}')"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_hash="$(sha256sum "$bundle" | awk '{print $1}')"
+else
+  actual_hash="$(shasum -a 256 "$bundle" | awk '{print $1}')"
+fi
 [[ "$expected_hash" == "$actual_hash" ]]
 grep -F -- '-t sdcli-autokit:1.2.3 ' "$podman_log" >/dev/null
 grep -F -- '--arch amd64' "$podman_log" >/dev/null

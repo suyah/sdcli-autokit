@@ -13,15 +13,17 @@ set -a
 source "$ENV_FILE"
 set +a
 
-CONTAINER_NAME="${CONTAINER_NAME:?CONTAINER_NAME must be set in .env}"
+CONTAINER_NAME="${CONTAINER_NAME_OVERRIDE:-${CONTAINER_NAME:?CONTAINER_NAME must be set in .env}}"
 CONTAINER_HOSTNAME="${CONTAINER_HOSTNAME:?CONTAINER_HOSTNAME must be set in .env}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:?IMAGE_REPOSITORY must be set in .env}"
-DATA_VOLUME_NAME="${DATA_VOLUME_NAME:?DATA_VOLUME_NAME must be set in .env}"
-LOG_VOLUME_NAME="${LOG_VOLUME_NAME:?LOG_VOLUME_NAME must be set in .env}"
+DATA_VOLUME_NAME="${DATA_VOLUME_NAME_OVERRIDE:-${DATA_VOLUME_NAME:?DATA_VOLUME_NAME must be set in .env}}"
+LOG_VOLUME_NAME="${LOG_VOLUME_NAME_OVERRIDE:-${LOG_VOLUME_NAME:?LOG_VOLUME_NAME must be set in .env}}"
 HOME_DIR="${HOME_DIR:?HOME_DIR must be set in .env}"
 SD_HOME="${SD_HOME:?SD_HOME must be set in .env}"
 APP_USER="${APP_USER:?APP_USER must be set in .env}"
 APP_GROUP="${APP_GROUP:?APP_GROUP must be set in .env}"
+SQLDEVELOPER_FILE_OUTPUT_OPTION="${SQLDEVELOPER_FILE_OUTPUT_OPTION:-1}"
+CONTAINER_ENGINE="${CONTAINER_ENGINE:-podman}"
 
 SD_BIN="${SD_HOME%/}/sqldeveloper/bin/sdcli"
 JTDS_TARGET_FILE="/u01/app/jtds-1.3.1.jar"
@@ -42,6 +44,10 @@ USAGE
 fail() {
   echo "Error: $*" >&2
   exit 1
+}
+
+container_engine() {
+  "$CONTAINER_ENGINE" "$@"
 }
 
 require_value() {
@@ -105,6 +111,12 @@ load_bundle_version() {
   local version_file="${VERSION_FILE:-$ROOT_DIR/../VERSION}"
   local version
 
+  if [[ -n "${IMAGE_TAG_OVERRIDE:-}" ]]; then
+    [[ "$IMAGE_TAG_OVERRIDE" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || fail "invalid IMAGE_TAG_OVERRIDE"
+    IMAGE_NAME="$IMAGE_TAG_OVERRIDE"
+    return
+  fi
+
   [[ -f "$version_file" ]] || fail "VERSION file not found: $version_file"
   version="$(<"$version_file")"
   [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "invalid bundle version in $version_file"
@@ -112,44 +124,55 @@ load_bundle_version() {
 }
 
 ensure_image() {
-  podman image exists "$IMAGE_NAME" || fail "image '$IMAGE_NAME' is not loaded; run podman load -i image.tar first"
-  IMAGE_ID="$(podman image inspect "$IMAGE_NAME" --format '{{.Id}}')"
+  container_engine image inspect "$IMAGE_NAME" >/dev/null 2>&1 || fail "image '$IMAGE_NAME' is not loaded; load or build it before running this command"
+  IMAGE_ID="$(container_engine image inspect "$IMAGE_NAME" --format '{{.Id}}')"
 }
 
 ensure_volumes() {
-  podman volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1 || podman volume create "$DATA_VOLUME_NAME" >/dev/null
-  podman volume inspect "$LOG_VOLUME_NAME" >/dev/null 2>&1 || podman volume create "$LOG_VOLUME_NAME" >/dev/null
+  container_engine volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1 || container_engine volume create "$DATA_VOLUME_NAME" >/dev/null
+  container_engine volume inspect "$LOG_VOLUME_NAME" >/dev/null 2>&1 || container_engine volume create "$LOG_VOLUME_NAME" >/dev/null
 }
 
 container_is_running() {
-  podman ps --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}' | grep -q '^Up'
+  container_engine ps --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}' | grep -q '^Up'
 }
 
 start_or_reuse_container() {
-  if podman container exists "$CONTAINER_NAME"; then
+  if container_engine container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
     local existing_image_id
-    existing_image_id="$(podman container inspect "$CONTAINER_NAME" --format '{{.Image}}')"
+    existing_image_id="$(container_engine container inspect "$CONTAINER_NAME" --format '{{.Image}}')"
     [[ "$existing_image_id" == "$IMAGE_ID" ]] || fail "container '$CONTAINER_NAME' uses another image; stop and remove it yourself before changing versions"
 
     if ! container_is_running; then
       echo "Starting existing container '$CONTAINER_NAME'..."
-      podman start "$CONTAINER_NAME" >/dev/null
+      container_engine start "$CONTAINER_NAME" >/dev/null
     fi
     return
   fi
 
   ensure_volumes
 
+  local data_mount="${DATA_VOLUME_NAME}:/u01/data"
+  local log_mount="${LOG_VOLUME_NAME}:/u01/log"
+  local vendor_mount="${VENDOR_DIR}:/vendor-rpms:ro"
   command=(
-    podman run
+    "$CONTAINER_ENGINE" run
     --restart=always
-    --userns=keep-id
+  )
+  if [[ "$CONTAINER_ENGINE" == "podman" ]]; then
+    data_mount+=":Z"
+    log_mount+=":Z"
+    vendor_mount+=",Z"
+    command+=(--userns=keep-id)
+  fi
+
+  command+=(
     --network host
     -d
     --hostname "$CONTAINER_HOSTNAME"
-    -v "${DATA_VOLUME_NAME}:/u01/data:Z"
-    -v "${LOG_VOLUME_NAME}:/u01/log:Z"
-    -v "${VENDOR_DIR}:/vendor-rpms:ro,Z"
+    -v "$data_mount"
+    -v "$log_mount"
+    -v "$vendor_mount"
     --name "$CONTAINER_NAME"
     "$IMAGE_NAME"
   )
@@ -160,9 +183,9 @@ start_or_reuse_container() {
 
 install_vendor_packages() {
   [[ -f "$INSTALLER_SRC" ]] || fail "vendor installer not found: $INSTALLER_SRC"
-  podman cp "$INSTALLER_SRC" "$CONTAINER_NAME:/tmp/install-vendor.sh"
+  container_engine cp "$INSTALLER_SRC" "$CONTAINER_NAME:/tmp/install-vendor.sh"
 
-  if ! podman exec \
+  if ! container_engine exec \
       --user root \
       --env "APP_USER=$APP_USER" \
       --env "APP_GROUP=$APP_GROUP" \
@@ -173,19 +196,21 @@ install_vendor_packages() {
         --vendor-dir /vendor-rpms \
         --accept-microsoft-eula; then
     echo "Vendor package installation failed; stopping '$CONTAINER_NAME'." >&2
-    podman stop --time 5 "$CONTAINER_NAME" >/dev/null || true
+    container_engine stop --time 5 "$CONTAINER_NAME" >/dev/null || true
     exit 1
   fi
 }
 
 ensure_sqldeveloper_preferences() {
-  podman exec \
+  container_engine exec \
     --env "HOME_DIR=$HOME_DIR" \
+    --env "SQLDEVELOPER_FILE_OUTPUT_OPTION=$SQLDEVELOPER_FILE_OUTPUT_OPTION" \
     "$CONTAINER_NAME" \
     bash -lc '
       set -euo pipefail
 
       : "$HOME_DIR"
+      : "$SQLDEVELOPER_FILE_OUTPUT_OPTION"
 
       prefs_root="$HOME_DIR/.sqldeveloper"
       if [[ ! -d "$prefs_root" ]]; then
@@ -199,13 +224,8 @@ ensure_sqldeveloper_preferences() {
         exit 0
       fi
 
-      if grep -q "<value n=\"FileOutputOption\" v=\"2\"/>" "$preference_file"; then
-        echo "SQL Developer FileOutputOption already configured: $preference_file"
-        exit 0
-      fi
-
       tmp_file="$(mktemp "$preference_file.XXXXXX")"
-      if ! awk '\''
+      if ! awk -v output_option="$SQLDEVELOPER_FILE_OUTPUT_OPTION" '\''
         BEGIN {
           in_options = 0
           inserted = 0
@@ -213,18 +233,33 @@ ensure_sqldeveloper_preferences() {
         $0 ~ /<hash n="oracle\.dbtools\.migration\.workbench\.core\.preferences\.MigrationWorkbenchOptions">/ {
           in_options = 1
         }
+        in_options && $0 ~ /<value n="FileOutputOption"/ {
+          if (!inserted) {
+            match($0, /^[[:space:]]*/)
+            indent = substr($0, RSTART, RLENGTH)
+            print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
+            inserted = 1
+          }
+          next
+        }
         in_options && $0 ~ /<value n="DefaultRepository"/ && !inserted {
           print
           match($0, /^[[:space:]]*/)
           indent = substr($0, RSTART, RLENGTH)
-          print indent "<value n=\"FileOutputOption\" v=\"2\"/>"
+          print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
           inserted = 1
           next
         }
         in_options && $0 ~ /<list n="MigrationRepositories">/ && !inserted {
           match($0, /^[[:space:]]*/)
           indent = substr($0, RSTART, RLENGTH)
-          print indent "<value n=\"FileOutputOption\" v=\"2\"/>"
+          print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
+          inserted = 1
+        }
+        $0 ~ /<\/ide:preferences>/ && !in_options && !inserted {
+          print "   <hash n=\"oracle.dbtools.migration.workbench.core.preferences.MigrationWorkbenchOptions\">"
+          print "      <value n=\"FileOutputOption\" v=\"" output_option "\"/>"
+          print "   </hash>"
           inserted = 1
         }
         {
@@ -241,38 +276,54 @@ ensure_sqldeveloper_preferences() {
         exit 0
       fi
 
+      if cmp -s "$tmp_file" "$preference_file"; then
+        rm -f "$tmp_file"
+        echo "SQL Developer FileOutputOption already configured: $preference_file"
+        exit 0
+      fi
+
       cat "$tmp_file" > "$preference_file"
       rm -f "$tmp_file"
-      echo "Configured SQL Developer FileOutputOption: $preference_file"
+      echo "Configured SQL Developer FileOutputOption=$SQLDEVELOPER_FILE_OUTPUT_OPTION: $preference_file"
     '
+}
+
+initialize_sqldeveloper_preferences() {
+  # Start SQL Developer once before patching its preference. Some releases
+  # create product-preferences.xml only after driver registration; migrate.sh
+  # repeats the idempotent preference update after that command.
+  container_engine exec "$CONTAINER_NAME" bash -lc "'$SD_BIN' --help >/dev/null 2>&1" || {
+    echo "Error: sdcli did not start while initializing preferences" >&2
+    return 1
+  }
 }
 
 sync_sdcli_scripts() {
   [[ -d "$SDCLI_SCRIPTS_SRC" ]] || fail "sdcli-scripts directory not found: $SDCLI_SCRIPTS_SRC"
 
-  if podman exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' && test -f '$SDCLI_SCRIPTS_DEST/config.yaml'"; then
+  if container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' && test -f '$SDCLI_SCRIPTS_DEST/config.yaml'"; then
     return
   fi
 
-  podman exec "$CONTAINER_NAME" bash -lc "mkdir -p '$SDCLI_SCRIPTS_DEST'"
-  podman cp "$SDCLI_SCRIPTS_SRC/." "$CONTAINER_NAME:$SDCLI_SCRIPTS_DEST"
+  container_engine exec "$CONTAINER_NAME" bash -lc "mkdir -p '$SDCLI_SCRIPTS_DEST'"
+  container_engine cp "$SDCLI_SCRIPTS_SRC/." "$CONTAINER_NAME:$SDCLI_SCRIPTS_DEST"
 }
 
 check_tools() {
   local tool
   for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq; do
-    podman exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
+    container_engine exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
       echo "Error: $tool is missing after installation" >&2
       return 1
     }
   done
-  podman exec "$CONTAINER_NAME" bash -lc 'sqlcmd -? >/dev/null 2>&1' || { echo "Error: sqlcmd did not start" >&2; return 1; }
-  podman exec "$CONTAINER_NAME" bash -lc 'bcp -v >/dev/null 2>&1' || { echo "Error: bcp did not start" >&2; return 1; }
-  podman exec "$CONTAINER_NAME" bash -lc 'sqlplus -version >/dev/null 2>&1' || { echo "Error: sqlplus did not start" >&2; return 1; }
-  podman exec "$CONTAINER_NAME" bash -lc 'sqlldr -help >/dev/null 2>&1' || { echo "Error: sqlldr did not start" >&2; return 1; }
-  podman exec "$CONTAINER_NAME" bash -lc "sdcli --help >/dev/null 2>&1" || { echo "Error: sdcli did not start" >&2; return 1; }
-  podman exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }
-  podman exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh'" || { echo "Error: migration scripts are missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc 'sqlcmd -? >/dev/null 2>&1' || { echo "Error: sqlcmd did not start" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc 'bcp -v >/dev/null 2>&1' || { echo "Error: bcp did not start" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc 'sqlplus -version >/dev/null 2>&1' || { echo "Error: sqlplus did not start" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc 'sqlldr -help >/dev/null 2>&1' || { echo "Error: sqlldr did not start" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "sdcli --help >/dev/null 2>&1" || { echo "Error: sdcli did not start" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh'" || { echo "Error: migration scripts are missing" >&2; return 1; }
 }
 
 if [[ "${RUN_SH_SOURCE_ONLY:-false}" == "true" ]]; then
@@ -280,16 +331,23 @@ if [[ "${RUN_SH_SOURCE_ONLY:-false}" == "true" ]]; then
 fi
 
 parse_args "$@"
+[[ "$SQLDEVELOPER_FILE_OUTPUT_OPTION" =~ ^[0-9]+$ ]] || fail "SQLDEVELOPER_FILE_OUTPUT_OPTION must be a non-negative integer"
+case "$CONTAINER_ENGINE" in
+  podman|docker) ;;
+  *) fail "CONTAINER_ENGINE must be podman or docker, not '$CONTAINER_ENGINE'" ;;
+esac
+command -v "$CONTAINER_ENGINE" >/dev/null 2>&1 || fail "$CONTAINER_ENGINE command not found"
 validate_vendor_dir
 load_bundle_version
 ensure_image
 start_or_reuse_container
 install_vendor_packages
-ensure_sqldeveloper_preferences
 sync_sdcli_scripts
+initialize_sqldeveloper_preferences
+ensure_sqldeveloper_preferences
 
 if ! check_tools; then
-  podman stop --time 5 "$CONTAINER_NAME" >/dev/null || true
+  container_engine stop --time 5 "$CONTAINER_NAME" >/dev/null || true
   exit 1
 fi
 

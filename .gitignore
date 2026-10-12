@@ -31,6 +31,34 @@
 !docs/superpowers/plans/
 !docs/superpowers/plans/2026-10-09-offline-container-distribution.md
 
+# Track the migration reliability review and mandatory-change design.
+!docs/migration-reliability-priorities.md
+!docs/migration-reliability-design.md
+
+# Track regression tests for the mandatory migration reliability fixes.
+!tests/
+!tests/sdcli_error_exit_test.sh
+!tests/sdcli_success_marker_test.sh
+!tests/sdcli_success_marker_error_test.sh
+!tests/sdcli_conversion_diagnostic_test.sh
+!tests/offload_bcp_failure_test.sh
+!tests/deploy_orchestration_test.sh
+!tests/generated_deploy_fallback_test.sh
+!tests/validate_phase_test.sh
+!tests/model_selection_test.sh
+!tests/run_layout_test.sh
+!tests/data_reconciliation_test.sh
+!tests/repository_lock_test.sh
+!tests/phase_status_resume_test.sh
+!tests/load_tns_alias_test.sh
+!tests/deploy_schema_password_test.sh
+!tests/offload_password_argv_test.sh
+!tests/test_offline_bundle.sh
+!tests/test_offline_run.sh
+!tests/target_row_count_test.sh
+!tests/offload_multiple_scripts_test.sh
+!tests/target_object_validation_test.sh
+
 # Never track backup files
 *.bak
 **/*.bak

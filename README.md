@@ -190,6 +190,27 @@ migrations:
       default_schema_password: "${MIGRATED_SCHEMA_PASSWORD}"
 ```
 
+For an Autonomous Database wallet, set `defaults.target.wallet_dir` to the
+unpacked wallet directory and use the full `tcps://host:port/service?...` URL
+in both Oracle `conn` fields. SQLcl can resolve a wallet TNS alias such as
+`myadb_high`, but SQL Developer 26.2's `sdcli migration -actions=mkconn`
+does not resolve that alias inside `-connDetails`; using it produces
+`ORA-17870` even when the wallet is valid.
+
+SDCLI commands have no timeout by default because metadata capture can take a
+long time over a high-latency database connection. Set
+`SDCLI_COMMAND_TIMEOUT_SEC` before running `migrate.sh` when an operator wants
+a bounded run, for example `SDCLI_COMMAND_TIMEOUT_SEC=1800`.
+
+Before a source connection is created or metadata is captured, the script tests
+the configured SQL Server `host:port` from inside its execution environment.
+This prevents SQL Developer's JTDS driver from waiting on a dropped TCP
+connection. The default preflight limit is 10 seconds; set
+`SDCLI_CONNECT_TIMEOUT_SEC` to use a different positive limit.
+
+Keep credentials in environment-variable placeholders as shown above. Their
+values are redacted from SDCLI console output, command summaries, and run logs.
+
 ### Migration name
 
 Each entry under `migrations` has a `name`. That value is the migration name passed to `migrate.sh`.
@@ -369,7 +390,15 @@ The full flow runs:
 capture -> convert -> generate -> datamove -> offload -> deploy -> load -> postdeploy -> validate
 ```
 
-In plain language, this captures SQL Server metadata, converts it for Oracle, generates scripts, exports data, deploys the Oracle schema objects needed before load, loads data, runs selected post-load scripts, and checks logs for common issues.
+In plain language, this captures SQL Server metadata, converts it for Oracle,
+generates scripts, exports data, deploys the Oracle schema objects needed before
+load, loads data, runs every post-load object script listed by SQL Developer's
+generated `master.sql` files, and validates logs and per-table row counts.
+
+Only one repository workflow may run at a time. The script creates an atomic
+lock under `<project_root>/.locks` before repository work so SDCLI's `latest`
+model cannot be changed by another run. A stale lock is not removed
+automatically; the error identifies its directory for operator review.
 
 ## Run a single phase
 
@@ -398,8 +427,8 @@ Supported phases:
 | `offload` | Export data from SQL Server. |
 | `deploy` | Run generated Oracle schema setup needed before loading data. |
 | `load` | Load exported data into Oracle. |
-| `postdeploy` | Run selected post-load Oracle scripts. |
-| `validate` | Check migration logs for common errors and warnings. |
+| `postdeploy` | Run all non-predata scripts in generated master order, followed by each schema's `post.sql`. |
+| `validate` | Fail on log/load errors and reconcile exported, loaded, rejected, discarded, and final Oracle table row counts. |
 
 ### Model and run behavior
 
@@ -411,6 +440,18 @@ For normal use:
 - `--run <run_id>` is only for non-capture single-phase runs and reuses an existing run directory.
 
 Use `--run` when rerunning phases that depend on files already generated in a previous run, such as `deploy`, `load`, `postdeploy`, or `validate`.
+
+Phase status is append-only. Repeating a mutating phase that already succeeded
+is rejected by default. If the repeat is intentional, make it explicit:
+
+```bash
+./migrate.sh tpcc --phase load --run 20260427_014117 --rerun-completed
+```
+
+This flag does not clean or truncate the Oracle target. Before repeating
+`deploy` or `load`, the operator remains responsible for making the target safe
+for that operation. `validate` is read-only and may be repeated without the
+flag.
 
 The run id can be provided with or without the `run_` prefix:
 
@@ -453,8 +494,13 @@ Important files:
 | `autokit/migrate.log` | Main run log. Start here when troubleshooting. |
 | `autokit/sdcli_commands.log` | SDCLI commands executed by the run. |
 | `autokit/sdcli_commands_summary.txt` | Short command summary printed at the end of SDCLI runs. |
-| `autokit/migration_summary.csv` | High-level migration result summary. |
-| `autokit/deploy_manifest.csv` | SQL scripts executed or skipped during deploy/postdeploy. |
+| `autokit/migration_summary.csv` | Append-only high-level migration result summary. |
+| `autokit/phase_status.tsv` | Append-only phase attempts and their final status. |
+| `autokit/deploy_manifest.tsv` | Generated SQL inventory and scripts executed during deploy/postdeploy. |
+| `autokit/bcp_status.tsv` | Per-table SQL Server export status and exported row count. |
+| `autokit/sqlldr_status.tsv` | Per-table Oracle load status, loaded/rejected/discarded counts, and paths. |
+| `autokit/reconciliation.tsv` | Source-to-target per-table row reconciliation. Every row must be `PASS`. |
+| `autokit/validation_summary.txt` | Final `PASS` or `FAIL` and issue totals. |
 | `sdcli/` | SDCLI-generated scripts, logs, and data movement files. |
 
 If you rerun a phase with `--run`, the new output is appended to the existing run log.
@@ -480,6 +526,7 @@ Run migration commands from `sdcli-scripts/`:
 ./migrate.sh <migration_name>
 ./migrate.sh <migration_name> --phase <phase_name>
 ./migrate.sh <migration_name> --phase <phase_name> --run <run_id>
+./migrate.sh <migration_name> --phase <phase_name> --run <run_id> --rerun-completed
 ./migrate.sh <migration_name> --migrate --dry-run
 ```
 
@@ -487,6 +534,8 @@ Run migration commands from `sdcli-scripts/`:
 
 - Start with `autokit/migrate.log` for the full run history.
 - Check `autokit/migration_summary.csv` for a quick status summary.
+- Treat a migration as successful only when `validation_summary.txt` is `PASS`
+  and every row in `reconciliation.tsv` is `PASS`.
 - Check `sdcli/log/error.txt` when SDCLI phases fail.
 - Use `--dry-run` to confirm config and command construction before a real run.
 - Run `--conn-setup` again if source or target connection details changed.
