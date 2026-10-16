@@ -1,0 +1,5 @@
+schema	category	object_name	parent_schema	parent_name	subtype	ordinal	attribute_name	attribute_value	status	detail	origin
+APP	TABLES	CUSTOMER			TABLE				VALID		fixture
+APP	TABLES	ORDERS			TABLE				VALID		fixture
+APP	VIEWS	ACTIVE CUSTOMERS			VIEW				VALID		fixture
+APP	ROUTINES	GETCUSTOMER			PROCEDURE				VALID		fixture
