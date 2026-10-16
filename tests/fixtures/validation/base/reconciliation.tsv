@@ -1,3 +1,3 @@
 source_object	target_object	data_file	exported_rows	loaded_rows	rejected_rows	discarded_rows	target_rows	status	reason
-demo.sales.customer	APP.CUSTOMER	data/sales/customer.dat	2	2	0	0	2	PASS	
-demo.sales.orders	APP.ORDERS	data/sales/orders.dat	1	1	0	0	1	PASS	
+demo.sales.customer	APP.CUSTOMER	data/sales/customer.dat	2	2	0	0	2	PASS	matched
+demo.sales.orders	APP.ORDERS	data/sales/orders.dat	1	1	0	0	1	PASS	matched
