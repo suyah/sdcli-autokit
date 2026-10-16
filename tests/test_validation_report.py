@@ -5,7 +5,10 @@ import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -368,6 +371,152 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("A_APP\tTABLES\tA_TABLE", inventory_lines[1])
         self.assertTrue(comparison_lines[0].startswith("source_schema\tsource_category"))
         self.assertIn("A_APP", comparison_lines[1])
+
+
+class RendererAndCliTests(unittest.TestCase):
+    def make_report_data(self, *, status="PASS", detail=""):
+        mapping = REPORT.SchemaMapping("sales", "APP", "DATA_FILE", 1, "MAPPED", "")
+        source = object_record("sales", "VIEWS", "special <view>")
+        generated = object_record("APP", "VIEWS", "special <view>")
+        target = object_record("APP", "VIEWS", "special <view>", status="VALID")
+        comparison = REPORT.ComparisonRecord(
+            source_schema=source.schema,
+            source_category=source.category,
+            source_name=source.name,
+            generated_schema=generated.schema,
+            generated_category=generated.category,
+            generated_name=generated.name,
+            target_schema=target.schema,
+            target_category=target.category,
+            target_name=target.name,
+            status=status,
+            reason=detail,
+            origin="fixture & evidence",
+        )
+        return REPORT.ReportData(
+            migration="sales & reporting",
+            run_id="20261016_010203",
+            generated_at="2026-10-16T01:02:03Z",
+            status="PASS" if status == "MATCH" else status,
+            mappings=(mapping,),
+            reconciliation=({"source_object": "sales.customer", "status": "PASS"},),
+            source_inventory=(source,),
+            generated_inventory=(generated,),
+            target_inventory=(target,),
+            comparisons=(comparison,),
+            evidence_issues=(),
+        )
+
+    def test_renderer_is_self_contained_escaped_and_readable_without_javascript(self):
+        report_data = self.make_report_data(status="INVALID_IN_TARGET", detail='<broken & "bad">')
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "migration_report.html"
+            REPORT.render_report(report_data, output)
+            html = output.read_text(encoding="utf-8")
+
+        for heading in (
+            "Run Summary",
+            "Schema Mapping",
+            "Data Reconciliation",
+            "Object Inventory",
+            "Object Exceptions",
+            "Routine Validation",
+            "Supporting Migration Context",
+            "Evidence Health",
+        ):
+            self.assertIn(heading, html)
+        self.assertIn("data-sortable", html)
+        self.assertIn("filterTable", html)
+        self.assertIn("<table", html)
+        self.assertIn("&lt;broken &amp; &quot;bad&quot;&gt;", html)
+        self.assertIn("sales &amp; reporting", html)
+        self.assertNotIn("http://", html)
+        self.assertNotIn("https://", html)
+
+    def test_rendering_is_deterministic_when_generation_time_is_fixed(self):
+        report_data = self.make_report_data(status="MATCH")
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.html"
+            second = Path(tmp) / "second.html"
+            REPORT.render_report(report_data, first)
+            REPORT.render_report(report_data, second)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_failed_atomic_replace_preserves_existing_report(self):
+        report_data = self.make_report_data(status="MATCH")
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "migration_report.html"
+            output.write_text("known complete report", encoding="utf-8")
+            with mock.patch.object(REPORT.os, "replace", side_effect=OSError("simulated")):
+                with self.assertRaises(OSError):
+                    REPORT.render_report(report_data, output)
+            self.assertEqual(output.read_text(encoding="utf-8"), "known complete report")
+
+    def run_cli(self, fixture: Path, output: Path):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            rc = REPORT.main(
+                [
+                    "--sdcli-dir",
+                    str(fixture / "sdcli"),
+                    "--evidence-dir",
+                    str(fixture),
+                    "--output",
+                    str(output),
+                    "--migration",
+                    "sales",
+                    "--run-id",
+                    "20261016_010203",
+                ]
+            )
+        return rc, stdout.getvalue()
+
+    def test_cli_writes_pass_report_and_normalized_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(FIXTURE_ROOT, fixture)
+            output = Path(tmp) / "migration_report.html"
+            rc, stdout = self.run_cli(fixture, output)
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(output.is_file())
+            self.assertIn("status=PASS", stdout)
+            self.assertTrue((fixture / "schema_mapping.tsv").is_file())
+            self.assertTrue((fixture / "generated_target_inventory.tsv").is_file())
+            self.assertTrue((fixture / "object_comparison.tsv").is_file())
+
+    def test_cli_writes_fail_report_for_invalid_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(FIXTURE_ROOT, fixture)
+            inventory = fixture / "target_object_inventory.tsv"
+            inventory.write_text(
+                inventory.read_text(encoding="utf-8").replace(
+                    "APP\tVIEWS\tACTIVE CUSTOMERS\t\t\tVIEW\t\t\t\tVALID\t\tfixture",
+                    "APP\tVIEWS\tACTIVE CUSTOMERS\t\t\tVIEW\t\t\t\tINVALID\t<compile & error>\tfixture",
+                ),
+                encoding="utf-8",
+            )
+            output = Path(tmp) / "migration_report.html"
+            rc, stdout = self.run_cli(fixture, output)
+            html = output.read_text(encoding="utf-8")
+
+            self.assertEqual(rc, 2)
+            self.assertIn("status=FAIL", stdout)
+            self.assertIn("&lt;compile &amp; error&gt;", html)
+
+    def test_cli_writes_incomplete_report_for_missing_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(FIXTURE_ROOT, fixture)
+            (fixture / "source_object_inventory.tsv").unlink()
+            output = Path(tmp) / "migration_report.html"
+            rc, stdout = self.run_cli(fixture, output)
+            html = output.read_text(encoding="utf-8")
+
+            self.assertEqual(rc, 2)
+            self.assertIn("status=INCOMPLETE", stdout)
+            self.assertIn("INCOMPLETE", html)
 
 
 if __name__ == "__main__":

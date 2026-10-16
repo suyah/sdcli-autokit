@@ -7,12 +7,16 @@ metadata; this file performs deterministic evidence parsing and comparison.
 
 from __future__ import annotations
 
+import argparse
 import csv
+import html
 import os
 import re
+import sys
 import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -82,6 +86,21 @@ class ComparisonRecord:
     status: str = ""
     reason: str = ""
     origin: str = ""
+
+
+@dataclass(frozen=True)
+class ReportData:
+    migration: str
+    run_id: str
+    generated_at: str
+    status: str
+    mappings: tuple[SchemaMapping, ...]
+    reconciliation: tuple[dict[str, str], ...]
+    source_inventory: tuple[ObjectRecord, ...]
+    generated_inventory: tuple[ObjectRecord, ...]
+    target_inventory: tuple[ObjectRecord, ...]
+    comparisons: tuple[ComparisonRecord, ...]
+    evidence_issues: tuple[str, ...]
 
 
 def _clean_identifier(value: str) -> str:
@@ -1121,3 +1140,390 @@ def write_evidence_outputs(
     write_tsv_atomic(
         evidence_dir / "object_comparison.tsv", comparison_header, comparison_rows
     )
+
+
+def _read_reconciliation(path: Path) -> tuple[dict[str, str], ...]:
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {
+            "source_object",
+            "target_object",
+            "exported_rows",
+            "loaded_rows",
+            "rejected_rows",
+            "discarded_rows",
+            "target_rows",
+            "status",
+            "reason",
+        }
+        if not required.issubset(set(reader.fieldnames or ())):
+            raise EvidenceError(f"invalid reconciliation header: {path}")
+        rows = tuple(dict(row) for row in reader)
+    if not rows:
+        raise EvidenceError(f"reconciliation evidence is empty: {path}")
+    return rows
+
+
+def _escaped(value: object) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _html_table(table_id: str, headers: Sequence[str], rows: Iterable[Sequence[object]]) -> str:
+    escaped_id = _escaped(table_id)
+    header_html = "".join(
+        f'<th scope="col">{_escaped(header)}</th>' for header in headers
+    )
+    body_rows = []
+    for row in rows:
+        body_rows.append(
+            "<tr>" + "".join(f"<td>{_escaped(value)}</td>" for value in row) + "</tr>"
+        )
+    if not body_rows:
+        body_rows.append(
+            f'<tr><td colspan="{len(headers)}" class="empty">No records</td></tr>'
+        )
+    return (
+        f'<label class="filter">Filter <input type="search" '
+        f'oninput="filterTable(\'{escaped_id}\', this.value)" '
+        f'aria-controls="{escaped_id}"></label>'
+        f'<div class="table-wrap"><table id="{escaped_id}" data-sortable>'
+        f"<thead><tr>{header_html}</tr></thead><tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+    )
+
+
+def _comparison_rows(rows: Iterable[ComparisonRecord]) -> Iterable[tuple[str, ...]]:
+    for row in rows:
+        yield (
+            row.source_schema,
+            row.source_category,
+            row.source_name,
+            row.generated_schema,
+            row.generated_category,
+            row.generated_name,
+            row.target_schema,
+            row.target_category,
+            row.target_name,
+            row.status,
+            row.reason,
+        )
+
+
+def render_report(report_data: ReportData, output_path: Path) -> None:
+    """Render one offline HTML report and atomically replace the destination."""
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    exception_rows = [
+        row
+        for row in report_data.comparisons
+        if row.status not in {"MATCH", "CONTEXT"}
+    ]
+    routine_rows = [
+        row
+        for row in report_data.comparisons
+        if "ROUTINE"
+        in {
+            _logical_category(row.source_category),
+            _logical_category(row.generated_category),
+            _logical_category(row.target_category),
+        }
+    ]
+    context_rows = [row for row in report_data.comparisons if row.status == "CONTEXT"]
+    inventory_counts: Counter[tuple[str, str, str]] = Counter()
+    for side, records in (
+        ("Source", report_data.source_inventory),
+        ("Generated", report_data.generated_inventory),
+        ("Target", report_data.target_inventory),
+    ):
+        for record in records:
+            inventory_counts[(side, record.schema, _logical_category(record.category))] += 1
+
+    mapping_table = _html_table(
+        "schema-mapping",
+        ("Source schema", "Target schema", "Method", "Evidence", "Status", "Reason"),
+        (
+            (
+                row.source_schema,
+                row.target_schema,
+                row.method,
+                row.evidence_count,
+                row.status,
+                row.reason,
+            )
+            for row in report_data.mappings
+        ),
+    )
+    reconciliation_headers = (
+        "Source object",
+        "Target object",
+        "Exported",
+        "Loaded",
+        "Rejected",
+        "Discarded",
+        "Target rows",
+        "Status",
+        "Reason",
+    )
+    reconciliation_table = _html_table(
+        "data-reconciliation",
+        reconciliation_headers,
+        (
+            tuple(
+                row.get(key, "")
+                for key in (
+                    "source_object",
+                    "target_object",
+                    "exported_rows",
+                    "loaded_rows",
+                    "rejected_rows",
+                    "discarded_rows",
+                    "target_rows",
+                    "status",
+                    "reason",
+                )
+            )
+            for row in report_data.reconciliation
+        ),
+    )
+    inventory_table = _html_table(
+        "object-inventory",
+        ("Stage", "Schema", "Category", "Count"),
+        (
+            (side, schema, category, count)
+            for (side, schema, category), count in sorted(
+                inventory_counts.items(),
+                key=lambda item: tuple(value.casefold() for value in item[0]),
+            )
+        ),
+    )
+    comparison_headers = (
+        "Source schema",
+        "Source category",
+        "Source object",
+        "Generated schema",
+        "Generated category",
+        "Generated object",
+        "Target schema",
+        "Target category",
+        "Target object",
+        "Status",
+        "Reason",
+    )
+    exceptions_table = _html_table(
+        "object-exceptions", comparison_headers, _comparison_rows(exception_rows)
+    )
+    routines_table = _html_table(
+        "routine-validation", comparison_headers, _comparison_rows(routine_rows)
+    )
+    context_table = _html_table(
+        "supporting-context", comparison_headers, _comparison_rows(context_rows)
+    )
+    evidence_rows = [("OK", "All required evidence was readable")]
+    if report_data.evidence_issues:
+        evidence_rows = [("INCOMPLETE", issue) for issue in report_data.evidence_issues]
+    evidence_table = _html_table(
+        "evidence-health", ("Status", "Diagnostic"), evidence_rows
+    )
+
+    document = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Migration validation report — {_escaped(report_data.migration)}</title>
+<style>
+:root {{ color-scheme: light; --ink:#172033; --muted:#5d6878; --line:#d9dee7; --panel:#f6f8fb; --accent:#2457c5; --pass:#176b3a; --fail:#a12622; }}
+body {{ margin:0; font:14px/1.45 system-ui,sans-serif; color:var(--ink); background:#fff; }}
+main {{ max-width:1400px; margin:auto; padding:28px; }}
+h1 {{ margin:0 0 8px; font-size:28px; }} h2 {{ margin-top:32px; }}
+.summary {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:20px 0; }}
+.card {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:var(--panel); }}
+.label {{ color:var(--muted); display:block; font-size:12px; text-transform:uppercase; }}
+.status {{ font-weight:700; }} .status.PASS {{ color:var(--pass); }} .status.FAIL,.status.INCOMPLETE {{ color:var(--fail); }}
+.table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:8px; }}
+table {{ border-collapse:collapse; width:100%; min-width:760px; }}
+th,td {{ border-bottom:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }}
+th {{ background:var(--panel); cursor:pointer; position:sticky; top:0; }}
+.filter {{ display:block; margin:8px 0; }} .filter input {{ min-width:260px; padding:6px; }}
+.empty {{ color:var(--muted); text-align:center; }} details {{ margin-top:20px; }} summary {{ cursor:pointer; font-weight:700; }}
+code {{ white-space:pre-wrap; }}
+</style>
+</head>
+<body><main>
+<h1>Migration Validation Report</h1>
+<section id="run-summary"><h2>Run Summary</h2>
+<div class="summary">
+<div class="card"><span class="label">Migration</span>{_escaped(report_data.migration)}</div>
+<div class="card"><span class="label">Run</span>{_escaped(report_data.run_id)}</div>
+<div class="card"><span class="label">Generated</span>{_escaped(report_data.generated_at)}</div>
+<div class="card"><span class="label">Status</span><span class="status {_escaped(report_data.status)}">{_escaped(report_data.status)}</span></div>
+</div></section>
+<section id="schema-mapping-section"><h2>Schema Mapping</h2>{mapping_table}</section>
+<section id="data-reconciliation-section"><h2>Data Reconciliation</h2>{reconciliation_table}</section>
+<section id="object-inventory-section"><h2>Object Inventory</h2>{inventory_table}</section>
+<section id="object-exceptions-section"><h2>Object Exceptions</h2>{exceptions_table}</section>
+<details open><summary>Routine Validation</summary>{routines_table}</details>
+<details><summary>Supporting Migration Context</summary>{context_table}</details>
+<section id="evidence-health-section"><h2>Evidence Health</h2>{evidence_table}</section>
+</main>
+<script>
+function filterTable(id, value) {{
+  const term=value.toLocaleLowerCase();
+  document.querySelectorAll('#'+id+' tbody tr').forEach(row => {{
+    row.hidden=!row.textContent.toLocaleLowerCase().includes(term);
+  }});
+}}
+document.querySelectorAll('table[data-sortable] th').forEach((header,index) => {{
+  header.addEventListener('click', () => {{
+    const body=header.closest('table').tBodies[0];
+    const rows=Array.from(body.rows);
+    const direction=header.dataset.direction==='asc' ? -1 : 1;
+    rows.sort((a,b) => direction*a.cells[index].textContent.localeCompare(b.cells[index].textContent,undefined,{{numeric:true}}));
+    rows.forEach(row => body.appendChild(row));
+    header.dataset.direction=direction===1 ? 'asc' : 'desc';
+  }});
+}});
+</script>
+</body></html>
+"""
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.", dir=output_path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(document)
+        os.replace(temporary_name, output_path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _build_report_data(
+    sdcli_dir: Path,
+    evidence_dir: Path,
+    migration: str,
+    run_id: str,
+    generated_at: str,
+) -> ReportData:
+    issues: list[str] = []
+
+    def collect(label: str, operation, default):
+        try:
+            return operation()
+        except (EvidenceError, OSError, UnicodeError, csv.Error) as exc:
+            issues.append(f"{label}: {exc}")
+            return default
+
+    source = collect(
+        "source inventory",
+        lambda: load_inventory(evidence_dir / "source_object_inventory.tsv"),
+        [],
+    )
+    generated = collect(
+        "generated target inventory",
+        lambda: parse_generated_inventory(sdcli_dir),
+        [],
+    )
+    target = collect(
+        "target inventory",
+        lambda: load_inventory(evidence_dir / "target_object_inventory.tsv"),
+        [],
+    )
+    table_mappings = collect(
+        "data-file mapping",
+        lambda: build_table_mappings(evidence_dir),
+        [],
+    )
+    mappings = collect(
+        "schema mapping",
+        lambda: resolve_schema_mappings(source, generated, table_mappings),
+        list(table_mappings),
+    )
+    comparisons = collect(
+        "object comparison",
+        lambda: compare_objects(source, generated, target, mappings),
+        [],
+    )
+    reconciliation = collect(
+        "data reconciliation",
+        lambda: _read_reconciliation(evidence_dir / "reconciliation.tsv"),
+        (),
+    )
+
+    try:
+        write_evidence_outputs(evidence_dir, mappings, generated, comparisons)
+    except OSError as exc:
+        issues.append(f"normalized evidence output: {exc}")
+
+    mapping_issues = sum(row.status == "UNRESOLVED" for row in mappings)
+    comparison_issues = sum(
+        row.status not in {"MATCH", "CONTEXT"} for row in comparisons
+    )
+    reconciliation_issues = sum(row.get("status") != "PASS" for row in reconciliation)
+    if issues:
+        status = "INCOMPLETE"
+    elif mapping_issues or comparison_issues or reconciliation_issues:
+        status = "FAIL"
+    else:
+        status = "PASS"
+    return ReportData(
+        migration=migration,
+        run_id=run_id,
+        generated_at=generated_at,
+        status=status,
+        mappings=tuple(mappings),
+        reconciliation=tuple(reconciliation),
+        source_inventory=tuple(source),
+        generated_inventory=tuple(generated),
+        target_inventory=tuple(target),
+        comparisons=tuple(comparisons),
+        evidence_issues=tuple(issues),
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate an offline migration validation report")
+    parser.add_argument("--sdcli-dir", required=True, type=Path)
+    parser.add_argument("--evidence-dir", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--migration", required=True)
+    parser.add_argument("--run-id", required=True)
+    args = parser.parse_args(argv)
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+    try:
+        report_data = _build_report_data(
+            args.sdcli_dir,
+            args.evidence_dir,
+            args.migration,
+            args.run_id,
+            generated_at,
+        )
+        render_report(report_data, args.output)
+    except (OSError, UnicodeError, csv.Error) as exc:
+        print(f"REPORT_ERROR unable to create validation report: {exc}", file=sys.stderr)
+        return 1
+
+    mapping_issues = sum(row.status == "UNRESOLVED" for row in report_data.mappings)
+    comparison_issues = sum(
+        row.status not in {"MATCH", "CONTEXT"} for row in report_data.comparisons
+    )
+    print(
+        "REPORT_RESULT "
+        f"status={report_data.status} "
+        f"mapping_issues={mapping_issues} "
+        f"comparison_issues={comparison_issues} "
+        f"incomplete_sections={len(report_data.evidence_issues)} "
+        f"report={args.output}"
+    )
+    return 0 if report_data.status == "PASS" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
