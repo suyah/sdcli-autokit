@@ -1900,6 +1900,331 @@ run_target_sql_capture() {
   return 0
 }
 
+inventory_tsv_header() {
+  printf '%s\n' $'schema\tcategory\tobject_name\tparent_schema\tparent_name\tsubtype\tordinal\tattribute_name\tattribute_value\tstatus\tdetail\torigin'
+}
+
+write_marked_inventory() {
+  local raw_file="$1"
+  local output_file="$2"
+  local label="$3"
+  local output_dir tmp_file row_count
+
+  output_dir="$(dirname "$output_file")"
+  mkdir -p "$output_dir"
+  tmp_file="$(mktemp "$output_dir/.inventory_XXXXXX")" || return 1
+
+  inventory_tsv_header > "$tmp_file"
+  if ! awk -F '\t' -v OFS='\t' '
+    /^[[:space:]]*$/ { next }
+    $1 != "SDCLI_INVENTORY" { invalid=1; next }
+    NF != 13 || $2 == "" || $3 == "" || $4 == "" { invalid=1; next }
+    {
+      for (i=2; i<=13; i++) printf "%s%s", $i, (i == 13 ? ORS : OFS)
+      rows++
+    }
+    END { if (invalid || rows == 0) exit 1 }
+  ' "$raw_file" >> "$tmp_file"; then
+    rm -f "$tmp_file"
+    log_error "$label inventory query returned empty or malformed evidence"
+    return 1
+  fi
+
+  row_count=$(( $(wc -l < "$tmp_file" | tr -d '[:space:]') - 1 ))
+  mv "$tmp_file" "$output_file"
+  log_info "$label object inventory: rows=$row_count file=$output_file"
+}
+
+collect_source_object_inventory() {
+  local idx="$1"
+  local output_file="$2"
+  local source_conn source_user source_password parsed source_host source_port source_database tls_mode
+  local query raw_file
+  local -a tls_args=()
+
+  source_conn="$(migration_required_value "$idx" source conn)"
+  source_user="$(migration_required_value "$idx" source user)"
+  source_password="$(migration_secret_value "$idx" source password)"
+  parsed="$(parse_source_conn "$source_conn")"
+  IFS='|' read -r source_host source_port source_database <<< "$parsed"
+  tls_mode="$(normalize_bcp_tls_mode "$(get_required_value '.defaults.source.bcp_tls_mode' 'defaults.source.bcp_tls_mode')")"
+  case "$tls_mode" in
+    strict) tls_args=(-Ns) ;;
+    trust) tls_args=(-Nm -C) ;;
+    optional) tls_args=(-No) ;;
+  esac
+
+  query="$(cat <<'SQL'
+SET NOCOUNT ON;
+DECLARE @tab nchar(1) = NCHAR(9);
+WITH inventory AS (
+  SELECT s.name AS schema_name, 'SCHEMAS' AS category, s.name AS object_name,
+         '' AS parent_schema, '' AS parent_name, 'SCHEMA' AS subtype,
+         0 AS ordinal, '' AS attribute_name, '' AS attribute_value,
+         'VALID' AS status, '' AS detail
+  FROM sys.schemas s
+  WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
+    AND s.schema_id < 16384
+  UNION ALL
+  SELECT SCHEMA_NAME(t.schema_id), 'TABLES', t.name, '', '', 'TABLE',
+         0, '', '', 'VALID', ''
+  FROM sys.tables t
+  WHERE t.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(v.schema_id), 'VIEWS', v.name, '', '', 'VIEW',
+         0, '', '', 'VALID', ''
+  FROM sys.views v
+  WHERE v.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(o.schema_id), 'ROUTINES', o.name, '', '',
+         CASE WHEN o.type = 'P' THEN 'PROCEDURE' ELSE 'FUNCTION' END,
+         0, '', '', 'VALID', ''
+  FROM sys.objects o
+  LEFT JOIN sys.procedures p ON p.object_id = o.object_id
+  WHERE o.type IN ('P', 'FN', 'IF', 'TF') AND o.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'TRIGGERS', tr.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'TRIGGER',
+         0, '', '',
+         CASE WHEN tr.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END, ''
+  FROM sys.triggers tr
+  JOIN sys.objects parent ON parent.object_id = tr.parent_id
+  WHERE tr.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id),
+         CASE kc.type WHEN 'PK' THEN 'PRIMARY_KEYS' ELSE 'UNIQUE_CONSTRAINTS' END,
+         kc.name, SCHEMA_NAME(parent.schema_id), parent.name, kc.type_desc,
+         ic.key_ordinal, 'column', col.name, 'VALID', ''
+  FROM sys.key_constraints kc
+  JOIN sys.tables parent ON parent.object_id = kc.parent_object_id
+  JOIN sys.index_columns ic ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
+  JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id
+  WHERE parent.is_ms_shipped = 0 AND ic.key_ordinal > 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'FOREIGN_KEYS', fk.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'FOREIGN_KEY',
+         fkc.constraint_column_id, 'column', parent_col.name, 'VALID',
+         ''
+  FROM sys.foreign_keys fk
+  JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+  JOIN sys.tables parent ON parent.object_id = fk.parent_object_id
+  JOIN sys.columns parent_col ON parent_col.object_id = fkc.parent_object_id AND parent_col.column_id = fkc.parent_column_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'CHECK_CONSTRAINTS', cc.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'CHECK',
+         0, 'expression', cc.definition,
+         CASE WHEN cc.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END, ''
+  FROM sys.check_constraints cc
+  JOIN sys.tables parent ON parent.object_id = cc.parent_object_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'DEFAULT_CONSTRAINTS', dc.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'DEFAULT',
+         col.column_id, 'column_default', CONCAT(col.name, '=', dc.definition), 'VALID', ''
+  FROM sys.default_constraints dc
+  JOIN sys.tables parent ON parent.object_id = dc.parent_object_id
+  JOIN sys.columns col ON col.object_id = dc.parent_object_id AND col.column_id = dc.parent_column_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'INDEXES', i.name,
+         SCHEMA_NAME(parent.schema_id), parent.name,
+         CASE WHEN i.is_unique = 1 THEN 'UNIQUE' ELSE 'INDEX' END,
+         0, 'unique', CASE WHEN i.is_unique = 1 THEN 'true' ELSE 'false' END,
+         CASE WHEN i.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END, ''
+  FROM sys.indexes i
+  JOIN sys.tables parent ON parent.object_id = i.object_id
+  WHERE parent.is_ms_shipped = 0 AND i.name IS NOT NULL AND i.is_hypothetical = 0
+    AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'INDEXES', i.name,
+         SCHEMA_NAME(parent.schema_id), parent.name,
+         CASE WHEN i.is_unique = 1 THEN 'UNIQUE' ELSE 'INDEX' END,
+         ic.key_ordinal, 'column', col.name,
+         CASE WHEN i.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END,
+         ''
+  FROM sys.indexes i
+  JOIN sys.tables parent ON parent.object_id = i.object_id
+  JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+  JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id
+  WHERE parent.is_ms_shipped = 0 AND i.name IS NOT NULL AND i.is_hypothetical = 0
+    AND i.is_primary_key = 0 AND i.is_unique_constraint = 0 AND ic.key_ordinal > 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'IDENTITY_COLUMNS', col.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'IDENTITY',
+         0, '', '', 'VALID', ''
+  FROM sys.identity_columns col
+  JOIN sys.tables parent ON parent.object_id = col.object_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(seq.schema_id), 'SEQUENCES', seq.name, '', '', 'SEQUENCE',
+         0, '', '', 'VALID', ''
+  FROM sys.sequences seq
+  UNION ALL
+  SELECT SCHEMA_NAME(syn.schema_id), 'SYNONYMS', syn.name, '', '', 'SYNONYM',
+         0, '', '', 'VALID', ''
+  FROM sys.synonyms syn
+)
+SELECT CONCAT(
+  'SDCLI_INVENTORY', @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), schema_name), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  category, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), object_name), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_schema), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_name), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  subtype, @tab, CONVERT(varchar(12), ordinal), @tab,
+  attribute_name, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), attribute_value), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  status, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), detail), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  'sqlserver')
+FROM inventory
+ORDER BY schema_name, category, object_name, ordinal;
+SQL
+)"
+
+  raw_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_source_inventory_XXXXXX.out")" || return 1
+  if ! SQLCMDPASSWORD="$source_password" sqlcmd \
+    -S "${source_host},${source_port}" -d "$source_database" -U "$source_user" \
+    -b -r 1 -h -1 -W -w 65535 "${tls_args[@]}" -Q "$query" > "$raw_file" 2>&1; then
+    rm -f "$raw_file"
+    log_error "Failed to query SQL Server object inventory"
+    return 1
+  fi
+
+  if ! write_marked_inventory "$raw_file" "$output_file" "SQL Server"; then
+    rm -f "$raw_file"
+    return 1
+  fi
+  rm -f "$raw_file"
+}
+
+collect_target_object_inventory() {
+  local idx="$1"
+  local output_dir="$2"
+  local output_file="$3"
+  local query_file raw_file schema_dir schema_name escaped_schema owners="" schema_count=0
+
+  while IFS= read -r schema_dir; do
+    schema_name="$(basename "$schema_dir")"
+    [[ "$schema_name" != *$'\t'* && "$schema_name" != *$'\n'* && "$schema_name" != *$'\r'* ]] || {
+      log_error "Generated schema directory contains a control character"
+      return 1
+    }
+    escaped_schema="${schema_name//\'/\'\'}"
+    [[ -z "$owners" ]] || owners+=","
+    owners+="'${escaped_schema}',UPPER('${escaped_schema}')"
+    schema_count=$((schema_count + 1))
+  done < <(schema_dirs "$output_dir")
+
+  if (( schema_count == 0 )); then
+    log_error "Cannot collect Oracle object inventory because no generated schema hierarchy was found"
+    return 1
+  fi
+
+  query_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_target_inventory_XXXXXX.sql")" || return 1
+  raw_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_target_inventory_XXXXXX.out")" || {
+    rm -f "$query_file"
+    return 1
+  }
+  {
+    printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE;'
+    printf '%s\n' 'WHENEVER SQLERROR EXIT SQL.SQLCODE;'
+    printf '%s\n' 'SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 LONG 1000000 LONGCHUNKSIZE 1000000 VERIFY OFF ECHO OFF TERMOUT ON TRIMSPOOL ON;'
+    cat <<SQL
+WITH inventory AS (
+  SELECT o.owner AS schema_name,
+         CASE o.object_type
+           WHEN 'TABLE' THEN 'TABLES' WHEN 'VIEW' THEN 'VIEWS'
+           WHEN 'PROCEDURE' THEN 'ROUTINES' WHEN 'FUNCTION' THEN 'ROUTINES'
+           WHEN 'PACKAGE' THEN 'PACKAGES' WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODIES'
+           WHEN 'TRIGGER' THEN 'TRIGGERS' WHEN 'SEQUENCE' THEN 'SEQUENCES'
+           WHEN 'SYNONYM' THEN 'SYNONYMS'
+         END AS category,
+         o.object_name, '' AS parent_schema, '' AS parent_name,
+         o.object_type AS subtype, 0 AS ordinal, '' AS attribute_name, '' AS attribute_value,
+         o.status,
+         NVL((SELECT MIN(e.type || ':' || e.line || ':' || e.position || ':' || e.text)
+              FROM all_errors e
+              WHERE e.owner = o.owner AND e.name = o.object_name AND e.type = o.object_type), '') AS detail
+  FROM all_objects o
+  WHERE o.owner IN (${owners})
+    AND o.object_type IN ('TABLE','VIEW','PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY','TRIGGER','SEQUENCE','SYNONYM')
+  UNION ALL
+  SELECT c.owner,
+         CASE c.constraint_type WHEN 'P' THEN 'PRIMARY_KEYS' WHEN 'U' THEN 'UNIQUE_CONSTRAINTS'
+              WHEN 'R' THEN 'FOREIGN_KEYS' WHEN 'C' THEN 'CHECK_CONSTRAINTS' END,
+         c.constraint_name, c.owner, c.table_name,
+         CASE c.constraint_type WHEN 'P' THEN 'PRIMARY_KEY' WHEN 'U' THEN 'UNIQUE'
+              WHEN 'R' THEN 'FOREIGN_KEY' WHEN 'C' THEN 'CHECK' END,
+         NVL(cc.position, 0),
+         CASE WHEN c.constraint_type = 'C' AND cc.column_name IS NULL THEN 'expression' ELSE 'column' END,
+         CASE WHEN c.constraint_type = 'C' AND cc.column_name IS NULL THEN c.search_condition_vc ELSE NVL(cc.column_name, c.search_condition_vc) END,
+         CASE WHEN c.status = 'ENABLED' AND c.validated = 'VALIDATED' THEN 'VALID' ELSE 'INVALID' END,
+         CASE WHEN c.constraint_type = 'R' THEN
+           NVL((SELECT 'references=' || r.owner || '.' || r.table_name
+                FROM all_constraints r WHERE r.owner = c.r_owner AND r.constraint_name = c.r_constraint_name), '')
+           ELSE '' END
+  FROM all_constraints c
+  LEFT JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name AND cc.table_name = c.table_name
+  WHERE c.owner IN (${owners}) AND c.constraint_type IN ('P','U','R','C')
+  UNION ALL
+  SELECT i.owner, 'INDEXES', i.index_name, i.table_owner, i.table_name,
+         CASE WHEN i.uniqueness = 'UNIQUE' THEN 'UNIQUE' ELSE 'INDEX' END,
+         0, 'unique', CASE WHEN i.uniqueness = 'UNIQUE' THEN 'true' ELSE 'false' END,
+         CASE WHEN i.status = 'VALID' THEN 'VALID' ELSE 'INVALID' END, ''
+  FROM all_indexes i
+  WHERE i.owner IN (${owners}) AND i.generated = 'N'
+    AND NOT EXISTS (
+      SELECT 1 FROM all_constraints k
+      WHERE k.owner = i.owner AND k.index_name = i.index_name AND k.constraint_type IN ('P','U')
+    )
+  UNION ALL
+  SELECT i.owner, 'INDEXES', i.index_name, i.table_owner, i.table_name,
+         CASE WHEN i.uniqueness = 'UNIQUE' THEN 'UNIQUE' ELSE 'INDEX' END,
+         c.column_position, 'column', c.column_name,
+         CASE WHEN i.status = 'VALID' THEN 'VALID' ELSE 'INVALID' END, ''
+  FROM all_indexes i
+  JOIN all_ind_columns c ON c.index_owner = i.owner AND c.index_name = i.index_name
+  WHERE i.owner IN (${owners}) AND i.generated = 'N'
+    AND NOT EXISTS (
+      SELECT 1 FROM all_constraints k
+      WHERE k.owner = i.owner AND k.index_name = i.index_name AND k.constraint_type IN ('P','U')
+    )
+  UNION ALL
+  SELECT ic.owner, 'IDENTITY_COLUMNS', ic.column_name, ic.owner, ic.table_name,
+         'IDENTITY', 0, '', '', 'VALID', ''
+  FROM all_tab_identity_cols ic
+  WHERE ic.owner IN (${owners})
+)
+SELECT 'SDCLI_INVENTORY' || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(schema_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       category || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(object_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(parent_schema, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(parent_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       subtype || CHR(9) || TO_CHAR(ordinal) || CHR(9) || attribute_name || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(attribute_value, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       status || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(detail, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) || 'oracle'
+FROM inventory
+ORDER BY schema_name, category, object_name, ordinal;
+EXIT;
+SQL
+  } > "$query_file"
+
+  if ! run_target_sql_capture "$idx" "$query_file" "$raw_file"; then
+    rm -f "$query_file" "$raw_file"
+    log_error "Failed to query Oracle object inventory"
+    return 1
+  fi
+  if ! write_marked_inventory "$raw_file" "$output_file" "Oracle"; then
+    rm -f "$query_file" "$raw_file"
+    return 1
+  fi
+  rm -f "$query_file" "$raw_file"
+}
+
 collect_target_row_counts() {
   local idx="$1"
   local sqlldr_status_file="$2"
@@ -2106,6 +2431,30 @@ run_data_reconciliation() {
   log_info "Table data reconciliation passed: $report_file"
 }
 
+run_validation_report() {
+  local output_dir="$1"
+  local idx="$2"
+  local migration_name report_file report_run_id rc errexit_enabled=false
+
+  migration_name="$(migration_required_value "$idx" name)"
+  report_file="$AUTOKIT_DIR/migration_report.html"
+  report_run_id="${RUN_NAME#run_}"
+  [[ -n "$report_run_id" ]] || report_run_id="$RUN_ID"
+
+  [[ "$-" == *e* ]] && errexit_enabled=true
+  set +e
+  python3 "$SCRIPT_DIR/lib/generate_validation_report.py" \
+    --sdcli-dir "$output_dir" \
+    --evidence-dir "$AUTOKIT_DIR" \
+    --output "$report_file" \
+    --migration "$migration_name" \
+    --run-id "$report_run_id" \
+    2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE"
+  rc=${PIPESTATUS[0]}
+  $errexit_enabled && set -e
+  return "$rc"
+}
+
 run_validate() {
   local output_dir="$1"
   local idx="${2:-}"
@@ -2120,7 +2469,7 @@ run_validate() {
   log_info "Validating migration output"
 
   local run_log="${RUN_LOG_FILE:-$AUTOKIT_DIR/migrate.log}"
-  local run_log_issues sdcli_error_entries sqlldr_logs_checked=0 sqlldr_log_issues=0 missing_evidence=0 reconciliation_issues=0 object_issues=0 total_issues
+  local run_log_issues sdcli_error_entries sqlldr_logs_checked=0 sqlldr_log_issues=0 missing_evidence=0 reconciliation_issues=0 object_issues=0 metadata_issues=0 report_issues=0 total_issues
 
   validate_run_log "$run_log"
   run_log_issues=$VALIDATION_LAST_COUNT
@@ -2145,10 +2494,30 @@ run_validate() {
   if [[ -n "$idx" ]]; then
     run_data_reconciliation "$idx" || reconciliation_issues=1
     validate_target_objects "$idx" "$output_dir" || object_issues=1
+
+    local source_inventory="$AUTOKIT_DIR/source_object_inventory.tsv"
+    local target_inventory="$AUTOKIT_DIR/target_object_inventory.tsv"
+    # A failed rerun must not allow a previous inventory to be interpreted as
+    # current evidence by the report generator.
+    rm -f "$source_inventory" "$target_inventory"
+    if ! collect_source_object_inventory "$idx" "$source_inventory"; then
+      metadata_issues=$((metadata_issues + 1))
+    fi
+    if ! collect_target_object_inventory "$idx" "$output_dir" "$target_inventory"; then
+      metadata_issues=$((metadata_issues + 1))
+    fi
+    if ! run_validation_report "$output_dir" "$idx"; then
+      report_issues=1
+    fi
+    if [[ -f "$AUTOKIT_DIR/migration_report.html" ]]; then
+      log_info "Migration validation report: $AUTOKIT_DIR/migration_report.html"
+    else
+      log_error "Migration validation report was not created: $AUTOKIT_DIR/migration_report.html"
+    fi
   fi
 
-  total_issues=$((run_log_issues + sdcli_error_entries + sqlldr_log_issues + missing_evidence + reconciliation_issues + object_issues))
-  log_info "Validation summary: run_log_issues=$run_log_issues sdcli_error_entries=$sdcli_error_entries sqlldr_logs_checked=$sqlldr_logs_checked sqlldr_log_issues=$sqlldr_log_issues missing_evidence=$missing_evidence reconciliation_issues=$reconciliation_issues object_issues=$object_issues total_issues=$total_issues"
+  total_issues=$((run_log_issues + sdcli_error_entries + sqlldr_log_issues + missing_evidence + reconciliation_issues + object_issues + metadata_issues + report_issues))
+  log_info "Validation summary: run_log_issues=$run_log_issues sdcli_error_entries=$sdcli_error_entries sqlldr_logs_checked=$sqlldr_logs_checked sqlldr_log_issues=$sqlldr_log_issues missing_evidence=$missing_evidence reconciliation_issues=$reconciliation_issues object_issues=$object_issues metadata_issues=$metadata_issues report_issues=$report_issues total_issues=$total_issues"
   {
     printf 'status=%s\n' "$([[ $total_issues -eq 0 ]] && echo PASS || echo FAIL)"
     printf 'run_log_issues=%s\n' "$run_log_issues"
@@ -2158,6 +2527,8 @@ run_validate() {
     printf 'missing_evidence=%s\n' "$missing_evidence"
     printf 'reconciliation_issues=%s\n' "$reconciliation_issues"
     printf 'object_issues=%s\n' "$object_issues"
+    printf 'metadata_issues=%s\n' "$metadata_issues"
+    printf 'report_issues=%s\n' "$report_issues"
     printf 'total_issues=%s\n' "$total_issues"
   } > "$AUTOKIT_DIR/validation_summary.txt"
   if (( total_issues > 0 )); then
@@ -2749,10 +3120,16 @@ main() {
     case "$MODE" in
       full|migrate)
         require_command sqlplus
+        require_command sqlcmd
+        require_command python3
         ;;
       phase)
         if [[ "$PHASE_NAME" == "deploy" || "$PHASE_NAME" == "postdeploy" || "$PHASE_NAME" == "validate" ]]; then
           require_command sqlplus
+        fi
+        if [[ "$PHASE_NAME" == "validate" ]]; then
+          require_command sqlcmd
+          require_command python3
         fi
         ;;
     esac
