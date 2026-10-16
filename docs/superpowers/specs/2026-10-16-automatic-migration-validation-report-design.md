@@ -30,8 +30,10 @@ truthful exit code.
 ## 2. Design decisions
 
 1. No new user configuration or report-specific command is required.
-2. Generated BCP and SQL\*Loader artifacts are the authoritative table and
-   schema mapping source.
+2. The existing BCP and SQL\*Loader status artifacts are the authoritative
+   table and schema mapping source. They already record the exact source
+   object, target object, and generated data-file path used by the run, so the
+   report does not reparse executable shell commands.
 3. Generated DDL is the authoritative expected-target inventory. This permits
    the report to distinguish a conversion omission from a deployment omission.
 4. Tableless schemas are mapped from unique source-to-generated object identity
@@ -189,9 +191,9 @@ be handled as customer migration evidence and must not contain passwords.
 ## 5. Data flow
 
 ```text
-Generated BCP scripts -----------+
+bcp_status.tsv ------------------+
                                  +--> mapping collector --> schema_mapping.tsv
-Generated SQL*Loader controls ---+
+sqlldr_status.tsv ---------------+
 
 Generated Oracle DDL ----------------------------> generated_target_inventory.tsv
 
@@ -219,27 +221,28 @@ sorting, and report layout are testable without shell quoting complexity.
 
 ### 6.1 Exact table mapping
 
-The primary mapping is derived from files produced by SQL Developer's
-`datamove` action:
+The primary mapping is derived from the existing status files written while
+the SQL Developer `datamove` artifacts are executed:
 
-1. Parse every generated `MicrosoftSQLServer_data.sh` command.
-2. Record the source database, source schema, source table, and normalized data
-   file path.
-3. Parse every generated SQL\*Loader control file.
-4. Record the Oracle owner, target table, and normalized data file path.
-5. Join the records by normalized generated data-file path.
-6. Require each data file to map exactly one source object to exactly one target
+1. Read source object and normalized generated data-file path from every
+   successful `bcp_status.tsv` record.
+2. Read Oracle owner, target table, and normalized generated data-file path
+   from every successful `sqlldr_status.tsv` record.
+3. Join the records by normalized generated data-file path.
+4. Require each data file to map exactly one source object to exactly one target
    object.
-7. Aggregate table mappings into source-schema to target-owner mappings.
+5. Aggregate table mappings into source-schema to target-owner mappings.
 
 A schema mapping is `MAPPED` by method `DATA_FILE` only when all of its table
 pairs agree. One source schema mapping to multiple target owners, one target
 owner mapping to multiple source schemas, a duplicate data file, or an
 unpaired table is an error.
 
-The parser uses generated script structure only. It does not use filename
-basenames as globally unique identifiers and does not infer a mapping from a
-project-specific naming convention.
+The mapper uses the full normalized data-file paths recorded during execution.
+It does not use filename basenames as globally unique identifiers and does not
+infer a mapping from a project-specific naming convention. Missing or failed
+status records are already validation failures and cannot silently contribute
+a mapping.
 
 ### 6.2 Tableless schema mapping
 
@@ -483,7 +486,8 @@ new runtime program:
   - aggregate report issues into validation status; and
   - log the final report path.
 - `sdcli-scripts/lib/generate_validation_report.py`
-  - derive source-to-target table mappings from BCP and control files;
+  - derive source-to-target table mappings from BCP and SQL\*Loader status
+    evidence;
   - parse the supported generated DDL inventory;
   - normalize inventories;
   - resolve tableless mappings;
@@ -539,7 +543,7 @@ credentials.
 
 ### 15.1 Mapping tests
 
-- one source/target table pair produces one `DATA_FILE` mapping;
+- one source/target status pair produces one `DATA_FILE` mapping;
 - multiple tables in one schema agree on one owner;
 - duplicate, unpaired, and conflicting data files fail;
 - multiple source schemas map independently;
