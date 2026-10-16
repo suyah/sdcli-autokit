@@ -453,6 +453,16 @@ to_lower() {
   echo "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+validate_supported_migration_pair() {
+  local source_type target_type
+  source_type="$(to_lower "$(get_required_value '.defaults.source.type' 'defaults.source.type')")"
+  target_type="$(to_lower "$(get_required_value '.defaults.target.type' 'defaults.target.type')")"
+
+  if [[ "$source_type" != "sqlserver" || "$target_type" != "oracle" ]]; then
+    fail "Unsupported migration pair: $source_type -> $target_type. Supported migration pair: sqlserver -> oracle"
+  fi
+}
+
 normalize_bcp_tls_mode() {
   local raw="$1"
   local mode
@@ -845,6 +855,7 @@ validate_migration_config() {
 validate_config() {
   local require_migrations="${1:-true}"
 
+  validate_supported_migration_pair
   get_required_value '.defaults.driver_file' 'defaults.driver_file' >/dev/null
   get_required_value '.defaults.paths.project_root' 'defaults.paths.project_root' >/dev/null
   local bcp_tls_mode
@@ -2705,6 +2716,12 @@ main() {
   [[ -f "$CONFIG_FILE" ]] || fail "Config file not found: $CONFIG_FILE"
   require_command yq
 
+  if [[ "$MODE" == "init" ]]; then
+    validate_config "false"
+  else
+    validate_config "true"
+  fi
+
   bootstrap_logging
 
   log_info "Config file: $CONFIG_FILE"
@@ -2718,11 +2735,6 @@ main() {
   log_info "SDCLI command log: $SDCLI_COMMAND_LOG"
   log_info "Dry run mode: $DRY_RUN"
 
-  if [[ "$MODE" == "init" ]]; then
-    validate_config "false"
-  else
-    validate_config "true"
-  fi
   configure_oracle_wallet
   configure_sqldeveloper_file_output_option
   log_info "Config validation passed"

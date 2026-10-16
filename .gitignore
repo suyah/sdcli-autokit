@@ -28,8 +28,11 @@
 !docs/superpowers/
 !docs/superpowers/specs/
 !docs/superpowers/specs/2026-10-09-offline-container-distribution-design.md
+!docs/superpowers/specs/2026-10-16-automatic-migration-validation-report-design.md
 !docs/superpowers/plans/
 !docs/superpowers/plans/2026-10-09-offline-container-distribution.md
+!docs/superpowers/plans/2026-10-16-automatic-migration-validation-report.md
+!docs/tech-debt-multi-source-adapters.md
 
 # Track the migration reliability review and mandatory-change design.
 !docs/migration-reliability-priorities.md
@@ -58,6 +61,13 @@
 !tests/target_row_count_test.sh
 !tests/offload_multiple_scripts_test.sh
 !tests/target_object_validation_test.sh
+!tests/config_database_type_test.sh
+!tests/validation_report_test.sh
+!tests/test_validation_report.py
+!tests/validation_metadata_collection_test.sh
+!tests/fixtures/
+!tests/fixtures/validation/
+!tests/fixtures/validation/**
 
 # Never track backup files
 *.bak
