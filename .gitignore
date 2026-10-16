@@ -22,6 +22,8 @@
 # Track sdcli-scripts folder
 !sdcli-scripts/
 !sdcli-scripts/**
+sdcli-scripts/**/__pycache__/
+sdcli-scripts/**/*.pyc
 
 # Track this feature's design and implementation documents
 !docs/
