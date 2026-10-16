@@ -37,6 +37,8 @@ grep -F -- 'vendor_mount="${VENDOR_DIR}:/vendor-rpms:ro"' "$REPO_ROOT/deployment
 grep -F -- 'vendor_mount+=",Z"' "$REPO_ROOT/deployment/run.sh" >/dev/null
 grep -F -- '--disablerepo=' "$REPO_ROOT/deployment/install-vendor.sh" >/dev/null
 grep -F -- '--accept-microsoft-eula' "$REPO_ROOT/deployment/run.sh" >/dev/null
+grep -F -- 'for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq python3' "$REPO_ROOT/deployment/run.sh" >/dev/null
+grep -F -- "test -f '\$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py'" "$REPO_ROOT/deployment/run.sh" >/dev/null
 ! grep -qE '\b(wget|curl)\b' "$REPO_ROOT/deployment/run.sh"
 ! grep -q 'podman pull' "$REPO_ROOT/deployment/run.sh"
 ! grep -q 'podman build' "$REPO_ROOT/deployment/run.sh"

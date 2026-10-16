@@ -31,6 +31,7 @@ USER root
 
 RUN dnf -y install \
       java-17-openjdk \
+      python3 \
       curl \
       file \
       unzip \

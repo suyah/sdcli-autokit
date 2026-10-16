@@ -12,6 +12,12 @@ The project assumes:
 - **Migration engine:** Oracle SQL Developer CLI (`sdcli`)
 - **Runtime environment:** Podman container
 
+> **Supported database pair:** this release supports only SQL Server sources
+> and Oracle targets. Although `config.yaml` contains source and target `type`
+> fields, any other pair is rejected during configuration preflight before the
+> runner connects to a database or creates run artifacts. Additional source
+> RDBMS adapters are planned, but are not implemented in this release.
+
 ## Project layout
 
 The files are split into two working areas:
@@ -28,6 +34,7 @@ sdcli-scripts/
 ├── config.yaml
 ├── lib/
 │   ├── bcp
+│   ├── generate_validation_report.py
 │   ├── load_wrappers.sh
 │   ├── sqlldr
 │   └── sqlplus
@@ -55,7 +62,7 @@ Use this directory inside the migration working area/container to configure and 
 | --- | --- |
 | `config.yaml` | Main configuration file for repository, source database, target database, and migration definitions. |
 | `migrate.sh` | Main migration command. It validates config, initializes the repository, creates connections, runs phases, and writes run logs. |
-| `lib/` | Helper scripts used internally for BCP, SQL*Plus, and SQL*Loader execution. Most users do not need to edit these files. |
+| `lib/` | Helper programs used internally for BCP, SQL*Plus, SQL*Loader, and validation-report generation. Most users do not need to edit these files. |
 
 ## Prerequisites
 
@@ -393,7 +400,9 @@ capture -> convert -> generate -> datamove -> offload -> deploy -> load -> postd
 In plain language, this captures SQL Server metadata, converts it for Oracle,
 generates scripts, exports data, deploys the Oracle schema objects needed before
 load, loads data, runs every post-load object script listed by SQL Developer's
-generated `master.sql` files, and validates logs and per-table row counts.
+generated `master.sql` files, and validates logs, per-table row counts, and
+source/generated/target object coverage. Validation also creates a self-contained
+HTML comparison report.
 
 Only one repository workflow may run at a time. The script creates an atomic
 lock under `<project_root>/.locks` before repository work so SDCLI's `latest`
@@ -428,7 +437,7 @@ Supported phases:
 | `deploy` | Run generated Oracle schema setup needed before loading data. |
 | `load` | Load exported data into Oracle. |
 | `postdeploy` | Run all non-predata scripts in generated master order, followed by each schema's `post.sql`. |
-| `validate` | Fail on log/load errors and reconcile exported, loaded, rejected, discarded, and final Oracle table row counts. |
+| `validate` | Reconcile row counts, collect source and target object metadata, compare source/generated/actual objects, and create the validation report. |
 
 ### Model and run behavior
 
@@ -452,6 +461,51 @@ This flag does not clean or truncate the Oracle target. Before repeating
 `deploy` or `load`, the operator remains responsible for making the target safe
 for that operation. `validate` is read-only and may be repeated without the
 flag.
+
+### Automatic validation report
+
+The full workflow runs validation automatically. To repeat it for an existing
+run, use:
+
+```bash
+./migrate.sh tpcc --phase validate --run 20260427_014117
+```
+
+The SQL Server source and Oracle target must both be reachable from the
+container while validation runs. The collector queries read-only system catalog
+views. The SQL Server password is supplied to `sqlcmd` through
+`SQLCMDPASSWORD`, and the Oracle password uses the existing SQL*Plus `/nolog`
+connection path; neither password is written to report evidence or process
+arguments.
+
+No manual row-count SQL or schema-mapping file is required. Table mappings are
+derived from this run's BCP and SQL*Loader data-file evidence. Row comparison
+uses the BCP exported count, SQL*Loader loaded/rejected/discarded counts, and the
+final Oracle table count. This is preferable to recounting a live SQL Server
+database later, when its data may have changed.
+
+The offline `migration_report.html` contains:
+
+- the run result and evidence health;
+- derived schema mappings;
+- table data reconciliation;
+- source, generated-target, and actual-target object inventories;
+- conversion and deployment exceptions;
+- routine validity and compiler diagnostics; and
+- visible supporting context such as SQL Developer conversion helpers.
+
+`PASS` means all required evidence was collected and the required data/object
+comparisons passed. `FAIL` means a mismatch or invalid target object was found.
+`CONTEXT` is visible supporting or platform-generated metadata and does not fail
+the migration by itself. Missing or malformed evidence is reported as
+`INCOMPLETE` in the HTML and causes the validate phase to fail.
+
+The report is a single local HTML file with embedded styling and sorting code;
+it does not load internet resources. It can contain customer schema names,
+object names, and compiler messages, so handle it as migration evidence. A
+rerun atomically replaces completed report and comparison artifacts rather than
+appending duplicate rows. If rendering is interrupted, an existing complete
+HTML report is preserved, but the current validate command still fails.
 
 The run id can be provided with or without the `run_` prefix:
 
@@ -500,7 +554,13 @@ Important files:
 | `autokit/bcp_status.tsv` | Per-table SQL Server export status and exported row count. |
 | `autokit/sqlldr_status.tsv` | Per-table Oracle load status, loaded/rejected/discarded counts, and paths. |
 | `autokit/reconciliation.tsv` | Source-to-target per-table row reconciliation. Every row must be `PASS`. |
+| `autokit/source_object_inventory.tsv` | Read-only SQL Server user-object inventory collected during validation. |
+| `autokit/generated_target_inventory.tsv` | Expected Oracle object inventory parsed from generated SQL Developer DDL. |
+| `autokit/target_object_inventory.tsv` | Read-only Oracle inventory for generated target owners. |
+| `autokit/schema_mapping.tsv` | Automatically derived source-schema to Oracle-owner mappings and evidence. |
+| `autokit/object_comparison.tsv` | Per-object conversion/deployment comparison and status. |
 | `autokit/validation_summary.txt` | Final `PASS` or `FAIL` and issue totals. |
+| `autokit/migration_report.html` | Self-contained human-readable report, also written for failed or incomplete validation. |
 | `sdcli/` | SDCLI-generated scripts, logs, and data movement files. |
 
 If you rerun a phase with `--run`, the new output is appended to the existing run log.
@@ -535,7 +595,8 @@ Run migration commands from `sdcli-scripts/`:
 - Start with `autokit/migrate.log` for the full run history.
 - Check `autokit/migration_summary.csv` for a quick status summary.
 - Treat a migration as successful only when `validation_summary.txt` is `PASS`
-  and every row in `reconciliation.tsv` is `PASS`.
+  and the HTML report is `PASS`; every row in `reconciliation.tsv` must also be
+  `PASS`.
 - Check `sdcli/log/error.txt` when SDCLI phases fail.
 - Use `--dry-run` to confirm config and command construction before a real run.
 - Run `--conn-setup` again if source or target connection details changed.

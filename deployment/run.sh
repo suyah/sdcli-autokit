@@ -301,7 +301,7 @@ initialize_sqldeveloper_preferences() {
 sync_sdcli_scripts() {
   [[ -d "$SDCLI_SCRIPTS_SRC" ]] || fail "sdcli-scripts directory not found: $SDCLI_SCRIPTS_SRC"
 
-  if container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' && test -f '$SDCLI_SCRIPTS_DEST/config.yaml'"; then
+  if container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' && test -f '$SDCLI_SCRIPTS_DEST/config.yaml' && test -f '$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py'"; then
     return
   fi
 
@@ -311,7 +311,7 @@ sync_sdcli_scripts() {
 
 check_tools() {
   local tool
-  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq; do
+  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq python3; do
     container_engine exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
       echo "Error: $tool is missing after installation" >&2
       return 1
@@ -324,6 +324,7 @@ check_tools() {
   container_engine exec "$CONTAINER_NAME" bash -lc "sdcli --help >/dev/null 2>&1" || { echo "Error: sdcli did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh'" || { echo "Error: migration scripts are missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py'" || { echo "Error: validation report program is missing" >&2; return 1; }
 }
 
 if [[ "${RUN_SH_SOURCE_ONLY:-false}" == "true" ]]; then
