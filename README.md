@@ -559,6 +559,7 @@ Important files:
 | `autokit/target_object_inventory.tsv` | Read-only Oracle inventory for generated target owners. |
 | `autokit/schema_mapping.tsv` | Automatically derived source-schema to Oracle-owner mappings and evidence. |
 | `autokit/object_comparison.tsv` | Per-object conversion/deployment comparison and status. |
+| `autokit/validation_checks.tsv` | Normalized log, reconciliation, target-object, and metadata findings consumed by the HTML report. |
 | `autokit/validation_summary.txt` | Final `PASS` or `FAIL` and issue totals. |
 | `autokit/migration_report.html` | Self-contained human-readable report, also written for failed or incomplete validation. |
 | `sdcli/` | SDCLI-generated scripts, logs, and data movement files. |

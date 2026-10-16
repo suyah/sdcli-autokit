@@ -179,6 +179,7 @@ collect_target_object_inventory() {
 
 run_validation_report() {
   printf 'report:%s:%s\n' "$1" "$2" >> "$tmpdir/report-attempts"
+  [[ -s "$AUTOKIT_DIR/validation_checks.tsv" ]] || return 1
   case "$REPORT_MODE" in
     pass)
       printf '<html>pass</html>\n' > "$AUTOKIT_DIR/migration_report.html"
@@ -198,6 +199,7 @@ integration_output="$(run_validate "$integration_dir" 0)"
 assert_contains "$integration_output" "metadata_issues=0 report_issues=0 total_issues=0"
 assert_contains "$integration_output" "Migration validation report: $integration_autokit/migration_report.html"
 grep -F 'status=PASS' "$integration_autokit/validation_summary.txt" >/dev/null
+grep -F $'metadata_collection\tPASS\t0\t' "$integration_autokit/validation_checks.tsv" >/dev/null
 
 second_integration_output="$(run_validate "$integration_dir" 0)"
 assert_contains "$second_integration_output" "metadata_issues=0 report_issues=0 total_issues=0"
@@ -215,6 +217,7 @@ set -e
 [[ $source_failure_rc -ne 0 ]]
 assert_contains "$source_failure_output" "metadata_issues=1 report_issues=1 total_issues=2"
 assert_contains "$source_failure_output" "Migration validation report: $integration_autokit/migration_report.html"
+grep -F $'metadata_collection\tINCOMPLETE\t1\t' "$integration_autokit/validation_checks.tsv" >/dev/null
 
 COLLECTOR_MODE=target_fail
 set +e

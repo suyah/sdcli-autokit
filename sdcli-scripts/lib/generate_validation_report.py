@@ -101,6 +101,7 @@ class ReportData:
     target_inventory: tuple[ObjectRecord, ...]
     comparisons: tuple[ComparisonRecord, ...]
     evidence_issues: tuple[str, ...]
+    validation_findings: tuple[tuple[str, str], ...] = ()
 
 
 def _clean_identifier(value: str) -> str:
@@ -480,6 +481,56 @@ def _strip_sql_comments(text: str) -> str:
     return re.sub(r"--[^\n]*", "", text)
 
 
+def _split_sql_list(value: str) -> list[str]:
+    """Split a SQL comma list without splitting nested expressions or strings."""
+
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    single_quoted = False
+    double_quoted = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if single_quoted:
+            current.append(char)
+            if char == "'":
+                if index + 1 < len(value) and value[index + 1] == "'":
+                    current.append(value[index + 1])
+                    index += 1
+                else:
+                    single_quoted = False
+        elif double_quoted:
+            current.append(char)
+            if char == '"':
+                if index + 1 < len(value) and value[index + 1] == '"':
+                    current.append(value[index + 1])
+                    index += 1
+                else:
+                    double_quoted = False
+        elif char == "'":
+            single_quoted = True
+            current.append(char)
+        elif char == '"':
+            double_quoted = True
+            current.append(char)
+        elif char == "(":
+            depth += 1
+            current.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    if current:
+        parts.append("".join(current).strip())
+    return [part for part in parts if part]
+
+
 def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
     if path.name.casefold() == "master.sql":
         return []
@@ -507,7 +558,6 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+({_QUALIFIED_IDENTIFIER})", "ROUTINES", "FUNCTION"),
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+({_QUALIFIED_IDENTIFIER})", "PACKAGE_BODIES", "PACKAGE BODY"),
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+({_QUALIFIED_IDENTIFIER})", "PACKAGES", "PACKAGE"),
-        (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_QUALIFIED_IDENTIFIER})", "TRIGGERS", "TRIGGER"),
         (rf"^\s*CREATE\s+SEQUENCE\s+({_QUALIFIED_IDENTIFIER})", "SEQUENCES", "SEQUENCE"),
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?SYNONYM\s+({_QUALIFIED_IDENTIFIER})", "SYNONYMS", "SYNONYM"),
         (rf"^\s*CREATE\s+ROLE\s+({_QUALIFIED_IDENTIFIER})", "ROLES", "ROLE"),
@@ -519,6 +569,19 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
                 identifier = f"{identifier}.{identifier}"
             records.append(_ddl_record(identifier, category, subtype, origin))
             recognized_lines.add(matched_line_number(match))
+
+    trigger_pattern = rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_QUALIFIED_IDENTIFIER}).*?\bON\s+({_QUALIFIED_IDENTIFIER})"
+    for match in matches(trigger_pattern, re.IGNORECASE | re.MULTILINE | re.DOTALL):
+        records.append(
+            _ddl_record(
+                match.group(1),
+                "TRIGGERS",
+                "TRIGGER",
+                origin,
+                parent=match.group(2),
+            )
+        )
+        recognized_lines.add(matched_line_number(match))
 
     index_pattern = rf"^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+({_QUALIFIED_IDENTIFIER})\s+ON\s+({_QUALIFIED_IDENTIFIER})\s*\(([^)]*)\)"
     for match in matches(index_pattern):
@@ -552,6 +615,12 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
         constraint_name = match.group(2) or f"{parent_name}_{kind}"
         if "." not in constraint_name:
             constraint_name = f"{parent_schema}.{constraint_name}"
+        if kind == "CHECK":
+            attributes = (
+                InventoryAttribute(0, "expression", (match.group(4) or "").strip()),
+            )
+        else:
+            attributes = _attributes_from_columns(match.group(4) or "")
         records.append(
             _ddl_record(
                 constraint_name,
@@ -559,7 +628,7 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
                 kind,
                 origin,
                 parent=parent,
-                attributes=_attributes_from_columns(match.group(4) or ""),
+                attributes=attributes,
             )
         )
         recognized_lines.add(matched_line_number(match))
@@ -568,6 +637,48 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
     for match in matches(table_block_pattern, re.IGNORECASE | re.MULTILINE | re.DOTALL):
         table = match.group(1)
         table_schema, table_name = _object_schema_and_name(table)
+        column_ordinal = 0
+        for definition in _split_sql_list(match.group(2)):
+            column_match = re.match(
+                r'^\s*("(?:[^"]|"")+"|\[[^\]]+\]|[A-Za-z0-9_$#]+)\s+',
+                definition,
+            )
+            if not column_match:
+                continue
+            column_name = _clean_identifier(column_match.group(1))
+            if column_name.upper() in {
+                "CONSTRAINT",
+                "PRIMARY",
+                "UNIQUE",
+                "FOREIGN",
+                "CHECK",
+            }:
+                continue
+            column_ordinal += 1
+            default_match = re.search(r"\bDEFAULT\b\s+(.+)$", definition, re.IGNORECASE | re.DOTALL)
+            if default_match:
+                default_detail = re.split(
+                    r"\s+(?:NOT\s+NULL|NULL|CONSTRAINT|PRIMARY\s+KEY|UNIQUE|REFERENCES|CHECK)\b",
+                    default_match.group(1).strip(),
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )[0].strip()
+                records.append(
+                    ObjectRecord(
+                        schema=table_schema,
+                        category="DEFAULT_CONSTRAINTS",
+                        name=f"{table_name}_{column_name}_DEFAULT",
+                        parent_schema=table_schema,
+                        parent_name=table_name,
+                        subtype="DEFAULT",
+                        attributes=(
+                            InventoryAttribute(column_ordinal, "column", column_name),
+                        ),
+                        status="EXPECTED",
+                        detail=default_detail,
+                        origin=origin,
+                    )
+                )
         for column_match in re.finditer(
             r'^\s*("(?:[^"]|"")+"|\[[^\]]+\]|[A-Za-z0-9_$#]+).*?\bGENERATED\b.*?\bAS\s+IDENTITY\b',
             match.group(2),
@@ -1164,6 +1275,30 @@ def _read_reconciliation(path: Path) -> tuple[dict[str, str], ...]:
     return rows
 
 
+def _read_validation_checks(path: Path) -> tuple[tuple[str, str, int, str], ...]:
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != ("check", "status", "issues", "detail"):
+            raise EvidenceError(f"invalid validation checks header: {path}")
+        checks = []
+        for line_number, row in enumerate(reader, start=2):
+            status = row["status"].upper()
+            if not row["check"] or status not in {"PASS", "FAIL", "INCOMPLETE"}:
+                raise EvidenceError(f"invalid validation check: {path}:{line_number}")
+            try:
+                issues = int(row["issues"])
+            except ValueError as exc:
+                raise EvidenceError(
+                    f"invalid validation check issue count: {path}:{line_number}"
+                ) from exc
+            if issues < 0 or (status == "PASS") != (issues == 0):
+                raise EvidenceError(f"inconsistent validation check: {path}:{line_number}")
+            checks.append((row["check"], status, issues, row["detail"]))
+    if not checks:
+        raise EvidenceError(f"validation checks evidence is empty: {path}")
+    return tuple(checks)
+
+
 def _escaped(value: object) -> str:
     return html.escape(str(value), quote=True)
 
@@ -1319,9 +1454,10 @@ def render_report(report_data: ReportData, output_path: Path) -> None:
     context_table = _html_table(
         "supporting-context", comparison_headers, _comparison_rows(context_rows)
     )
-    evidence_rows = [("OK", "All required evidence was readable")]
-    if report_data.evidence_issues:
-        evidence_rows = [("INCOMPLETE", issue) for issue in report_data.evidence_issues]
+    evidence_rows = list(report_data.validation_findings)
+    evidence_rows.extend(("INCOMPLETE", issue) for issue in report_data.evidence_issues)
+    if not evidence_rows:
+        evidence_rows = [("OK", "All required evidence was readable")]
     evidence_table = _html_table(
         "evidence-health", ("Status", "Diagnostic"), evidence_rows
     )
@@ -1454,6 +1590,11 @@ def _build_report_data(
         lambda: _read_reconciliation(evidence_dir / "reconciliation.tsv"),
         (),
     )
+    validation_checks = collect(
+        "validation checks",
+        lambda: _read_validation_checks(evidence_dir / "validation_checks.tsv"),
+        (),
+    )
 
     try:
         write_evidence_outputs(evidence_dir, mappings, generated, comparisons)
@@ -1465,9 +1606,19 @@ def _build_report_data(
         row.status not in {"MATCH", "CONTEXT"} for row in comparisons
     )
     reconciliation_issues = sum(row.get("status") != "PASS" for row in reconciliation)
-    if issues:
+    validation_findings = tuple(
+        (
+            status,
+            f"{name}: {detail or f'{count} issue(s)'}",
+        )
+        for name, status, count, detail in validation_checks
+        if status != "PASS"
+    )
+    has_incomplete_check = any(status == "INCOMPLETE" for status, _ in validation_findings)
+    has_failed_check = any(status == "FAIL" for status, _ in validation_findings)
+    if issues or has_incomplete_check:
         status = "INCOMPLETE"
-    elif mapping_issues or comparison_issues or reconciliation_issues:
+    elif has_failed_check or mapping_issues or comparison_issues or reconciliation_issues:
         status = "FAIL"
     else:
         status = "PASS"
@@ -1483,6 +1634,7 @@ def _build_report_data(
         target_inventory=tuple(target),
         comparisons=tuple(comparisons),
         evidence_issues=tuple(issues),
+        validation_findings=validation_findings,
     )
 
 
@@ -1519,7 +1671,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"status={report_data.status} "
         f"mapping_issues={mapping_issues} "
         f"comparison_issues={comparison_issues} "
-        f"incomplete_sections={len(report_data.evidence_issues)} "
+        f"incomplete_sections={len(report_data.evidence_issues) + sum(status == 'INCOMPLETE' for status, _ in report_data.validation_findings)} "
         f"report={args.output}"
     )
     return 0 if report_data.status == "PASS" else 2

@@ -2021,7 +2021,7 @@ WITH inventory AS (
   UNION ALL
   SELECT SCHEMA_NAME(parent.schema_id), 'DEFAULT_CONSTRAINTS', dc.name,
          SCHEMA_NAME(parent.schema_id), parent.name, 'DEFAULT',
-         col.column_id, 'column_default', CONCAT(col.name, '=', dc.definition), 'VALID', ''
+         col.column_id, 'column', col.name, 'VALID', dc.definition
   FROM sys.default_constraints dc
   JOIN sys.tables parent ON parent.object_id = dc.parent_object_id
   JOIN sys.columns col ON col.object_id = dc.parent_object_id AND col.column_id = dc.parent_column_id
@@ -2138,7 +2138,7 @@ WITH inventory AS (
            WHEN 'TABLE' THEN 'TABLES' WHEN 'VIEW' THEN 'VIEWS'
            WHEN 'PROCEDURE' THEN 'ROUTINES' WHEN 'FUNCTION' THEN 'ROUTINES'
            WHEN 'PACKAGE' THEN 'PACKAGES' WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODIES'
-           WHEN 'TRIGGER' THEN 'TRIGGERS' WHEN 'SEQUENCE' THEN 'SEQUENCES'
+           WHEN 'SEQUENCE' THEN 'SEQUENCES'
            WHEN 'SYNONYM' THEN 'SYNONYMS'
          END AS category,
          o.object_name, '' AS parent_schema, '' AS parent_name,
@@ -2149,17 +2149,27 @@ WITH inventory AS (
               WHERE e.owner = o.owner AND e.name = o.object_name AND e.type = o.object_type), '') AS detail
   FROM all_objects o
   WHERE o.owner IN (${owners})
-    AND o.object_type IN ('TABLE','VIEW','PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY','TRIGGER','SEQUENCE','SYNONYM')
+    AND o.object_type IN ('TABLE','VIEW','PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY','SEQUENCE','SYNONYM')
+  UNION ALL
+  SELECT tr.owner, 'TRIGGERS', tr.trigger_name, tr.table_owner, tr.table_name,
+         'TRIGGER', 0, '', '',
+         CASE WHEN o.status = 'VALID' AND tr.status = 'ENABLED' THEN 'VALID' ELSE 'INVALID' END,
+         NVL((SELECT MIN(e.type || ':' || e.line || ':' || e.position || ':' || e.text)
+              FROM all_errors e
+              WHERE e.owner = tr.owner AND e.name = tr.trigger_name AND e.type = 'TRIGGER'), '')
+  FROM all_triggers tr
+  LEFT JOIN all_objects o
+    ON o.owner = tr.owner AND o.object_name = tr.trigger_name AND o.object_type = 'TRIGGER'
+  WHERE tr.owner IN (${owners})
   UNION ALL
   SELECT c.owner,
          CASE c.constraint_type WHEN 'P' THEN 'PRIMARY_KEYS' WHEN 'U' THEN 'UNIQUE_CONSTRAINTS'
-              WHEN 'R' THEN 'FOREIGN_KEYS' WHEN 'C' THEN 'CHECK_CONSTRAINTS' END,
+              WHEN 'R' THEN 'FOREIGN_KEYS' END,
          c.constraint_name, c.owner, c.table_name,
          CASE c.constraint_type WHEN 'P' THEN 'PRIMARY_KEY' WHEN 'U' THEN 'UNIQUE'
-              WHEN 'R' THEN 'FOREIGN_KEY' WHEN 'C' THEN 'CHECK' END,
+              WHEN 'R' THEN 'FOREIGN_KEY' END,
          NVL(cc.position, 0),
-         CASE WHEN c.constraint_type = 'C' AND cc.column_name IS NULL THEN 'expression' ELSE 'column' END,
-         CASE WHEN c.constraint_type = 'C' AND cc.column_name IS NULL THEN c.search_condition_vc ELSE NVL(cc.column_name, c.search_condition_vc) END,
+         'column', cc.column_name,
          CASE WHEN c.status = 'ENABLED' AND c.validated = 'VALIDATED' THEN 'VALID' ELSE 'INVALID' END,
          CASE WHEN c.constraint_type = 'R' THEN
            NVL((SELECT 'references=' || r.owner || '.' || r.table_name
@@ -2167,7 +2177,14 @@ WITH inventory AS (
            ELSE '' END
   FROM all_constraints c
   LEFT JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name AND cc.table_name = c.table_name
-  WHERE c.owner IN (${owners}) AND c.constraint_type IN ('P','U','R','C')
+  WHERE c.owner IN (${owners}) AND c.constraint_type IN ('P','U','R')
+  UNION ALL
+  SELECT c.owner, 'CHECK_CONSTRAINTS', c.constraint_name, c.owner, c.table_name,
+         'CHECK', 0, 'expression', c.search_condition_vc,
+         CASE WHEN c.status = 'ENABLED' AND c.validated = 'VALIDATED' THEN 'VALID' ELSE 'INVALID' END,
+         ''
+  FROM all_constraints c
+  WHERE c.owner IN (${owners}) AND c.constraint_type = 'C' AND c.generated = 'USER NAME'
   UNION ALL
   SELECT i.owner, 'INDEXES', i.index_name, i.table_owner, i.table_name,
          CASE WHEN i.uniqueness = 'UNIQUE' THEN 'UNIQUE' ELSE 'INDEX' END,
@@ -2196,6 +2213,13 @@ WITH inventory AS (
          'IDENTITY', 0, '', '', 'VALID', ''
   FROM all_tab_identity_cols ic
   WHERE ic.owner IN (${owners})
+  UNION ALL
+  SELECT col.owner, 'DEFAULT_CONSTRAINTS', col.table_name || '_' || col.column_name || '_DEFAULT',
+         col.owner, col.table_name, 'DEFAULT', col.column_id, 'column', col.column_name,
+         'VALID', ''
+  FROM all_tab_columns col
+  WHERE col.owner IN (${owners}) AND col.default_length > 0
+    AND col.identity_column = 'NO' AND col.virtual_column = 'NO'
 )
 SELECT 'SDCLI_INVENTORY' || CHR(9) ||
        REPLACE(REPLACE(REPLACE(schema_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
@@ -2431,6 +2455,31 @@ run_data_reconciliation() {
   log_info "Table data reconciliation passed: $report_file"
 }
 
+write_validation_checks() {
+  local output_file="$1"
+  local run_log_issues="$2"
+  local sdcli_error_entries="$3"
+  local sqlldr_log_issues="$4"
+  local missing_evidence="$5"
+  local reconciliation_issues="$6"
+  local object_issues="$7"
+  local metadata_issues="$8"
+  local tmp_file
+
+  tmp_file="$(mktemp "$(dirname "$output_file")/.validation_checks_XXXXXX")" || return 1
+  {
+    printf 'check\tstatus\tissues\tdetail\n'
+    printf 'run_log\t%s\t%s\t%s\n' "$([[ $run_log_issues -eq 0 ]] && echo PASS || echo FAIL)" "$run_log_issues" "migration run-log diagnostics"
+    printf 'sdcli_error_log\t%s\t%s\t%s\n' "$([[ $sdcli_error_entries -eq 0 ]] && echo PASS || echo FAIL)" "$sdcli_error_entries" "SDCLI ERROR/FATAL entries"
+    printf 'sqlldr_logs\t%s\t%s\t%s\n' "$([[ $sqlldr_log_issues -eq 0 ]] && echo PASS || echo FAIL)" "$sqlldr_log_issues" "SQL*Loader log diagnostics"
+    printf 'missing_evidence\t%s\t%s\t%s\n' "$([[ $missing_evidence -eq 0 ]] && echo PASS || echo INCOMPLETE)" "$missing_evidence" "required SQL*Loader log evidence"
+    printf 'reconciliation\t%s\t%s\t%s\n' "$([[ $reconciliation_issues -eq 0 ]] && echo PASS || echo FAIL)" "$reconciliation_issues" "table data reconciliation"
+    printf 'target_objects\t%s\t%s\t%s\n' "$([[ $object_issues -eq 0 ]] && echo PASS || echo FAIL)" "$object_issues" "Oracle invalid objects or compiler errors"
+    printf 'metadata_collection\t%s\t%s\t%s\n' "$([[ $metadata_issues -eq 0 ]] && echo PASS || echo INCOMPLETE)" "$metadata_issues" "source or target object inventory"
+  } > "$tmp_file"
+  mv "$tmp_file" "$output_file"
+}
+
 run_validation_report() {
   local output_dir="$1"
   local idx="$2"
@@ -2505,6 +2554,14 @@ run_validate() {
     fi
     if ! collect_target_object_inventory "$idx" "$output_dir" "$target_inventory"; then
       metadata_issues=$((metadata_issues + 1))
+    fi
+    local validation_checks="$AUTOKIT_DIR/validation_checks.tsv"
+    rm -f "$validation_checks"
+    if ! write_validation_checks "$validation_checks" \
+      "$run_log_issues" "$sdcli_error_entries" "$sqlldr_log_issues" \
+      "$missing_evidence" "$reconciliation_issues" "$object_issues" "$metadata_issues"; then
+      metadata_issues=$((metadata_issues + 1))
+      log_error "Failed to write validation checks evidence: $validation_checks"
     fi
     if ! run_validation_report "$output_dir" "$idx"; then
       report_issues=1

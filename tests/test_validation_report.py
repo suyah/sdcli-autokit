@@ -161,6 +161,31 @@ class InventoryAndMappingTests(unittest.TestCase):
         self.assertIn(("Emulation", "PACKAGES", "UTILS"), identities)
         self.assertEqual(sum(1 for row in records if row.name == "CUSTOMER" and row.category == "TABLES"), 1)
 
+    def test_generated_inventory_captures_trigger_parent_and_column_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ddl = root / "objects.sql"
+            ddl.write_text(
+                "CREATE TABLE APP.ORDERS (\n"
+                "  ID NUMBER DEFAULT 0 NOT NULL,\n"
+                "  CREATED_AT TIMESTAMP DEFAULT SYSTIMESTAMP\n"
+                ");\n"
+                "CREATE OR REPLACE TRIGGER APP.ORDERS_BI\n"
+                "BEFORE INSERT ON APP.ORDERS FOR EACH ROW\n"
+                "BEGIN NULL; END;\n/\n",
+                encoding="utf-8",
+            )
+
+            records = REPORT._parse_generated_file(ddl, root)
+
+        defaults = [row for row in records if row.category == "DEFAULT_CONSTRAINTS"]
+        trigger = next(row for row in records if row.category == "TRIGGERS")
+        self.assertEqual(
+            {(row.parent_name, row.attributes[0].value) for row in defaults},
+            {("ORDERS", "ID"), ("ORDERS", "CREATED_AT")},
+        )
+        self.assertEqual((trigger.parent_schema, trigger.parent_name), ("APP", "ORDERS"))
+
     def test_unknown_active_generated_ddl_is_incomplete_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             sdcli = Path(tmp) / "sdcli"
@@ -271,6 +296,34 @@ class ComparisonTests(unittest.TestCase):
         rows = REPORT.compare_objects(source, generated, target, self.mapping)
 
         self.assertEqual([row.status for row in rows], ["MATCH", "MATCH"])
+
+    def test_default_constraint_matches_by_table_and_column_not_generated_name(self):
+        column = (REPORT.InventoryAttribute(1, "column", "STATUS"),)
+        source = [
+            object_record(
+                "sales",
+                "DEFAULT_CONSTRAINTS",
+                "DF_orders_status",
+                parent_schema="sales",
+                parent_name="orders",
+                attributes=column,
+            )
+        ]
+        generated = [
+            object_record(
+                "APP",
+                "DEFAULT_CONSTRAINTS",
+                "ORDERS_STATUS_DEFAULT",
+                parent_schema="APP",
+                parent_name="ORDERS",
+                attributes=column,
+            )
+        ]
+        target = list(generated)
+
+        rows = REPORT.compare_objects(source, generated, target, self.mapping)
+
+        self.assertEqual([row.status for row in rows], ["MATCH"])
 
     def test_all_failure_and_context_statuses_are_deterministic(self):
         source = [
@@ -504,6 +557,26 @@ class RendererAndCliTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("status=FAIL", stdout)
             self.assertIn("&lt;compile &amp; error&gt;", html)
+
+    def test_cli_report_fails_when_shell_validation_check_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(FIXTURE_ROOT, fixture)
+            checks = fixture / "validation_checks.tsv"
+            checks.write_text(
+                checks.read_text(encoding="utf-8").replace(
+                    "run_log\tPASS\t0\tno issues",
+                    "run_log\tFAIL\t2\tERROR entries found in migration log",
+                ),
+                encoding="utf-8",
+            )
+            output = Path(tmp) / "migration_report.html"
+            rc, stdout = self.run_cli(fixture, output)
+            html = output.read_text(encoding="utf-8")
+
+            self.assertEqual(rc, 2)
+            self.assertIn("status=FAIL", stdout)
+            self.assertIn("ERROR entries found in migration log", html)
 
     def test_cli_writes_incomplete_report_for_missing_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:

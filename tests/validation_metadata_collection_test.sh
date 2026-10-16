@@ -152,6 +152,9 @@ assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_objects'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_constraints'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_indexes'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_errors'
+assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_triggers'
+assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_tab_columns'
+assert_contains_file "$SQLPLUS_INPUT_FILE" "c.generated = 'USER NAME'"
 if grep -Eiq '(^|[^[:alpha:]])(insert|update|delete|merge|drop|truncate)([^[:alpha:]]|$)' "$SQLPLUS_INPUT_FILE"; then
   fail_test "Target inventory query is not read-only"
 fi

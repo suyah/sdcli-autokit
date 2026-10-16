@@ -1,0 +1,8 @@
+check	status	issues	detail
+run_log	PASS	0	no issues
+sdcli_error_log	PASS	0	no issues
+sqlldr_logs	PASS	0	no issues
+missing_evidence	PASS	0	no issues
+reconciliation	PASS	0	no issues
+target_objects	PASS	0	no issues
+metadata_collection	PASS	0	no issues

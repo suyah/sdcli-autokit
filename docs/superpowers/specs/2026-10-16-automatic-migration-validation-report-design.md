@@ -124,7 +124,7 @@ capture -> convert -> generate -> datamove -> offload -> deploy -> load
 The operator runs validation exactly as before:
 
 ```bash
-./migrate.sh proda --phase validate --run "$RUN"
+./migrate.sh sales --phase validate --run "$RUN"
 ```
 
 No report flag, schema list, mapping file, or manual extraction step is needed.
@@ -144,6 +144,7 @@ directory:
 | `target_object_inventory.tsv` | Read-only Oracle object inventory and validity. |
 | `object_comparison.tsv` | Per-object conversion/deployment status and reason. |
 | `reconciliation.tsv` | Existing table-level exported/loaded/final row evidence. |
+| `validation_checks.tsv` | Normalized shell validation findings included in report status and evidence health. |
 | `validation_summary.txt` | Existing machine-readable final result, extended with report counters. |
 | `migration_report.html` | Self-contained human-readable validation report. |
 
@@ -284,8 +285,8 @@ The derived mapping artifact records:
 
 ```text
 source_schema  target_schema  method           evidence_count  status      reason
-dbo            PRODA          DATA_FILE         3               MAPPED
-api            API_PRODA      OBJECT_IDENTITY   4               MAPPED
+sales          SALES_APP      DATA_FILE         3               MAPPED
+api            API_APP        OBJECT_IDENTITY   4               MAPPED
                EMULATION      CONVERSION_ONLY   1               CONTEXT
 ```
 
