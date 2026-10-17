@@ -184,6 +184,7 @@ for mode in empty malformed fail; do
   [[ "$(cat "$preserved")" == "preserve-target-$mode" ]] || fail_test "Target collector replaced evidence after $mode output"
 done
 assert_contains_file "$RUN_LOG_FILE" 'unexpected SQL*Plus output for ***'
+assert_contains_file "$RUN_LOG_FILE" 'Oracle inventory parse diagnostic: line 2: expected 13 tab-separated fields, got 3'
 
 cat > "$tmpdir/bin/python3" <<'SH'
 #!/usr/bin/env bash

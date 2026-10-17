@@ -2013,6 +2013,20 @@ write_marked_inventory() {
     END { if (invalid || rows == 0) exit 1 }
   ' "$raw_file" >> "$tmp_file"; then
     rm -f "$tmp_file"
+    awk -F '\t' -v label="$label" '
+      /^[[:space:]]*$/ { next }
+      $1 != "SDCLI_INVENTORY" {
+        printf "%s inventory parse diagnostic: line %d: expected SDCLI_INVENTORY marker\n", label, NR
+        next
+      }
+      NF != 13 {
+        printf "%s inventory parse diagnostic: line %d: expected 13 tab-separated fields, got %d\n", label, NR, NF
+        next
+      }
+      $2 == "" || $3 == "" || $4 == "" {
+        printf "%s inventory parse diagnostic: line %d: schema, category, and object name are required\n", label, NR
+      }
+    ' "$raw_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" >&2
     redact_sdcli_output < "$raw_file" | tee -a "$RUN_LOG_FILE" >&2
     log_error "$label inventory query returned empty or malformed evidence"
     return 1
