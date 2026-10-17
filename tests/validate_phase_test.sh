@@ -68,6 +68,22 @@ assert_not_contains "$success_output" "SQL*Loader log issue:"
 assert_contains "$success_output_second_run" "Validation summary: run_log_issues=0 sdcli_error_entries=0 sqlldr_logs_checked=1 sqlldr_log_issues=0 missing_evidence=0 reconciliation_issues=0 object_issues=0 metadata_issues=0 report_issues=0 total_issues=0"
 assert_not_contains "$success_output_second_run" "Run log issue:"
 
+# A validation command resumed against an existing run must judge the current
+# artifacts. Earlier failed attempts remain in migrate.log for audit, but must
+# not cause a false validation failure after the affected phase is retried.
+historical_log="$tmpdir/historical-autokit/migrate.log"
+mkdir -p "$(dirname "$historical_log")"
+cat > "$historical_log" <<'LOG'
+[ERROR] 2026-04-27 23:59:59 - Earlier attempt failed before it was retried
+LOG
+RUN_LOG_FILE="$historical_log"
+AUTOKIT_DIR="$tmpdir/historical-autokit"
+RUN_LOG_START_LINE="$(wc -l < "$RUN_LOG_FILE" | tr -d '[:space:]')"
+historical_output="$(run_validate "$output_dir")"
+assert_contains "$historical_output" "Run log diagnostics: issues=0 ignored=0 historical=1"
+assert_contains "$historical_output" "Migration validation passed"
+assert_not_contains "$historical_output" "Run log issue:"
+
 bad_output_dir="$tmpdir/bad-sdcli"
 bad_autokit_dir="$tmpdir/bad-autokit"
 bad_run_log="$bad_autokit_dir/migrate.log"
@@ -95,6 +111,7 @@ LOG
 
 RUN_LOG_FILE="$bad_run_log"
 AUTOKIT_DIR="$bad_autokit_dir"
+RUN_LOG_START_LINE=0
 set +e
 bad_output="$(run_validate "$bad_output_dir" 2>&1)"
 bad_rc=$?

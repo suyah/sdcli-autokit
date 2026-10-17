@@ -25,6 +25,7 @@ RUN_DIR=""
 AUTOKIT_DIR=""
 SDCLI_OUTPUT_DIR=""
 RUN_LOG_FILE=""
+RUN_LOG_START_LINE=0
 SDCLI_COMMAND_LOG=""
 SDCLI_SUMMARY_FILE=""
 MIGRATION_SUMMARY_FILE=""
@@ -1780,10 +1781,12 @@ is_ignored_validation_diagnostic() {
 
 validate_run_log() {
   local log_file="$1"
-  local count=0 ignored=0 match line_no line
+  local start_line="${2:-0}"
+  local count=0 ignored=0 historical=0 match line_no line
   local matches
 
   VALIDATION_LAST_COUNT=0
+  [[ "$start_line" =~ ^[0-9]+$ ]] || start_line=0
   if [[ ! -f "$log_file" ]]; then
     log_warn "Run log not found: $log_file"
     return 0
@@ -1794,6 +1797,10 @@ validate_run_log() {
     [[ -n "$match" ]] || continue
     line_no="${match%%:*}"
     line="${match#*:}"
+    if (( line_no <= start_line )); then
+      historical=$((historical + 1))
+      continue
+    fi
     if [[ "$line" == *"Run log issue:"* || "$line" == *"Run log diagnostics:"* \
         || "$line" == *"Validation summary:"* || "$line" == *"Migration validation failed with"* \
         || "$line" == *"Validate failed for migration"* ]]; then
@@ -1807,7 +1814,7 @@ validate_run_log() {
     log_warn "Run log issue: $log_file:$line_no: $line"
   done <<< "$matches"
 
-  log_info "Run log diagnostics: issues=$count ignored=$ignored"
+  log_info "Run log diagnostics: issues=$count ignored=$ignored historical=$historical"
   VALIDATION_LAST_COUNT=$count
 }
 
@@ -2087,6 +2094,7 @@ SQL
   if ! SQLCMDPASSWORD="$source_password" sqlcmd \
     -S "${source_host},${source_port}" -d "$source_database" -U "$source_user" \
     -b -r 1 -h -1 -W -w 65535 "${tls_args[@]}" -Q "$query" > "$raw_file" 2>&1; then
+    redact_sdcli_output < "$raw_file" | tee -a "$RUN_LOG_FILE" >&2
     rm -f "$raw_file"
     log_error "Failed to query SQL Server object inventory"
     return 1
@@ -2217,8 +2225,9 @@ WITH inventory AS (
   SELECT col.owner, 'DEFAULT_CONSTRAINTS', col.table_name || '_' || col.column_name || '_DEFAULT',
          col.owner, col.table_name, 'DEFAULT', col.column_id, 'column', col.column_name,
          'VALID', ''
-  FROM all_tab_columns col
+  FROM all_tab_cols col
   WHERE col.owner IN (${owners}) AND col.default_length > 0
+    AND col.hidden_column = 'NO'
     AND col.identity_column = 'NO' AND col.virtual_column = 'NO'
 )
 SELECT 'SDCLI_INVENTORY' || CHR(9) ||
@@ -2520,7 +2529,7 @@ run_validate() {
   local run_log="${RUN_LOG_FILE:-$AUTOKIT_DIR/migrate.log}"
   local run_log_issues sdcli_error_entries sqlldr_logs_checked=0 sqlldr_log_issues=0 missing_evidence=0 reconciliation_issues=0 object_issues=0 metadata_issues=0 report_issues=0 total_issues
 
-  validate_run_log "$run_log"
+  validate_run_log "$run_log" "$RUN_LOG_START_LINE"
   run_log_issues=$VALIDATION_LAST_COUNT
 
   validate_sdcli_error_log "$output_dir/log/error.txt"
@@ -3124,6 +3133,7 @@ bootstrap_logging() {
 
   RUN_LOG_FILE="$AUTOKIT_DIR/migrate.log"
   touch "$RUN_LOG_FILE"
+  RUN_LOG_START_LINE="$(wc -l < "$RUN_LOG_FILE" | tr -d '[:space:]')"
 
   SDCLI_COMMAND_LOG="$AUTOKIT_DIR/sdcli_commands.log"
   SDCLI_SUMMARY_FILE="$AUTOKIT_DIR/sdcli_commands_summary.txt"

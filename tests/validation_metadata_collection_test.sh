@@ -47,7 +47,7 @@ case "${SQLCMD_MODE:-valid}" in
     ;;
   empty) ;;
   malformed) printf 'SDCLI_INVENTORY\tdbo\tTABLES\n' ;;
-  fail) printf 'simulated sqlcmd failure\n' >&2; exit 17 ;;
+  fail) printf 'simulated sqlcmd failure for %s\n' "${SQLCMDPASSWORD:-}" >&2; exit 17 ;;
 esac
 SH
 chmod +x "$tmpdir/bin/sqlcmd"
@@ -73,6 +73,7 @@ export SQLCMD_ARGS_FILE="$tmpdir/sqlcmd.args"
 export SQLCMD_PASSWORD_FILE="$tmpdir/sqlcmd.password"
 export SQLCMD_QUERY_FILE="$tmpdir/sqlcmd.query"
 export SQLPLUS_INPUT_FILE="$tmpdir/sqlplus.input"
+export SOURCE_PASSWORD='Source-Secret-42!'
 
 get_required_value() {
   case "$1" in
@@ -141,6 +142,8 @@ for mode in empty malformed fail; do
   [[ $rc -ne 0 ]] || fail_test "Source collector unexpectedly accepted $mode output"
   [[ "$(cat "$preserved")" == "preserve-source-$mode" ]] || fail_test "Source collector replaced evidence after $mode output"
 done
+assert_contains_file "$RUN_LOG_FILE" 'simulated sqlcmd failure for ***'
+assert_not_contains_file "$RUN_LOG_FILE" 'simulated sqlcmd failure for Source-Secret-42!'
 
 target_inventory="$tmpdir/autokit/target_object_inventory.tsv"
 collect_target_object_inventory 0 "$tmpdir/sdcli" "$target_inventory"
@@ -153,7 +156,8 @@ assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_constraints'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_indexes'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_errors'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_triggers'
-assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_tab_columns'
+assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_tab_cols'
+assert_contains_file "$SQLPLUS_INPUT_FILE" "col.hidden_column = 'NO'"
 assert_contains_file "$SQLPLUS_INPUT_FILE" "c.generated = 'USER NAME'"
 if grep -Eiq '(^|[^[:alpha:]])(insert|update|delete|merge|drop|truncate)([^[:alpha:]]|$)' "$SQLPLUS_INPUT_FILE"; then
   fail_test "Target inventory query is not read-only"

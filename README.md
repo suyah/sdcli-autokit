@@ -478,6 +478,12 @@ views. The SQL Server password is supplied to `sqlcmd` through
 connection path; neither password is written to report evidence or process
 arguments.
 
+When `--run` resumes an existing run directory, validation evaluates the
+current generated, load, and target evidence. Earlier failed attempts remain in
+`autokit/migrate.log` for audit but do not by themselves make a later, successful
+retry fail validation. Errors produced by the current command and any failing
+validation evidence still fail the command.
+
 No manual row-count SQL or schema-mapping file is required. Table mappings are
 derived from this run's BCP and SQL*Loader data-file evidence. Row comparison
 uses the BCP exported count, SQL*Loader loaded/rejected/discarded counts, and the
