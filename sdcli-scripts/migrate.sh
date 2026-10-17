@@ -1309,6 +1309,7 @@ run_sqlplus_file() {
   local schema_password="${6:-}"
   local prompt_count="${7:-0}"
   local current_schema="${8:-}"
+  local continue_on_sql_error="${9:-false}"
 
   local full_path="$base_dir/$sqlfile"
   [[ -f "$full_path" ]] || return 0
@@ -1319,11 +1320,16 @@ run_sqlplus_file() {
     return 0
   fi
 
-  local wrapper_file password_file password_backup rc errexit_enabled=false
+  local wrapper_file password_file password_backup sqlplus_output_file="" rc errexit_enabled=false
+  SQLPLUS_LAST_FAILURE_KIND=""
   wrapper_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlplus_XXXXXX.sql")" || return 1
   {
     printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE;'
-    printf '%s\n' 'WHENEVER SQLERROR EXIT SQL.SQLCODE;'
+    if $continue_on_sql_error; then
+      printf '%s\n' 'WHENEVER SQLERROR CONTINUE NONE;'
+    else
+      printf '%s\n' 'WHENEVER SQLERROR EXIT SQL.SQLCODE;'
+    fi
     if (( prompt_count > 0 )); then
       printf '%s\n' '@"passworddefinition.sql"'
     fi
@@ -1348,16 +1354,36 @@ run_sqlplus_file() {
 
   [[ "$-" == *e* ]] && errexit_enabled=true
   set +e
-  (
-    local connect_password
-    connect_password="${target_password//\"/\"\"}"
-    cd "$base_dir"
-    {
-      printf 'connect %s/"%s"@%s\n' "$target_user" "$connect_password" "$target_conn"
-      printf '@"%s"\n' "$wrapper_file"
-    } | sqlplus -S -L /nolog
-  ) 2>&1 | filter_sqlplus_deploy_output | tee -a "$RUN_LOG_FILE"
-  rc=${PIPESTATUS[0]}
+  if $continue_on_sql_error; then
+    sqlplus_output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlplus_output_XXXXXX")" || {
+      $errexit_enabled && set -e
+      rm -f "$wrapper_file"
+      [[ -z "${password_backup:-}" ]] || { rm -f "$password_file"; mv "$password_backup" "$password_file"; }
+      SQLPLUS_LAST_FAILURE_KIND="runtime"
+      return 1
+    }
+    (
+      local connect_password
+      connect_password="${target_password//\"/\"\"}"
+      cd "$base_dir"
+      {
+        printf 'connect %s/"%s"@%s\n' "$target_user" "$connect_password" "$target_conn"
+        printf '@"%s"\n' "$wrapper_file"
+      } | sqlplus -S -L /nolog
+    ) 2>&1 | filter_sqlplus_deploy_output | tee "$sqlplus_output_file" | tee -a "$RUN_LOG_FILE"
+    rc=${PIPESTATUS[0]}
+  else
+    (
+      local connect_password
+      connect_password="${target_password//\"/\"\"}"
+      cd "$base_dir"
+      {
+        printf 'connect %s/"%s"@%s\n' "$target_user" "$connect_password" "$target_conn"
+        printf '@"%s"\n' "$wrapper_file"
+      } | sqlplus -S -L /nolog
+    ) 2>&1 | filter_sqlplus_deploy_output | tee -a "$RUN_LOG_FILE"
+    rc=${PIPESTATUS[0]}
+  fi
   $errexit_enabled && set -e
 
   if [[ -n "${password_backup:-}" ]]; then
@@ -1365,6 +1391,19 @@ run_sqlplus_file() {
     mv "$password_backup" "$password_file"
   fi
   rm -f "$wrapper_file"
+  if (( rc != 0 )); then
+    SQLPLUS_LAST_FAILURE_KIND="runtime"
+    rm -f "$sqlplus_output_file"
+    return "$rc"
+  fi
+  if $continue_on_sql_error && grep -Eqi \
+      '^[[:space:]]*(ORA|PLS|SP2)-[0-9]+:|^[[:space:]]*ERROR at line|[Ww]arning:.*[Cc]ompilation errors' \
+      "$sqlplus_output_file"; then
+    SQLPLUS_LAST_FAILURE_KIND="sql"
+    rm -f "$sqlplus_output_file"
+    return 1
+  fi
+  rm -f "$sqlplus_output_file"
   return "$rc"
 }
 
@@ -1447,6 +1486,16 @@ record_deploy_manifest() {
     "$(sanitize_status_field "$path")" \
     "$(sanitize_status_field "$status")" \
     "$(sanitize_status_field "$note")" >> "$(deploy_manifest_file)"
+}
+
+postdeploy_script_succeeded() {
+  local path="$1"
+  local manifest status=""
+  manifest="$(deploy_manifest_file)"
+  [[ -f "$manifest" ]] || return 1
+  [[ -z "${RUN_DIR:-}" || "$path" != "$RUN_DIR/"* ]] || path="${path#$RUN_DIR/}"
+  status="$(awk -F '\t' -v path="$path" '$1 == "postdeploy" && $2 == path { status = $3 } END { print status }' "$manifest")"
+  [[ "$status" == "executed" ]]
 }
 
 schema_dirs() {
@@ -1754,22 +1803,52 @@ run_postdeploy() {
 
   ensure_deploy_manifest
 
-  local schema_dir schema_name rel_script include_path
+  local schema_dir schema_name rel_script include_path failures=0 attempted=0 skipped=0
   while IFS= read -r schema_dir; do
     schema_name="$(basename "$schema_dir")"
     while IFS= read -r include_path; do
-      run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" || fail "Post-data generated SQL failed: $include_path"
-      record_deploy_manifest "postdeploy" "$output_dir/$include_path" "executed" "post-data master include"
+      if postdeploy_script_succeeded "$output_dir/$include_path"; then
+        skipped=$((skipped + 1))
+        log_info "Skipping successful postdeploy script: $include_path"
+        continue
+      fi
+      attempted=$((attempted + 1))
+      if run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" true; then
+        record_deploy_manifest "postdeploy" "$output_dir/$include_path" "executed" "post-data master include"
+      elif [[ "${SQLPLUS_LAST_FAILURE_KIND:-}" == "runtime" ]]; then
+        record_deploy_manifest "postdeploy" "$output_dir/$include_path" "failed" "SQL*Plus runtime failure"
+        log_error "Postdeploy stopped by SQL*Plus runtime failure: $include_path"
+        return 1
+      else
+        failures=$((failures + 1))
+        record_deploy_manifest "postdeploy" "$output_dir/$include_path" "failed" "post-data SQL errors"
+        log_error "Post-data generated SQL failed: $include_path"
+      fi
     done < <(schema_post_files "$output_dir" "$schema_dir")
 
     if [[ -f "$schema_dir/post.sql" ]]; then
       rel_script="${schema_dir#$output_dir/}/post.sql"
-      run_sqlplus_file "$output_dir" "$rel_script" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" || fail "post.sql failed in $schema_dir"
-      record_deploy_manifest "postdeploy" "$schema_dir/post.sql" "executed" "post-load compile and status script"
+      attempted=$((attempted + 1))
+      if run_sqlplus_file "$output_dir" "$rel_script" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" true; then
+        record_deploy_manifest "postdeploy" "$schema_dir/post.sql" "executed" "post-load compile and status script"
+      elif [[ "${SQLPLUS_LAST_FAILURE_KIND:-}" == "runtime" ]]; then
+        record_deploy_manifest "postdeploy" "$schema_dir/post.sql" "failed" "SQL*Plus runtime failure"
+        log_error "Postdeploy stopped by SQL*Plus runtime failure: $rel_script"
+        return 1
+      else
+        failures=$((failures + 1))
+        record_deploy_manifest "postdeploy" "$schema_dir/post.sql" "failed" "post-load SQL errors"
+        log_error "post.sql failed in $schema_dir"
+      fi
     fi
   done < <(schema_dirs "$output_dir")
 
   log_info "Deploy manifest: $(deploy_manifest_file)"
+  log_info "Postdeploy summary: attempted=$attempted skipped=$skipped failed=$failures"
+  if (( failures > 0 )); then
+    log_error "Postdeploy completed with $failures failed script(s)"
+    return 1
+  fi
 }
 
 VALIDATION_LAST_COUNT=0

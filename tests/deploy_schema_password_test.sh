@@ -72,7 +72,7 @@ while IFS= read -r line; do
   esac
 done <<< "$stdin_text"
 cat passworddefinition.sql > "$SQLPLUS_PASSWORD_FILE"
-printf '%s\n' 'CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;'
+printf '%s\n' "${SQLPLUS_FAKE_OUTPUT:-CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;}"
 SCRIPT
 chmod +x "$fakebin/sqlplus"
 
@@ -113,6 +113,17 @@ assert_contains "$sqlplus_wrapper" "alter session set current_schema = tpcc;"
 assert_contains "$sqlplus_wrapper" "set define off"
 assert_contains "$sqlplus_wrapper" "@\"tpcc/tables.sql\""
 assert_contains "$sqlplus_wrapper" "set define on"
+
+SQLPLUS_FAKE_OUTPUT='ORA-00907: missing right parenthesis'
+export SQLPLUS_FAKE_OUTPUT
+set +e
+run_sqlplus_file "$output_dir" "tpcc/tables.sql" "adb.example/high" "admin" "AdminPass1" "" 0 "tpcc" true
+continue_rc=$?
+set -e
+unset SQLPLUS_FAKE_OUTPUT
+[[ $continue_rc -ne 0 ]]
+sqlplus_wrapper="$(cat "$SQLPLUS_WRAPPER_FILE")"
+assert_contains "$sqlplus_wrapper" "WHENEVER SQLERROR CONTINUE NONE;"
 
 declare -a file_calls=()
 

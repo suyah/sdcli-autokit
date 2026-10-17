@@ -436,7 +436,7 @@ Supported phases:
 | `offload` | Export data from SQL Server. |
 | `deploy` | Run generated Oracle schema setup needed before loading data. |
 | `load` | Load exported data into Oracle. |
-| `postdeploy` | Run all non-predata scripts in generated master order, followed by each schema's `post.sql`. |
+| `postdeploy` | Attempt all non-predata scripts in generated master order, then run each schema's `post.sql`. It returns failure only after recording every SQL error it could execute. |
 | `validate` | Reconcile row counts, collect source and target object metadata, compare source/generated/actual objects, and create the validation report. |
 
 ### Model and run behavior
@@ -449,6 +449,12 @@ For normal use:
 - `--run <run_id>` is only for non-capture single-phase runs and reuses an existing run directory.
 
 Use `--run` when rerunning phases that depend on files already generated in a previous run, such as `deploy`, `load`, `postdeploy`, or `validate`.
+
+If `postdeploy` finds generated SQL errors, it continues with independent
+post-data scripts and runs `post.sql` so Oracle can compile and report object
+status. It still exits nonzero and records each outcome in
+`autokit/deploy_manifest.tsv`. A retry skips previously successful post-data
+scripts, retries failed scripts, and runs each schema's `post.sql` again.
 
 Phase status is append-only. Repeating a mutating phase that already succeeded
 is rejected by default. If the repeat is intentional, make it explicit:

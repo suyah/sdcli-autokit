@@ -168,6 +168,39 @@ assert_line "$manifest" $'postdeploy\tsdcli/tpcc/post.sql\texecuted\tpost-load c
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/synonyms.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/post.sql\texecuted\tpost-load compile and status script'
 
+rm -f "$manifest"
+postdeploy_calls="$tmpdir/postdeploy-calls.log"
+failed_script="tpcc/procedures.sql"
+run_sqlplus_file() {
+  printf '%s\n' "$2" >> "$postdeploy_calls"
+  [[ "$2" != "$failed_script" ]]
+}
+
+set +e
+failure_output="$({ run_postdeploy 0 "$output_dir"; } 2>&1)"
+failure_rc=$?
+set -e
+[[ $failure_rc -ne 0 ]]
+assert_contains "$failure_output" "Postdeploy completed with 1 failed script(s)"
+assert_contains "$(cat "$postdeploy_calls")" "tpcc/post.sql"
+assert_contains "$(cat "$postdeploy_calls")" "tpcc_copy_tpcc/synonyms.sql"
+assert_contains "$(cat "$postdeploy_calls")" "tpcc_copy_tpcc/post.sql"
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc/procedures.sql\tfailed\tpost-data SQL errors'
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc/post.sql\texecuted\tpost-load compile and status script'
+
+failed_script=""
+: > "$postdeploy_calls"
+run_postdeploy 0 "$output_dir"
+
+retry_calls="$(cat "$postdeploy_calls")"
+assert_contains "$retry_calls" "tpcc/procedures.sql"
+assert_contains "$retry_calls" "Emulation/post.sql"
+assert_contains "$retry_calls" "tpcc/post.sql"
+assert_not_contains "$retry_calls" "Emulation/packages.sql"
+assert_not_contains "$retry_calls" "tpcc/indexes.sql"
+assert_not_contains "$retry_calls" "tpcc/synonyms.sql"
+assert_not_contains "$retry_calls" "tpcc_copy_tpcc/synonyms.sql"
+
 touch "$output_dir/tpcc/unplanned.sql"
 set +e
 ( validate_generated_sql_inventory "$output_dir" ) >/dev/null 2>&1

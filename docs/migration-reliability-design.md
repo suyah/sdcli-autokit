@@ -113,7 +113,16 @@ If a supported SQL Developer version emits only one monolithic generated script,
 
 ### 6.3 Oracle error handling
 
-Every SQL\*Plus wrapper sets `WHENEVER OSERROR EXIT FAILURE` and `WHENEVER SQLERROR EXIT SQL.SQLCODE`. After post-deploy, query Oracle for invalid objects and compiler errors in the migrated schemas. Any invalid object or compiler error fails validation and is written without exposing passwords.
+Pre-data SQL\*Plus wrappers set `WHENEVER OSERROR EXIT FAILURE` and
+`WHENEVER SQLERROR EXIT SQL.SQLCODE`. Post-data wrappers still stop immediately
+on runtime failures, but continue independent SQL statements after server-side
+DDL errors so all generated post-data scripts and each schema's `post.sql` can
+run. Each script is recorded as executed or failed in `deploy_manifest.tsv`;
+postdeploy returns nonzero after all executable work is attempted. A retry
+skips successful post-data scripts, retries failed scripts, and reruns
+`post.sql`. After post-deploy, query Oracle for invalid objects and compiler
+errors in the migrated schemas. Any invalid object or compiler error fails
+validation and is written without exposing passwords.
 
 Before a fresh deploy, fail if target tables from the deployment inventory already exist. A resumed run uses the phase manifest; it does not guess whether a partial schema is safe to reuse.
 
