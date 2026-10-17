@@ -438,9 +438,10 @@ def _ddl_record(
 
 
 def _included_sql_files(sdcli_dir: Path) -> list[Path]:
-    roots = sorted(Path(sdcli_dir).glob("master.sql"))
-    if not roots:
-        roots = sorted(Path(sdcli_dir).glob("*/master.sql"))
+    roots = sorted(
+        set(Path(sdcli_dir).glob("master.sql"))
+        | set(Path(sdcli_dir).glob("*/master.sql"))
+    )
     if not roots:
         raise EvidenceError(f"generated master.sql not found under {sdcli_dir}")
 
@@ -468,7 +469,12 @@ def _included_sql_files(sdcli_dir: Path) -> list[Path]:
             if not match:
                 continue
             include_value = match.group(1) or match.group(2)
-            include_path = (path.parent / include_value).resolve()
+            root_relative_path = (Path(sdcli_dir) / include_value).resolve()
+            include_path = (
+                root_relative_path
+                if root_relative_path.is_file()
+                else (path.parent / include_value).resolve()
+            )
             visit(include_path)
 
     for root in roots:
@@ -750,6 +756,8 @@ def resolve_schema_mappings(
     source_objects: dict[str, set[tuple[str, str]]] = defaultdict(set)
     source_names: dict[str, str] = {}
     for record in source:
+        if _logical_category(record.category) == "SCHEMAS":
+            continue
         key = record.schema.casefold()
         if key in mapped_sources:
             continue

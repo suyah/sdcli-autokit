@@ -161,6 +161,33 @@ class InventoryAndMappingTests(unittest.TestCase):
         self.assertIn(("Emulation", "PACKAGES", "UTILS"), identities)
         self.assertEqual(sum(1 for row in records if row.name == "CUSTOMER" and row.category == "TABLES"), 1)
 
+    def test_generated_inventory_uses_each_schema_master_when_root_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdcli = Path(tmp) / "sdcli"
+            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
+            (sdcli / "master.sql").write_text("@@Emulation/master.sql\n", encoding="utf-8")
+
+            records = REPORT.parse_generated_inventory(sdcli)
+
+        identities = {(row.schema, row.category, row.name) for row in records}
+        self.assertIn(("APP", "TABLES", "CUSTOMER"), identities)
+        self.assertIn(("Emulation", "PACKAGES", "UTILS"), identities)
+
+    def test_generated_inventory_supports_root_relative_schema_master_includes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdcli = Path(tmp) / "sdcli"
+            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
+            (sdcli / "APP" / "master.sql").write_text(
+                "@@APP/user.sql\n@@APP/tables.sql\n@@APP/views.sql\n"
+                "@@APP/routines.sql\n@@APP/constraints.sql\n",
+                encoding="utf-8",
+            )
+
+            records = REPORT.parse_generated_inventory(sdcli)
+
+        identities = {(row.schema, row.category, row.name) for row in records}
+        self.assertIn(("APP", "TABLES", "CUSTOMER"), identities)
+
     def test_generated_inventory_captures_trigger_parent_and_column_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -210,6 +237,13 @@ class InventoryAndMappingTests(unittest.TestCase):
         self.assertEqual(mappings[0].target_schema, "API_APP")
         self.assertEqual(mappings[0].method, "OBJECT_IDENTITY")
         self.assertEqual(mappings[0].status, "MAPPED")
+
+    def test_empty_source_schema_does_not_require_a_target_mapping(self):
+        source = [object_record(r"nswhealth\SRV-NSWH-Solarwinds", "SCHEMAS", r"nswhealth\SRV-NSWH-Solarwinds")]
+
+        mappings = REPORT.resolve_schema_mappings(source, [], [])
+
+        self.assertEqual(mappings, [])
 
     def test_tableless_tie_remains_unresolved_and_emulation_is_context(self):
         source = [
