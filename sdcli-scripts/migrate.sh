@@ -1968,6 +1968,7 @@ run_target_sql_capture() {
   target_conn="$(migration_required_value "$idx" target conn)"
   target_user="$(migration_required_value "$idx" target user)"
   target_password="$(migration_secret_value "$idx" target password)"
+  register_sensitive_value "$target_password"
   connect_password="${target_password//\"/\"\"}"
 
   [[ "$-" == *e* ]] && errexit_enabled=true
@@ -2012,6 +2013,7 @@ write_marked_inventory() {
     END { if (invalid || rows == 0) exit 1 }
   ' "$raw_file" >> "$tmp_file"; then
     rm -f "$tmp_file"
+    redact_sdcli_output < "$raw_file" | tee -a "$RUN_LOG_FILE" >&2
     log_error "$label inventory query returned empty or malformed evidence"
     return 1
   fi

@@ -66,7 +66,10 @@ case "${SQLPLUS_MODE:-valid}" in
     printf 'SDCLI_INVENTORY\tAPP\tIDENTITY_COLUMNS\tORDERS_ID\tAPP\tORDERS\tIDENTITY\t1\tcolumn\tID\tVALID\t\toracle\n'
     ;;
   empty) ;;
-  malformed) printf 'SDCLI_INVENTORY\tAPP\tTABLES\n' ;;
+  malformed)
+    printf 'unexpected SQL*Plus output for Target-Secret-42!\n'
+    printf 'SDCLI_INVENTORY\tAPP\tTABLES\n'
+    ;;
   fail) printf 'simulated sqlplus failure\n' >&2; exit 19 ;;
 esac
 SH
@@ -180,6 +183,7 @@ for mode in empty malformed fail; do
   [[ $rc -ne 0 ]] || fail_test "Target collector unexpectedly accepted $mode output"
   [[ "$(cat "$preserved")" == "preserve-target-$mode" ]] || fail_test "Target collector replaced evidence after $mode output"
 done
+assert_contains_file "$RUN_LOG_FILE" 'unexpected SQL*Plus output for ***'
 
 cat > "$tmpdir/bin/python3" <<'SH'
 #!/usr/bin/env bash
