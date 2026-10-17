@@ -2074,16 +2074,16 @@ WITH inventory AS (
 )
 SELECT CONCAT(
   'SDCLI_INVENTORY', @tab,
-  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), schema_name), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
-  category, @tab,
-  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), object_name), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
-  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_schema), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
-  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_name), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
-  subtype, @tab, CONVERT(varchar(12), ordinal), @tab,
-  attribute_name, @tab,
-  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), attribute_value), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
-  status, @tab,
-  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), detail), @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), schema_name) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  category COLLATE DATABASE_DEFAULT, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), object_name) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_schema) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_name) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  subtype COLLATE DATABASE_DEFAULT, @tab, CONVERT(varchar(12), ordinal), @tab,
+  attribute_name COLLATE DATABASE_DEFAULT, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), attribute_value) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  status COLLATE DATABASE_DEFAULT, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), detail) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
   'sqlserver')
 FROM inventory
 ORDER BY schema_name, category, object_name, ordinal;

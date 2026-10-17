@@ -42,6 +42,10 @@ done
 printf '%s' "$query" > "$SQLCMD_QUERY_FILE"
 case "${SQLCMD_MODE:-valid}" in
   valid)
+    if [[ "$query" != *'COLLATE DATABASE_DEFAULT'* ]]; then
+      printf 'simulated collation conflict: source metadata was not normalized\n' >&2
+      exit 18
+    fi
     printf 'SDCLI_INVENTORY\tdbo\tTABLES\torders\t\t\tTABLE\t\t\t\tVALID\t0\tsqlserver\n'
     printf 'SDCLI_INVENTORY\tdbo\tIDENTITY_COLUMNS\torders_id\tdbo\torders\tIDENTITY\t1\tcolumn\tid\tVALID\t\tsqlserver\n'
     ;;
@@ -122,6 +126,7 @@ assert_contains_file "$SQLCMD_QUERY_FILE" 'sys.procedures'
 assert_contains_file "$SQLCMD_QUERY_FILE" 'sys.foreign_keys'
 assert_contains_file "$SQLCMD_QUERY_FILE" 'sys.indexes'
 assert_contains_file "$SQLCMD_QUERY_FILE" 'is_ms_shipped'
+assert_contains_file "$SQLCMD_QUERY_FILE" 'COLLATE DATABASE_DEFAULT'
 if grep -Eiq '(^|[^[:alpha:]])(insert|update|delete|merge|drop|alter|create|truncate)([^[:alpha:]]|$)' "$SQLCMD_QUERY_FILE"; then
   fail_test "Source inventory query is not read-only"
 fi
