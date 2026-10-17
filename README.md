@@ -401,8 +401,8 @@ In plain language, this captures SQL Server metadata, converts it for Oracle,
 generates scripts, exports data, deploys the Oracle schema objects needed before
 load, loads data, runs every post-load object script listed by SQL Developer's
 generated `master.sql` files, and validates logs, per-table row counts, and
-source/generated/target object coverage. Validation also creates a self-contained
-HTML comparison report.
+source/generated/target object coverage. Validation also creates self-contained
+HTML and plain-text comparison reports.
 
 Only one repository workflow may run at a time. The script creates an atomic
 lock under `<project_root>/.locks` before repository work so SDCLI's `latest`
@@ -504,14 +504,18 @@ The offline `migration_report.html` contains:
 comparisons passed. `FAIL` means a mismatch or invalid target object was found.
 `CONTEXT` is visible supporting or platform-generated metadata and does not fail
 the migration by itself. Missing or malformed evidence is reported as
-`INCOMPLETE` in the HTML and causes the validate phase to fail.
+`INCOMPLETE` in both reports and causes the validate phase to fail.
 
-The report is a single local HTML file with embedded styling and sorting code;
-it does not load internet resources. It can contain customer schema names,
-object names, and compiler messages, so handle it as migration evidence. A
-rerun atomically replaces completed report and comparison artifacts rather than
-appending duplicate rows. If rendering is interrupted, an existing complete
-HTML report is preserved, but the current validate command still fails.
+The HTML report is a single local file with embedded styling and sorting code;
+it does not load internet resources. Its terminal-readable companion,
+`migration_report.txt`, contains the run summary, schema mapping, data
+reconciliation, evidence health, and non-matching object comparisons. View it
+on the migration host with `less autokit/migration_report.txt`. Reports can
+contain customer schema names, object names, and compiler messages, so handle
+them as migration evidence. A rerun atomically replaces completed report and
+comparison artifacts rather than appending duplicate rows. If rendering is
+interrupted, an existing complete HTML report is preserved, but the current
+validate command still fails.
 
 The run id can be provided with or without the `run_` prefix:
 
@@ -565,9 +569,10 @@ Important files:
 | `autokit/target_object_inventory.tsv` | Read-only Oracle inventory for generated target owners. |
 | `autokit/schema_mapping.tsv` | Automatically derived source-schema to Oracle-owner mappings and evidence. |
 | `autokit/object_comparison.tsv` | Per-object conversion/deployment comparison and status. |
-| `autokit/validation_checks.tsv` | Normalized log, reconciliation, target-object, and metadata findings consumed by the HTML report. |
+| `autokit/validation_checks.tsv` | Normalized log, reconciliation, target-object, and metadata findings consumed by the validation reports. |
 | `autokit/validation_summary.txt` | Final `PASS` or `FAIL` and issue totals. |
 | `autokit/migration_report.html` | Self-contained human-readable report, also written for failed or incomplete validation. |
+| `autokit/migration_report.txt` | Terminal-readable companion report with validation findings and non-matching objects. |
 | `sdcli/` | SDCLI-generated scripts, logs, and data movement files. |
 
 If you rerun a phase with `--run`, the new output is appended to the existing run log.

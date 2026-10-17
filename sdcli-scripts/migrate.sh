@@ -2580,6 +2580,11 @@ run_validate() {
     else
       log_error "Migration validation report was not created: $AUTOKIT_DIR/migration_report.html"
     fi
+    if [[ -f "$AUTOKIT_DIR/migration_report.txt" ]]; then
+      log_info "Migration validation text report: $AUTOKIT_DIR/migration_report.txt"
+    else
+      log_warn "Migration validation text report was not created: $AUTOKIT_DIR/migration_report.txt"
+    fi
   fi
 
   total_issues=$((run_log_issues + sdcli_error_entries + sqlldr_log_issues + missing_evidence + reconciliation_issues + object_issues + metadata_issues + report_issues))

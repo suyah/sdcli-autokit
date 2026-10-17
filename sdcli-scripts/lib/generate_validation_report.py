@@ -1382,6 +1382,97 @@ def _comparison_rows(rows: Iterable[ComparisonRecord]) -> Iterable[tuple[str, ..
         )
 
 
+def _object_reference(schema: str, category: str, name: str) -> str:
+    qualified_name = ".".join(value for value in (schema, name) if value)
+    return f"{category}: {qualified_name}" if category else qualified_name
+
+
+def render_text_report(report_data: ReportData, output_path: Path) -> None:
+    """Render a concise, terminal-readable companion to the HTML report."""
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    exception_rows = [
+        row
+        for row in report_data.comparisons
+        if row.status not in {"MATCH", "CONTEXT"}
+    ]
+    lines = [
+        "Migration Validation Report",
+        "=" * len("Migration Validation Report"),
+        f"Migration: {report_data.migration}",
+        f"Run: {report_data.run_id}",
+        f"Generated: {report_data.generated_at}",
+        f"Status: {report_data.status}",
+        "",
+        "Schema mapping",
+        "--------------",
+    ]
+    if report_data.mappings:
+        for row in report_data.mappings:
+            detail = f"; {row.reason}" if row.reason else ""
+            lines.append(
+                f"{row.status}: {row.source_schema or '<none>'} -> "
+                f"{row.target_schema or '<unresolved>'} "
+                f"[{row.method}; evidence={row.evidence_count}]{detail}"
+            )
+    else:
+        lines.append("No schema mapping evidence available.")
+
+    lines.extend(("", "Data reconciliation", "-------------------"))
+    if report_data.reconciliation:
+        for row in report_data.reconciliation:
+            detail = f"; {row.get('reason', '')}" if row.get("reason") else ""
+            lines.append(
+                f"{row.get('status', 'UNKNOWN')}: {row.get('source_object', '')} -> "
+                f"{row.get('target_object', '')} "
+                f"exported={row.get('exported_rows', '')} "
+                f"loaded={row.get('loaded_rows', '')} "
+                f"target={row.get('target_rows', '')}{detail}"
+            )
+    else:
+        lines.append("No reconciliation evidence available.")
+
+    lines.extend(("", "Evidence health", "---------------"))
+    evidence_rows = list(report_data.validation_findings)
+    evidence_rows.extend(("INCOMPLETE", issue) for issue in report_data.evidence_issues)
+    if evidence_rows:
+        lines.extend(f"{status}: {detail}" for status, detail in evidence_rows)
+    else:
+        lines.append("PASS: All required evidence was readable.")
+
+    lines.extend(("", f"Object comparison issues ({len(exception_rows)})", "-" * 28))
+    if exception_rows:
+        for row in exception_rows:
+            fields = (
+                ("source", _object_reference(row.source_schema, row.source_category, row.source_name)),
+                ("generated", _object_reference(row.generated_schema, row.generated_category, row.generated_name)),
+                ("target", _object_reference(row.target_schema, row.target_category, row.target_name)),
+            )
+            object_details = "; ".join(
+                f"{label}={value}" for label, value in fields if value
+            )
+            reason = f"; {row.reason}" if row.reason else ""
+            lines.append(f"{row.status}: {object_details}{reason}")
+    else:
+        lines.append("None.")
+    lines.append("")
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.", dir=output_path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write("\n".join(lines))
+        os.replace(temporary_name, output_path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def render_report(report_data: ReportData, output_path: Path) -> None:
     """Render one offline HTML report and atomically replace the destination."""
 
@@ -1696,6 +1787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             generated_at,
         )
         render_report(report_data, args.output)
+        render_text_report(report_data, args.output.with_suffix(".txt"))
     except (OSError, UnicodeError, csv.Error) as exc:
         print(f"REPORT_ERROR unable to create validation report: {exc}", file=sys.stderr)
         return 1
@@ -1710,7 +1802,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"mapping_issues={mapping_issues} "
         f"comparison_issues={comparison_issues} "
         f"incomplete_sections={len(report_data.evidence_issues) + sum(status == 'INCOMPLETE' for status, _ in report_data.validation_findings)} "
-        f"report={args.output}"
+        f"report={args.output} "
+        f"text_report={args.output.with_suffix('.txt')}"
     )
     return 0 if report_data.status == "PASS" else 2
 

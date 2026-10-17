@@ -596,6 +596,12 @@ class RendererAndCliTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertTrue(output.is_file())
+            text_output = output.with_suffix(".txt")
+            self.assertTrue(text_output.is_file())
+            text_report = text_output.read_text(encoding="utf-8")
+            self.assertIn("Migration Validation Report", text_report)
+            self.assertIn("Status: PASS", text_report)
+            self.assertIn("Object comparison issues (0)", text_report)
             self.assertIn("status=PASS", stdout)
             self.assertTrue((fixture / "schema_mapping.tsv").is_file())
             self.assertTrue((fixture / "generated_target_inventory.tsv").is_file())
