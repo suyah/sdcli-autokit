@@ -188,6 +188,35 @@ class InventoryAndMappingTests(unittest.TestCase):
         identities = {(row.schema, row.category, row.name) for row in records}
         self.assertIn(("APP", "TABLES", "CUSTOMER"), identities)
 
+    def test_generated_inventory_infers_schema_for_unqualified_package_in_schema_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdcli = Path(tmp) / "sdcli"
+            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
+            (sdcli / "Emulation" / "routines.sql").write_text(
+                "CREATE OR REPLACE PACKAGE UTILS AS\nEND UTILS;\n/\n",
+                encoding="utf-8",
+            )
+
+            records = REPORT.parse_generated_inventory(sdcli)
+
+        identities = {(row.schema, row.category, row.name) for row in records}
+        self.assertIn(("Emulation", "PACKAGES", "UTILS"), identities)
+
+    def test_generated_inventory_does_not_treat_package_body_as_package_named_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdcli = Path(tmp) / "sdcli"
+            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
+            (sdcli / "Emulation" / "routines.sql").write_text(
+                "CREATE OR REPLACE PACKAGE BODY UTILS AS\nEND UTILS;\n/\n",
+                encoding="utf-8",
+            )
+
+            records = REPORT.parse_generated_inventory(sdcli)
+
+        identities = {(row.schema, row.category, row.name) for row in records}
+        self.assertIn(("Emulation", "PACKAGE_BODIES", "UTILS"), identities)
+        self.assertNotIn(("Emulation", "PACKAGES", "BODY"), identities)
+
     def test_generated_inventory_captures_trigger_parent_and_column_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

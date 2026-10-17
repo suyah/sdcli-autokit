@@ -437,6 +437,33 @@ def _ddl_record(
     )
 
 
+def _schema_owner_for_generated_file(path: Path, root: Path) -> str:
+    """Return a generated schema directory owner when SQL omits it.
+
+    SQL Developer may emit object DDL without an owner inside a directory that
+    is itself named for the generated schema.  Infer an owner only when that
+    directory also has its generated ``user.sql``; root-level support scripts
+    and arbitrary directories therefore remain evidence errors rather than
+    being guessed.
+    """
+
+    relative_path = path.relative_to(root)
+    if len(relative_path.parts) < 2:
+        return ""
+    candidate = relative_path.parts[0]
+    if (root / candidate / "user.sql").is_file():
+        return candidate
+    return ""
+
+
+def _qualify_generated_identifier(identifier: str, schema_owner: str) -> str:
+    """Add the schema directory owner only to an unqualified identifier."""
+
+    if schema_owner and len(_qualified_parts(identifier)) < 2:
+        return f"{schema_owner}.{identifier}"
+    return identifier
+
+
 def _included_sql_files(sdcli_dir: Path) -> list[Path]:
     roots = sorted(
         set(Path(sdcli_dir).glob("master.sql"))
@@ -542,6 +569,7 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
         return []
     text = _strip_sql_comments(path.read_text(encoding="utf-8", errors="strict"))
     origin = f"{path.relative_to(root)}"
+    schema_owner = _schema_owner_for_generated_file(path, root)
     records: list[ObjectRecord] = []
     recognized_lines: set[int] = set()
 
@@ -563,7 +591,7 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+({_QUALIFIED_IDENTIFIER})", "ROUTINES", "PROCEDURE"),
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+({_QUALIFIED_IDENTIFIER})", "ROUTINES", "FUNCTION"),
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+({_QUALIFIED_IDENTIFIER})", "PACKAGE_BODIES", "PACKAGE BODY"),
-        (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+({_QUALIFIED_IDENTIFIER})", "PACKAGES", "PACKAGE"),
+        (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE(?!\s+BODY\b)\s+({_QUALIFIED_IDENTIFIER})", "PACKAGES", "PACKAGE"),
         (rf"^\s*CREATE\s+SEQUENCE\s+({_QUALIFIED_IDENTIFIER})", "SEQUENCES", "SEQUENCE"),
         (rf"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?SYNONYM\s+({_QUALIFIED_IDENTIFIER})", "SYNONYMS", "SYNONYM"),
         (rf"^\s*CREATE\s+ROLE\s+({_QUALIFIED_IDENTIFIER})", "ROLES", "ROLE"),
@@ -571,8 +599,10 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
     for pattern, category, subtype in simple_patterns:
         for match in matches(pattern):
             identifier = match.group(1)
-            if category in {"SCHEMAS", "ROLES"} and "." not in identifier:
+            if category in {"SCHEMAS", "ROLES"} and len(_qualified_parts(identifier)) < 2:
                 identifier = f"{identifier}.{identifier}"
+            else:
+                identifier = _qualify_generated_identifier(identifier, schema_owner)
             records.append(_ddl_record(identifier, category, subtype, origin))
             recognized_lines.add(matched_line_number(match))
 
@@ -580,11 +610,11 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
     for match in matches(trigger_pattern, re.IGNORECASE | re.MULTILINE | re.DOTALL):
         records.append(
             _ddl_record(
-                match.group(1),
+                _qualify_generated_identifier(match.group(1), schema_owner),
                 "TRIGGERS",
                 "TRIGGER",
                 origin,
-                parent=match.group(2),
+                parent=_qualify_generated_identifier(match.group(2), schema_owner),
             )
         )
         recognized_lines.add(matched_line_number(match))
@@ -597,11 +627,11 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
         )
         records.append(
             _ddl_record(
-                match.group(2),
+                _qualify_generated_identifier(match.group(2), schema_owner),
                 "INDEXES",
                 "UNIQUE" if match.group(1) else "INDEX",
                 origin,
-                parent=match.group(3),
+                parent=_qualify_generated_identifier(match.group(3), schema_owner),
                 attributes=tuple(sorted(attributes)),
             )
         )
@@ -609,7 +639,7 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
 
     constraint_pattern = rf"^\s*ALTER\s+TABLE\s+({_QUALIFIED_IDENTIFIER})\s+ADD\s+(?:CONSTRAINT\s+({_QUALIFIED_IDENTIFIER})\s+)?(PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY|CHECK)\s*(?:\(([^)]*)\))?"
     for match in matches(constraint_pattern):
-        parent = match.group(1)
+        parent = _qualify_generated_identifier(match.group(1), schema_owner)
         parent_schema, parent_name = _object_schema_and_name(parent)
         kind = re.sub(r"\s+", "_", match.group(3).upper())
         category = {
@@ -619,7 +649,7 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
             "CHECK": "CHECK_CONSTRAINTS",
         }[kind]
         constraint_name = match.group(2) or f"{parent_name}_{kind}"
-        if "." not in constraint_name:
+        if len(_qualified_parts(constraint_name)) < 2:
             constraint_name = f"{parent_schema}.{constraint_name}"
         if kind == "CHECK":
             attributes = (
@@ -641,7 +671,7 @@ def _parse_generated_file(path: Path, root: Path) -> list[ObjectRecord]:
 
     table_block_pattern = rf"^\s*CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+({_QUALIFIED_IDENTIFIER})\s*\((.*?)\)\s*;"
     for match in matches(table_block_pattern, re.IGNORECASE | re.MULTILINE | re.DOTALL):
-        table = match.group(1)
+        table = _qualify_generated_identifier(match.group(1), schema_owner)
         table_schema, table_name = _object_schema_and_name(table)
         column_ordinal = 0
         for definition in _split_sql_list(match.group(2)):
