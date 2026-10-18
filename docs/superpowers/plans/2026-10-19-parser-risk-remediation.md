@@ -22,7 +22,7 @@
 
 ## Review Focus
 
-- Passwords containing comma, `@`, slash, whitespace, semicolon, and quotes must be passed unchanged to tools but absent from every log and summary; Task 1 tests all characters.
+- A representative supported password containing `@` and punctuation must be passed unchanged to tools but absent from every log and summary. Known ambiguous SDCLI `connDetails` separators are rejected before execution with a secret-free error; Task 1 does not enumerate password combinations.
 - A SQL Developer format change must fail closed instead of silently skipping a generated file; Tasks 4 and 5 add unsupported-format cases.
 - Missing target inventory must not create invented `MISSING_IN_TARGET` rows; Task 2 tests missing and malformed evidence.
 - SQL errors in one postdeploy script must not lose cleanup behavior, manifest history, or later independent scripts; Task 4 reruns the merged deploy/postdeploy suite.
@@ -46,13 +46,13 @@
 
 - [ ] **Step 1: Add failing special-character secret tests**
 
-Add passwords containing `a,b@c/d e;f'"g` to SDCLI and SQL*Plus tests. Assert exact values reach fake tools while no complete or partial password fragment appears in console capture, `migrate.log`, `sdcli_commands.log`, or the command summary.
+Add one representative supported password containing `@` and punctuation to the SDCLI and SQL*Plus tests. Add one representative unsupported `connDetails` delimiter case. Assert supported values reach fake tools unchanged, logs contain no credential fragments, and unsupported syntax fails before SDCLI with a clear secret-free message.
 
 - [ ] **Step 2: Run focused tests and verify the current structural masking fails**
 
 Run: `bash tests/sdcli_output_redaction_test.sh && bash tests/deploy_schema_password_test.sh`
 
-Expected: at least the comma or whitespace password case exposes text and fails.
+Expected: FAIL because unsupported `connDetails` delimiters are not preflighted and SQL*Plus output still uses structural masking.
 
 - [ ] **Step 3: Replace structural masking with literal redaction**
 

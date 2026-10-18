@@ -85,22 +85,32 @@ PATH="$fakebin:$PATH"
 
 RUN_LOG_FILE="$tmpdir/sqlplus.log"
 touch "$RUN_LOG_FILE"
-run_sqlplus_file "$output_dir" "gen/generated-1.sql" "adb.example/high" "admin" "AdminPass1" "SchemaPass1" 3
+target_password='Adm@in Safe;Q"9'
+schema_password='Sch@ma Safe;R"8'
+escaped_schema_password="${schema_password//\"/\"\"}"
+SQLPLUS_FAKE_OUTPUT="CREATE USER tpcc IDENTIFIED BY \"${escaped_schema_password}\" PASSWORD EXPIRE ACCOUNT LOCK;"
+export SQLPLUS_FAKE_OUTPUT
+run_sqlplus_file "$output_dir" "gen/generated-1.sql" "adb.example/high" "admin" "$target_password" "$schema_password" 3
+unset SQLPLUS_FAKE_OUTPUT
 sqlplus_args="$(cat "$SQLPLUS_ARGS_FILE")"
 sqlplus_stdin="$(cat "$SQLPLUS_STDIN_FILE")"
 sqlplus_password_file="$(cat "$SQLPLUS_PASSWORD_FILE")"
 sqlplus_wrapper="$(cat "$SQLPLUS_WRAPPER_FILE")"
 assert_contains "$sqlplus_args" "/nolog"
-assert_not_contains "$sqlplus_args" "AdminPass1"
-assert_contains "$sqlplus_stdin" 'connect admin/"AdminPass1"@adb.example/high'
+assert_not_contains "$sqlplus_args" "$target_password"
+assert_contains "$sqlplus_stdin" 'connect admin/"Adm@in Safe;Q""9"@adb.example/high'
 assert_not_contains "$sqlplus_stdin" "@gen/generated-1.sql"
-assert_not_contains "$sqlplus_stdin" "SchemaPass1"
+assert_not_contains "$sqlplus_stdin" "$schema_password"
 assert_not_contains "$sqlplus_wrapper" "alter session set current_schema"
-assert_contains "$sqlplus_password_file" "DEFINE tpcc_password = \"SchemaPass1\""
-assert_contains "$sqlplus_password_file" "DEFINE tpcc_copy_tpcc_password = \"SchemaPass1\""
-assert_contains "$sqlplus_password_file" "DEFINE Emulation_password = \"SchemaPass1\""
+assert_contains "$sqlplus_wrapper" "SET VERIFY OFF"
+assert_contains "$sqlplus_password_file" 'DEFINE tpcc_password = "Sch@ma Safe;R""8"'
+assert_contains "$sqlplus_password_file" 'DEFINE tpcc_copy_tpcc_password = "Sch@ma Safe;R""8"'
+assert_contains "$sqlplus_password_file" 'DEFINE Emulation_password = "Sch@ma Safe;R""8"'
 assert_not_contains "$sqlplus_password_file" "ACCEPT"
 assert_contains "$(cat "$output_dir/passworddefinition.sql")" "ACCEPT tpcc_password"
+assert_not_contains "$(cat "$RUN_LOG_FILE")" "$target_password"
+assert_not_contains "$(cat "$RUN_LOG_FILE")" "$schema_password"
+assert_not_contains "$(cat "$RUN_LOG_FILE")" 'Sch@ma Safe'
 
 mkdir -p "$output_dir/tpcc"
 touch "$output_dir/tpcc/tables.sql"
@@ -164,8 +174,8 @@ assert_not_contains "${file_calls[*]}" "gen/generated-1.sql"
 assert_contains "$(cat "$AUTOKIT_DIR/deploy_manifest.tsv")" $'plan\tsdcli/gen/generated-1.sql\texcluded\tduplicate monolithic output; schema hierarchy selected'
 
 masked="$(printf '%s\n' \
-  'CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;' \
-  'new   1: CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;' \
+  "CREATE USER tpcc IDENTIFIED BY ${schema_password} PASSWORD EXPIRE ACCOUNT LOCK;" \
+  "new   1: CREATE USER tpcc IDENTIFIED BY ${schema_password} PASSWORD EXPIRE ACCOUNT LOCK;" \
   | filter_sqlplus_deploy_output)"
 assert_contains "$masked" "IDENTIFIED BY *** PASSWORD"
-assert_not_contains "$masked" "SchemaPass1"
+assert_not_contains "$masked" "$schema_password"

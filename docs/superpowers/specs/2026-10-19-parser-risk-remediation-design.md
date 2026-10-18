@@ -68,10 +68,12 @@ case involving `@`, comma, slash, semicolon, whitespace, or quotes.
 
 #### Completion evidence
 
-Tests use passwords containing comma, `@`, slash, space, semicolon, single
-quote, and double quote. None may appear in console output, run logs, command
-logs, summaries, or deploy output. The real command must still receive the
-exact original value.
+Tests use one representative supported password containing `@` and punctuation
+and one representative unsupported SDCLI delimiter. Supported values must not
+appear in console output, run logs, command logs, summaries, or deploy output,
+and the real command must receive the exact original value. Ambiguous
+`connDetails` separators must fail preflight with a secret-free explanation;
+tests do not enumerate password combinations.
 
 ### P1 — Validation report correctness
 

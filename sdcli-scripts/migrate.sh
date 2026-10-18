@@ -121,54 +121,11 @@ set_mode() {
   MODE_EXPLICIT=true
 }
 
-mask_conn_details_value() {
-  local value="$1"
-  local part masked_parts=()
-
-  IFS=',' read -r -a parts <<< "$value"
-  for part in "${parts[@]}"; do
-    if [[ "$part" == *":oracle:"* || "$part" == *":sqlserver:"* ]]; then
-      local prefix rest suffix
-      prefix="${part%@*}"
-      suffix="${part##*@}"
-      if [[ "$prefix" == */* && "$part" == *"@"* ]]; then
-        rest="${prefix%%/*}/***@${suffix}"
-        masked_parts+=("$rest")
-      else
-        masked_parts+=("$part")
-      fi
-    elif [[ "$part" == *":mkrepouser:"* ]]; then
-      local left right
-      left="${part%%:*}"
-      right="${part#*:mkrepouser:}"
-      if [[ "$right" == */*:* ]]; then
-        masked_parts+=("${left}:mkrepouser:${right%%/*}/***:${right##*:}")
-      else
-        masked_parts+=("$part")
-      fi
-    else
-      masked_parts+=("$part")
-    fi
-  done
-
-  local joined
-  local IFS=,
-  joined="${masked_parts[*]}"
-  echo "$joined"
-}
-
 mask_sensitive() {
   local masked_args=()
   local arg
   for arg in "$@"; do
-    case "$arg" in
-      -connDetails=*)
-        masked_args+=("-connDetails=$(mask_conn_details_value "${arg#-connDetails=}")")
-        ;;
-      *)
-        masked_args+=("$arg")
-        ;;
-    esac
+    masked_args+=("$(redact_text "$arg")")
   done
 
   local rendered=""
@@ -416,12 +373,80 @@ resolve_env_placeholder() {
 register_sensitive_value() {
   local value="$1"
   local existing
+  local inserted=false
+  local -a ordered=()
 
   [[ -n "$value" ]] || return 0
   for existing in "${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}"; do
     [[ "$existing" == "$value" ]] && return 0
   done
-  SENSITIVE_VALUES+=("$value")
+
+  # Replace longer literals first so an overlapping shorter secret cannot
+  # expose the unmatched suffix of a longer credential.
+  for existing in "${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}"; do
+    if [[ "$inserted" == "false" ]] && (( ${#value} > ${#existing} )); then
+      ordered+=("$value")
+      inserted=true
+    fi
+    ordered+=("$existing")
+  done
+  if [[ "$inserted" == "false" ]]; then
+    ordered+=("$value")
+  fi
+  SENSITIVE_VALUES=("${ordered[@]}")
+}
+
+register_environment_secrets() {
+  local env_name env_value
+
+  while IFS='=' read -r env_name env_value; do
+    case "$env_name" in
+      *PASSWORD*|*PASSWD*|*SECRET*|*TOKEN*)
+        register_sensitive_value "$env_value"
+        ;;
+    esac
+  done < <(env)
+}
+
+redact_text() {
+  local redacted="$1"
+  local secret
+
+  for secret in "${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}"; do
+    [[ -n "$secret" ]] || continue
+    redacted="${redacted//"$secret"/***}"
+  done
+  printf '%s' "$redacted"
+}
+
+validate_single_line_secret() {
+  local label="$1"
+  local value="$2"
+
+  register_sensitive_value "$value"
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    fail "$label contains an unsupported line-break character"
+  fi
+}
+
+register_sqlplus_secret() {
+  local label="$1"
+  local value="$2"
+
+  validate_single_line_secret "$label" "$value"
+  # SQL*Plus double-quotes embedded quotes in both CONNECT commands and DEFINE
+  # values. Register that exact transport literal as well as the raw value.
+  register_sensitive_value "${value//\"/\"\"}"
+}
+
+validate_sdcli_conn_details_password() {
+  local label="$1"
+  local value="$2"
+
+  validate_single_line_secret "$label" "$value"
+  if [[ "$value" == *','* || "$value" == *'/'* ]]; then
+    fail "$label contains an unsupported SDCLI -connDetails delimiter (comma or slash); use a password without those characters"
+  fi
 }
 
 get_secret_value() {
@@ -541,28 +566,15 @@ check_source_tcp_connectivity() {
 
 # --- SDCLI execution ---------------------------------------------------------
 redact_sdcli_output() {
-  local line secret env_name env_value
-  local secrets=("${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}")
+  local line
 
-  # Secret values are normally supplied through environment placeholders in
-  # config.yaml. Build this list at execution time because many of the config
-  # helpers are called through command substitution, which runs in a subshell.
-  # That way a password never has to be deliberately written to a log in order
-  # to be redacted from one.
-  while IFS='=' read -r env_name env_value; do
-    case "$env_name" in
-      *PASSWORD*|*PASSWD*|*SECRET*|*TOKEN*)
-        [[ -n "$env_value" ]] && secrets+=("$env_value")
-        ;;
-    esac
-  done < <(env)
+  # Config helpers often resolve placeholders through command substitutions,
+  # so collect conventionally named environment secrets again at the output
+  # boundary. Replacement remains literal and does not parse tool syntax.
+  register_environment_secrets
 
   while IFS= read -r line || [[ -n "$line" ]]; do
-    for secret in "${secrets[@]+"${secrets[@]}"}"; do
-      [[ -n "$secret" ]] || continue
-      line="${line//"$secret"/***}"
-    done
-    printf '%s\n' "$line"
+    printf '%s\n' "$(redact_text "$line")"
   done
 }
 
@@ -618,6 +630,7 @@ run_sdcli() {
       [[ "$action" == "convert" ]] && is_convert=true
     fi
   done
+  register_environment_secrets
   printable="$(mask_sensitive "${cmd[@]}")"
 
   log_info "+ $printable"
@@ -904,11 +917,13 @@ setup_repository() {
   repo_conn="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
   repo_user="$(get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user')"
   repo_password="$(get_secret_value '.migration_repository.repo_user.password' 'migration_repository.repo_user.password')"
+  validate_sdcli_conn_details_password "migration_repository.repo_user.password" "$repo_password"
 
   local super_name super_user super_password
   super_name="$(get_required_value '.migration_repository.super_user.connection_name' 'migration_repository.super_user.connection_name')"
   super_user="$(get_required_value '.migration_repository.super_user.user' 'migration_repository.super_user.user')"
   super_password="$(get_secret_value '.migration_repository.super_user.password' 'migration_repository.super_user.password')"
+  validate_sdcli_conn_details_password "migration_repository.super_user.password" "$super_password"
 
   local init_conn_details
   init_conn_details="${super_name}:oracle:${super_user}/${super_password}@${repo_conn},${repo_name}:mkrepouser:${repo_user}/${repo_password}:${super_name}"
@@ -1456,6 +1471,11 @@ run_sqlplus_file() {
   local full_path="$base_dir/$sqlfile"
   [[ -f "$full_path" ]] || return 0
 
+  register_sqlplus_secret "target password" "$target_password"
+  if [[ -n "$schema_password" ]]; then
+    register_sqlplus_secret "default schema password" "$schema_password"
+  fi
+
   log_info "Executing SQL*Plus script: $full_path"
   if $DRY_RUN; then
     log_info "+ sqlplus -S -L /nolog (connect ${target_user}/***@${target_conn}; @$full_path)"
@@ -1469,6 +1489,7 @@ run_sqlplus_file() {
   fi
   wrapper_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlplus_XXXXXX.sql")" || return 1
   {
+    printf '%s\n' 'SET VERIFY OFF'
     printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE;'
     if $continue_on_sql_error; then
       printf '%s\n' 'WHENEVER SQLERROR CONTINUE NONE;'
@@ -1580,14 +1601,7 @@ install_sqlplus_password_defines() {
 }
 
 filter_sqlplus_deploy_output() {
-  local line password_regex
-  password_regex='^(.*[Ii][Dd][Ee][Nn][Tt][Ii][Ff][Ii][Ee][Dd][[:space:]]+[Bb][Yy][[:space:]]+)[^[:space:];]+(.*)$'
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ $password_regex ]]; then
-      line="${BASH_REMATCH[1]}***${BASH_REMATCH[2]}"
-    fi
-    printf '%s\n' "$line"
-  done
+  redact_sdcli_output
 }
 
 count_sqlplus_accept_prompts() {
@@ -2229,6 +2243,7 @@ collect_source_object_inventory() {
   source_conn="$(migration_required_value "$idx" source conn)"
   source_user="$(migration_required_value "$idx" source user)"
   source_password="$(migration_secret_value "$idx" source password)"
+  validate_single_line_secret "migrations[$idx].source.password" "$source_password"
   parsed="$(parse_source_conn "$source_conn")"
   IFS='|' read -r source_host source_port source_database <<< "$parsed"
   tls_mode="$(normalize_bcp_tls_mode "$(get_required_value '.defaults.source.bcp_tls_mode' 'defaults.source.bcp_tls_mode')")"
@@ -2895,6 +2910,7 @@ run_load() {
   target_conn="$(migration_required_value "$idx" target conn)"
   target_user="$(migration_required_value "$idx" target user)"
   target_password="$(migration_secret_value "$idx" target password)"
+  validate_single_line_secret "migrations[$idx].target.password" "$target_password"
 
   local datamove_dir="$output_dir/datamove"
   if $DRY_RUN; then
@@ -2983,7 +2999,7 @@ run_load() {
         exit "$script_rc"
       fi
     done
-  ) 2>&1 | tee -a "$RUN_LOG_FILE" | summarize_sqlldr_output
+  ) 2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | summarize_sqlldr_output
   rc=${PIPESTATUS[0]}
   $errexit_enabled && set -e
 
@@ -3018,6 +3034,7 @@ run_offload() {
   source_conn="$(migration_required_value "$idx" source conn)"
   source_user="$(migration_required_value "$idx" source user)"
   source_password="$(migration_secret_value "$idx" source password)"
+  validate_single_line_secret "migrations[$idx].source.password" "$source_password"
 
   local parsed source_host source_port source_db
   parsed="$(parse_source_conn "$source_conn")"
@@ -3084,7 +3101,7 @@ run_offload() {
       script_rc=$?
       [[ $script_rc -eq 0 ]] || exit "$script_rc"
     done
-  ) 2>&1 | tee -a "$RUN_LOG_FILE" | summarize_bcp_output "${bcp_tables[@]}"
+  ) 2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | summarize_bcp_output "${bcp_tables[@]}"
   rc=${PIPESTATUS[0]}
   $errexit_enabled && set -e
 
@@ -3217,6 +3234,7 @@ run_connection_setup() {
   local source_user source_password src_conn_details source_host source_port source_database parsed_source
   source_user="$(migration_required_value "$idx" source user)"
   source_password="$(migration_secret_value "$idx" source password)"
+  validate_sdcli_conn_details_password "migrations[$idx].source.password" "$source_password"
   parsed_source="$(parse_source_conn "$source_conn")"
   IFS='|' read -r source_host source_port source_database <<< "$parsed_source"
   check_source_tcp_connectivity "$source_host" "$source_port"
@@ -3227,6 +3245,7 @@ run_connection_setup() {
   target_conn="$(migration_required_value "$idx" target conn)"
   target_user="$(migration_required_value "$idx" target user)"
   target_password="$(migration_secret_value "$idx" target password)"
+  validate_sdcli_conn_details_password "migrations[$idx].target.password" "$target_password"
   tgt_conn_details="${target_name}:oracle:${target_user}/${target_password}@${target_conn}"
   ensure_connection "$target_name" "$tgt_conn_details"
 }

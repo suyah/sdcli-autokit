@@ -49,6 +49,7 @@ sdcli-scripts/**/*.pyc
 !tests/sdcli_success_marker_test.sh
 !tests/sdcli_success_marker_error_test.sh
 !tests/sdcli_conversion_diagnostic_test.sh
+!tests/sdcli_output_redaction_test.sh
 !tests/offload_bcp_failure_test.sh
 !tests/deploy_orchestration_test.sh
 !tests/generated_deploy_fallback_test.sh
