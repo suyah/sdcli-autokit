@@ -1,8 +1,12 @@
 # Actionable Migration Validation Evidence Design
 
 Date: 2026-10-17
-Status: Proposed revision to the automatic validation report
+Status: Superseded by `2026-10-19-parser-risk-remediation-design.md`
 Scope: SQL Server-to-Oracle validation evidence and offline reports
+
+> The generated-DDL and per-column datatype parsing design below is retained
+> for history only. It must not be implemented. The 2026-10-19 design replaces
+> it with structured evidence and a separate datatype-mapping command.
 
 ## Purpose
 
