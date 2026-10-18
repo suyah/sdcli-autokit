@@ -146,7 +146,7 @@ assert_not_contains "$deploy_output" "defaults.deploy_preferences.schema_passwor
 assert_contains "$deploy_output" "migrations[0].target.default_schema_password"
 
 [[ "${#file_calls[@]}" -eq 3 ]]
-assert_contains "${file_calls[*]}" "role.sql||0|"
+assert_contains "${file_calls[*]}" "role_setup.sql||0|"
 assert_contains "${file_calls[*]}" "tpcc/user.sql|SchemaPass1|3|"
 assert_contains "${file_calls[*]}" "tpcc/tables.sql||0|tpcc"
 assert_not_contains "${file_calls[*]}" "gen/generated-1.sql"
