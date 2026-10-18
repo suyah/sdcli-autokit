@@ -1,8 +1,10 @@
-# sdcli-scripts
+# DASOM
 
-A repeatable SQL Server to Oracle migration runner built around Oracle SQL Developer CLI (`sdcli`) and a Podman-based execution environment.
+**DASOM** — **Deterministic AST SQLServer to Oracle Migrator** — is a containerized automation toolkit for SQL Server to Oracle migrations using Oracle SQL Developer CLI (`sdcli`).
 
-Use this project to prepare a reusable migration container, define one or more SQL Server to Oracle migrations, initialize the SQL Developer migration repository, create SDCLI connections, run full migrations or individual phases, and keep each run's logs and generated files organized.
+The project is delivered through the `sdcli-autokit` repository and provides a repeatable workflow for preparing the migration runtime, configuring migrations, initializing the SQL Developer migration repository, creating SDCLI connections, running full migrations or individual phases, and organizing each run's logs and generated artifacts.
+
+Use DASOM to automate and standardize SQL Server to Oracle migration workflows that would otherwise require many manual `sdcli` commands and generated script execution steps.
 
 The project assumes:
 
@@ -399,10 +401,11 @@ capture -> convert -> generate -> datamove -> offload -> deploy -> load -> postd
 
 In plain language, this captures SQL Server metadata, converts it for Oracle,
 generates scripts, exports data, deploys the Oracle schema objects needed before
-load, loads data, runs every post-load object script listed by SQL Developer's
-generated `master.sql` files, and validates logs, per-table row counts, and
-source/generated/target object coverage. Validation also creates self-contained
-HTML and plain-text comparison reports.
+load, loads data, attempts each independent post-load object script listed by
+SQL Developer's generated `master.sql` files, and validates logs, per-table row
+counts, and source/generated/target object coverage. Postdeploy continues after
+individual SQL errors but stops on a SQL*Plus runtime failure. Validation also
+creates self-contained HTML and plain-text comparison reports.
 
 Only one repository workflow may run at a time. The script creates an atomic
 lock under `<project_root>/.locks` before repository work so SDCLI's `latest`
@@ -411,42 +414,119 @@ automatically; the error identifies its directory for operator review.
 
 ## Run a single phase
 
-Use `--phase` when you want to run or rerun one part of the migration.
+Use `--phase` for recovery or investigation. For a normal migration, prefer
+one `--migrate` invocation: it holds the repository lock for the complete
+workflow and selects the captured and converted models consistently.
+
+For manual execution, keep every phase in the same run directory and use the
+numeric SQL Developer model index associated with that run. SQL Developer does
+not accept the captured model name (for example, `tpcc_20260427_014117`) as
+`--model`.
 
 ```bash
+# Capture creates the run and model name tpcc_<run id>.
 ./migrate.sh tpcc --phase capture
-./migrate.sh tpcc --phase convert --model latest
-./migrate.sh tpcc --phase generate --model latest
-./migrate.sh tpcc --phase datamove --model latest
-./migrate.sh tpcc --phase offload --model latest
-./migrate.sh tpcc --phase deploy --run 20260427_014117
-./migrate.sh tpcc --phase load --run 20260427_014117
-./migrate.sh tpcc --phase postdeploy --run 20260427_014117
-./migrate.sh tpcc --phase validate --run 20260427_014117
+export RUN=20260427_014117
+
+# Find the integer index for tpcc_<run id>, then use that index.
+sdcli migration -actions=lscaptured
+export CAPTURE_MODEL=<captured_model_index>
+./migrate.sh tpcc --phase convert --run "$RUN" --model "$CAPTURE_MODEL"
+
+# Find the integer index for the converted model created above.
+sdcli migration -actions=lsconverted
+export CONVERTED_MODEL=<converted_model_index>
+./migrate.sh tpcc --phase generate --run "$RUN" --model "$CONVERTED_MODEL"
+./migrate.sh tpcc --phase datamove --run "$RUN" --model "$CONVERTED_MODEL"
+
+./migrate.sh tpcc --phase offload --run "$RUN"
+./migrate.sh tpcc --deploy --run "$RUN"
+./migrate.sh tpcc --phase load --run "$RUN"
+./migrate.sh tpcc --phase postdeploy --run "$RUN"
+./migrate.sh tpcc --phase validate --run "$RUN"
 ```
 
 Supported phases:
 
 | Phase | Purpose |
 | --- | --- |
-| `capture` | Capture source database metadata into the migration repository. |
-| `convert` | Convert the captured model for Oracle. |
-| `generate` | Generate Oracle migration scripts. |
-| `datamove` | Generate data movement scripts. |
-| `offload` | Export data from SQL Server. |
-| `deploy` | Run generated Oracle schema setup needed before loading data. |
-| `load` | Load exported data into Oracle. |
-| `postdeploy` | Attempt all non-predata scripts in generated master order, then run each schema's `post.sql`. It returns failure only after recording every SQL error it could execute. |
-| `validate` | Reconcile row counts, collect source and target object metadata, compare source/generated/actual objects, and create the validation report. |
+| `capture` | Read SQL Server metadata into the migration repository. It does not copy table rows. |
+| `convert` | Transform the captured SQL Server model into an Oracle-compatible model and conversion report. |
+| `generate` | Write the generated Oracle DDL and migration scripts to the run's `sdcli` directory. |
+| `datamove` | Generate BCP export scripts and SQL*Loader control files. It does not transfer table rows. |
+| `offload` | Run the generated BCP scripts to export data from SQL Server into the run directory. |
+| `deploy` | Run generated Oracle schema setup required before loading data. It never runs cleanup statements. |
+| `cleanup` | Explicitly remove only roles listed in the generated `role.sql`; it does not remove schemas, tables, or data. |
+| `load` | Run SQL*Loader using the exported data and generated control files. |
+| `postdeploy` | Attempt all non-predata scripts in generated master order, then run each schema's `post.sql`. Continue after individual SQL errors, but stop on a SQL*Plus runtime failure. |
+| `validate` | Reconcile row counts, collect source and target object metadata, compare source/generated/actual objects, and create HTML and plain-text validation reports. |
+
+### Data movement mode
+
+This tool uses SQL Developer's **offline** data-movement flow: `datamove`
+generates BCP and SQL*Loader files, `offload` exports from SQL Server, and
+`load` imports into Oracle. It does not insert table rows directly from SQL
+Server through JDBC.
+
+SQL Developer's graphical migration workflow also provides an online data move
+that connects to both databases through JDBC. It is intended for smaller data
+sets; the offline method is the appropriate default for larger migrations and
+for customer environments where the migration host must work without Internet
+access.
+
+### Deployment and role cleanup
+
+`--deploy` is a shorthand for `--phase deploy`. The automated execution plan
+excludes SQL Developer's known cleanup files. If SQL Developer generated
+`role.sql`, the runner creates a setup-only copy under the run's
+`autokit/deploy/` directory and executes the `CREATE ROLE` and other setup
+statements, not active `DROP ROLE` statements. The original generated file is
+not changed.
+
+Use cleanup only when you intentionally need to remove those generated roles,
+for example before retrying a partially completed deployment:
+
+```bash
+./migrate.sh tpcc --cleanup --run "$RUN"
+./migrate.sh tpcc --deploy --run "$RUN"
+```
+
+`--cleanup` requires `--run`, writes an executable role-only cleanup script
+under `autokit/cleanup/`, and ignores a missing role so it can safely finish a
+partial role cleanup. It does **not** run SQL Developer's separately generated
+schema cleanup files such as `dropallschemas.sql` or `dropobjects.sql`; those
+can delete schemas or data and remain excluded from automated execution.
+
+The role split is deliberately limited to SQL Developer's generated
+one-statement-per-line `role.sql` format and understands SQL line and block
+comments. The autokit does not claim to parse arbitrary SQL or PL/SQL to detect
+every possible destructive statement; review generated migration DDL before
+running it in a target environment.
+
+### SQL Developer Emulation schema
+
+`Emulation` is a generated target schema, not the migration repository or an
+internal schema used only while SQL Developer is running. For SQL Server
+migrations, SQL Developer can place its compatibility `UTILS` package in a
+separate `EMULATION` schema and generate synonyms and converted code that
+reference it. Oracle describes a separate emulation schema as the usual best
+practice because the package is maintained once instead of being copied into
+every migrated schema. See [Oracle SQL Developer migration preferences](https://docs.oracle.com/en/database/oracle/sql-developer/21.4/rptug/sql-developer-concepts-usage.html).
+
+The runner does not hard-code `Emulation`: it deploys any generated schema
+directory containing `user.sql`. Therefore, if SQL Developer generated an
+`Emulation/` directory, do not exclude it unless the converted scripts have
+also been regenerated without references to `EMULATION.UTILS`. If no
+`Emulation/` directory is generated, the runner has nothing to deploy for it.
 
 ### Model and run behavior
 
 For normal use:
 
 - `capture` creates a new model using `<migration_name>_<run_id>`.
-- non-capture SDCLI phases usually use `latest`.
-- `--model <name>` is only for non-capture single-phase runs.
-- `--run <run_id>` is only for non-capture single-phase runs and reuses an existing run directory.
+- `convert`, `generate`, and `datamove` accept only `latest` or a numeric SQL Developer model index; a model name is not valid.
+- A full `--migrate` workflow can use its protected current model. For manual phases, use the numeric index from `lscaptured` or `lsconverted`, not `latest`.
+- `--run <run_id>` reuses an existing run directory. Supply it for every manual phase after `capture`.
 
 Use `--run` when rerunning phases that depend on files already generated in a previous run, such as `deploy`, `load`, `postdeploy`, or `validate`.
 
@@ -455,6 +535,11 @@ post-data scripts and runs `post.sql` so Oracle can compile and report object
 status. It still exits nonzero and records each outcome in
 `autokit/deploy_manifest.tsv`. A retry skips previously successful post-data
 scripts, retries failed scripts, and runs each schema's `post.sql` again.
+
+The lock is local to the shared `<project_root>` volume and protects a single
+full workflow. Separate manual commands do not reserve a model between
+invocations. Do not run two migrations against the same migration repository
+at once; use a separate repository when parallel migrations are required.
 
 Phase status is append-only. Repeating a mutating phase that already succeeded
 is rejected by default. If the repeat is intentional, make it explicit:
@@ -566,7 +651,7 @@ Important files:
 | `autokit/sdcli_commands_summary.txt` | Short command summary printed at the end of SDCLI runs. |
 | `autokit/migration_summary.csv` | Append-only high-level migration result summary. |
 | `autokit/phase_status.tsv` | Append-only phase attempts and their final status. |
-| `autokit/deploy_manifest.tsv` | Generated SQL inventory and scripts executed during deploy/postdeploy. |
+| `autokit/deploy_manifest.tsv` | Generated SQL inventory and scripts executed during deploy, postdeploy, and explicit cleanup. |
 | `autokit/bcp_status.tsv` | Per-table SQL Server export status and exported row count. |
 | `autokit/sqlldr_status.tsv` | Per-table Oracle load status, loaded/rejected/discarded counts, and paths. |
 | `autokit/reconciliation.tsv` | Source-to-target per-table row reconciliation. Every row must be `PASS`. |

@@ -58,6 +58,7 @@ sdcli-scripts/**/*.pyc
 !tests/phase_status_resume_test.sh
 !tests/load_tns_alias_test.sh
 !tests/deploy_schema_password_test.sh
+!tests/role_cleanup_test.sh
 !tests/offload_password_argv_test.sh
 !tests/test_offline_bundle.sh
 !tests/test_offline_run.sh

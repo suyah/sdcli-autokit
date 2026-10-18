@@ -109,7 +109,7 @@ run_deploy 0 "$output_dir"
 
 deploy_calls="${calls[*]}"
 expected_deploy_calls=(
-  "role.sql||0|"
+  "role_setup.sql||0|"
   "Emulation/user.sql|SchemaPass1|1|"
   "tpcc/user.sql|SchemaPass1|1|"
   "tpcc_copy_tpcc/user.sql|SchemaPass1|1|"
@@ -124,7 +124,7 @@ for i in "${!expected_deploy_calls[@]}"; do
     exit 1
   }
 done
-assert_contains "$deploy_calls" "role.sql||0|"
+assert_contains "$deploy_calls" "role_setup.sql||0|"
 assert_contains "$deploy_calls" "Emulation/user.sql|SchemaPass1|1|"
 assert_contains "$deploy_calls" "tpcc/user.sql|SchemaPass1|1|"
 assert_contains "$deploy_calls" "tpcc/tables.sql||0|tpcc"
@@ -137,7 +137,7 @@ assert_not_contains "$deploy_calls" "packages.sql"
 
 manifest="$AUTOKIT_DIR/deploy_manifest.tsv"
 assert_line "$manifest" $'phase\tpath\tstatus\tnote'
-assert_line "$manifest" $'deploy\tsdcli/role.sql\texecuted\t'
+assert_line "$manifest" $'deploy\tautokit/deploy/role_setup.sql\texecuted\tderived from sdcli/role.sql; DROP ROLE is available through --cleanup'
 assert_line "$manifest" $'deploy\tsdcli/Emulation/user.sql\texecuted\t'
 assert_line "$manifest" $'deploy\tsdcli/tpcc/user.sql\texecuted\t'
 assert_line "$manifest" $'deploy\tsdcli/tpcc/tables.sql\texecuted\tpre-data master include'
