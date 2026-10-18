@@ -93,6 +93,96 @@ control_arg() {
   printf '\n'
 }
 
+named_arg_value() {
+  local wanted arg upper_arg
+  wanted="$(upper "$1")="
+  shift
+  for arg in "$@"; do
+    upper_arg="$(upper "$arg")"
+    if [[ "$upper_arg" == "$wanted"* ]]; then
+      strip_outer_quotes "${arg#*=}"
+      return 0
+    fi
+  done
+  printf '\n'
+}
+
+absolute_runtime_path() {
+  local value="$1"
+  value="$(strip_outer_quotes "$value")"
+  [[ -n "$value" && "$value" != "-" ]] || {
+    printf '%s\n' "$value"
+    return 0
+  }
+  if [[ "$value" == /* ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s/%s\n' "$PWD" "$value"
+  fi
+}
+
+control_table_name() {
+  local control_file="$1"
+  [[ -f "$control_file" ]] || {
+    printf '\n'
+    return 0
+  }
+  awk '
+    toupper($1) == "INTO" && toupper($2) == "TABLE" {
+      table=$0
+      sub(/^[[:space:]]*[Ii][Nn][Tt][Oo][[:space:]]+[Tt][Aa][Bb][Ll][Ee][[:space:]]+/, "", table)
+      sub(/[[:space:]].*$/, "", table)
+      print table
+      exit
+    }
+  ' "$control_file"
+}
+
+control_data_file() {
+  local control_file="$1"
+  [[ -f "$control_file" ]] || {
+    printf '\n'
+    return 0
+  }
+  awk '
+    toupper($1) == "INFILE" {
+      value=$0
+      sub(/^[[:space:]]*[Ii][Nn][Ff][Ii][Ll][Ee][[:space:]]+/, "", value)
+      if (substr(value, 1, 1) == "\047") {
+        value=substr(value, 2)
+        sub(/\047.*/, "", value)
+      } else if (substr(value, 1, 1) == "\"") {
+        value=substr(value, 2)
+        sub(/".*/, "", value)
+      } else {
+        sub(/[[:space:]].*$/, "", value)
+      }
+      print value
+      exit
+    }
+  ' "$control_file"
+}
+
+log_count() {
+  local log_file="$1"
+  local kind="$2"
+  [[ -f "$log_file" ]] || {
+    printf '\n'
+    return 0
+  }
+  case "$kind" in
+    loaded)
+      awk '/Rows successfully loaded\./ {sum += $1; found=1} END {if (found) print sum}' "$log_file"
+      ;;
+    rejected)
+      awk '/^Total logical records rejected:/ {sum += $NF; found=1} END {if (found) print sum}' "$log_file"
+      ;;
+    discarded)
+      awk '/^Total logical records discarded:/ {sum += $NF; found=1} END {if (found) print sum}' "$log_file"
+      ;;
+  esac
+}
+
 sqlldr_password() {
   local fd="${SDCLI_LOAD_PASSWORD_FD:-}" password=""
   if [[ -n "$fd" ]]; then
@@ -137,6 +227,12 @@ if [[ "$direct" == "TRUE" ]]; then
 fi
 
 control="$(control_arg "${args[@]}")"
+control="$(strip_outer_quotes "$control")"
+control_file="$(absolute_runtime_path "$control")"
+log_file="$(absolute_runtime_path "$(named_arg_value LOG "${args[@]}")")"
+if [[ -z "$log_file" && -n "$control_file" ]]; then
+  log_file="${control_file%.*}.log"
+fi
 start_ts=$SECONDS
 
 set +e
@@ -145,4 +241,15 @@ rc=${PIPESTATUS[1]}
 set -e
 
 echo "[SQLLDR-SUMMARY] control=$control elapsed_sec=$((SECONDS - start_ts)) rc=$rc"
+
+if [[ -n "${ORACLE_SQLLDR_STATUS_FILE:-}" ]]; then
+  target_table="$(control_table_name "$control_file")"
+  data_file="$(absolute_runtime_path "$(control_data_file "$control_file")")"
+  loaded_rows="$(log_count "$log_file" loaded)"
+  rejected_rows="$(log_count "$log_file" rejected)"
+  discarded_rows="$(log_count "$log_file" discarded)"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$rc" "$target_table" "$control_file" "$data_file" \
+    "$loaded_rows" "$rejected_rows" "$discarded_rows" "$log_file" >> "$ORACLE_SQLLDR_STATUS_FILE"
+fi
 exit "$rc"

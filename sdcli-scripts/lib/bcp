@@ -24,6 +24,7 @@ fi
 MODE="${SQLSERVER_BCP_TLS_MODE_EFFECTIVE:-trust}"
 PACKET_SIZE="${SQLSERVER_BCP_PACKET_SIZE:-}"
 BCP_PASSWORD="${SQLSERVER_BCP_PASSWORD:-}"
+BCP_STATUS_FILE="${SQLSERVER_BCP_STATUS_FILE:-}"
 
 args=()
 has_u=0
@@ -112,9 +113,35 @@ if [[ -n "$PACKET_SIZE" && $has_a -eq 0 ]]; then
   args+=("-a" "$PACKET_SIZE")
 fi
 
+output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_output_XXXXXX")"
+trap 'rm -f "$output_file"' EXIT
+
 if [[ -n "$BCP_PASSWORD" ]]; then
   unset SQLSERVER_BCP_PASSWORD
-  printf '%s\n' "$BCP_PASSWORD" | "$REAL_BCP" "${args[@]}"
+  set +e
+  printf '%s\n' "$BCP_PASSWORD" | "$REAL_BCP" "${args[@]}" 2>&1 | tee "$output_file"
+  rc=${PIPESTATUS[1]}
+  set -e
 else
-  exec "$REAL_BCP" "${args[@]}"
+  set +e
+  "$REAL_BCP" "${args[@]}" 2>&1 | tee "$output_file"
+  rc=${PIPESTATUS[0]}
+  set -e
 fi
+
+if [[ -n "$BCP_STATUS_FILE" ]]; then
+  bcp_data_file=""
+  bcp_rows="$(sed -nE 's/^[[:space:]]*([0-9]+)[[:space:]]+rows[[:space:]]+copied\..*/\1/p' "$output_file" | tail -n 1)"
+  for ((arg_idx = 0; arg_idx + 1 < ${#args[@]}; arg_idx++)); do
+    case "${args[$arg_idx]}" in
+      out|queryout)
+        bcp_data_file="${args[$((arg_idx + 1))]}"
+        [[ "$bcp_data_file" == /* || "$bcp_data_file" == "-" ]] || bcp_data_file="$PWD/$bcp_data_file"
+        break
+        ;;
+    esac
+  done
+  printf '%s\t%s\t%s\t%s\n' "$rc" "${args[0]:-unknown}" "$bcp_data_file" "$bcp_rows" >> "$BCP_STATUS_FILE"
+fi
+
+exit "$rc"

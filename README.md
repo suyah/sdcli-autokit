@@ -42,9 +42,10 @@ Use this directory on the host to build and manage the Podman environment.
 
 | File | Purpose |
 | --- | --- |
-| `build.sh` | Builds the Podman image and prepares the named Podman volume. |
+| `build.sh` | Builds a version-tagged Podman image on a connected build machine. |
 | `Dockerfile` | Defines the container image used by the migration environment. |
-| `run.sh` | Creates or reuses the container, starts it, prepares SQL Developer CLI, downloads the SQL Server driver if needed, and copies `sdcli-scripts` into the container when missing. |
+| `run.sh` | Creates or reuses the container and installs customer-staged RPMs without downloading packages. |
+| `install-vendor.sh` | Runs inside the container to install the staged Oracle and Microsoft RPMs locally. |
 | `start.sh` | Starts an existing stopped container. |
 | `stop.sh` | Stops the running container. |
 
@@ -62,13 +63,70 @@ Use this directory inside the migration working area/container to configure and 
 
 On the host machine, you need:
 
-- Podman installed
+- Podman installed on the customer VM; Podman or Docker/Rancher Desktop on the connected build machine
 - network access to the source SQL Server database
 - network access to the target Oracle database
-- network access for first-time software downloads, unless the required artifacts are already available
 - a `.env` file in the `deployment/` directory for container settings
 
-The `.env` file is used by the deployment scripts and normally contains values such as container name, image name, volume name, user/home paths, SQL Developer download URL, and driver download URL.
+The connected build machine needs internet access for the base image, `yq`, and jTDS. The customer VM does not need registry or software-repository access. Its `.env` contains the container, image repository, separate data/log volume, and user/path settings; it has no package download URLs.
+
+### Customer-provided proprietary artifacts for offline installation
+
+The offline bundle does not distribute Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver, or Microsoft SQL Server command-line tool binaries. The customer obtains the required packages through its approved vendor account or internal software repository, accepts the applicable terms, and transfers them separately to the isolated environment.
+
+| Required software | Customer download source | Files to stage |
+| --- | --- | --- |
+| Oracle SQL Developer | [Oracle SQL Developer downloads](https://www.oracle.com/database/sqldeveloper/technologies/download/) | Linux `noarch` RPM, for example `sqldeveloper-<version>.noarch.rpm`. |
+| Oracle Instant Client | [Oracle Instant Client for Linux x86-64 downloads](https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html) | Matching Oracle Linux 9 `x86_64` RPMs: Basic, SQL*Plus, and Tools. |
+| Microsoft ODBC Driver 18 and SQL Server command-line tools | [Microsoft offline installation guidance for `mssql-tools18` and `msodbcsql18`](https://learn.microsoft.com/en-us/sql/linux/install-upgrade/setup-tools?view=fabric#offline-installation) | Matching `x86_64` RPMs for `msodbcsql18` and `mssql-tools18`, plus any documented dependencies. The customer must accept the Microsoft EULA. |
+
+Place these files, plus any RPM dependencies reported by the offline install, in a customer-controlled directory such as:
+
+```text
+customer-artifacts/
+├── sqldeveloper-<version>.noarch.rpm
+├── oracle-instantclient<major>-basic-<version>.el9.x86_64.rpm
+├── oracle-instantclient<major>-sqlplus-<version>.el9.x86_64.rpm
+├── oracle-instantclient<major>-tools-<version>.el9.x86_64.rpm
+├── msodbcsql18-<version>.x86_64.rpm
+└── mssql-tools18-<version>.x86_64.rpm
+```
+
+`run.sh` checks that the six expected files are present before creating a container. The container then checks RPM names and CPU architecture before installing only from the read-only mount with DNF repositories disabled. This verifies technical compatibility only; it does not establish legal entitlement.
+
+The following set was smoke-tested on Oracle Linux 9 x86_64 on 2026-10-09. These are direct vendor links for convenience; customers may instead use their approved internal mirror.
+
+- [SQL Developer 26.2 RPM](https://download.oracle.com/otn_software/java/sqldeveloper/sqldeveloper-26.2.0-186.2220.noarch.rpm)
+- [Instant Client 23.26 Basic RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-basic-23.26.3.0.0-1.el9.x86_64.rpm), [SQL*Plus RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-sqlplus-23.26.3.0.0-1.el9.x86_64.rpm), and [Tools RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-tools-23.26.3.0.0-1.el9.x86_64.rpm)
+- [Microsoft ODBC Driver 18 18.7.1.1 RPM](https://packages.microsoft.com/rhel/9.0/prod/Packages/m/msodbcsql18-18.7.1.1-1.x86_64.rpm) and [mssql-tools18 18.7.1.1 RPM](https://packages.microsoft.com/rhel/9.0/prod/Packages/m/mssql-tools18-18.7.1.1-1.x86_64.rpm)
+
+### Offline handoff
+
+On a connected Linux/amd64 build host, create a versioned bundle:
+
+~~~bash
+./release/build-offline.sh 1.0.0
+~~~
+
+The scripts prefer Podman when both tools are installed. To build with Rancher Desktop/Docker explicitly, use:
+
+~~~bash
+CONTAINER_ENGINE=docker ./release/build-offline.sh 1.0.0
+~~~
+
+Rancher Desktop must be running with its Docker engine available before starting the build.
+
+Transfer `dist/sdcli-autokit-1.0.0-linux-amd64.tar.gz` and its adjacent `.sha256` file through any approved cloud, on-premises, or physical method. On the customer VM:
+
+~~~bash
+sha256sum -c sdcli-autokit-1.0.0-linux-amd64.tar.gz.sha256
+tar -xzf sdcli-autokit-1.0.0-linux-amd64.tar.gz
+cd sdcli-autokit-1.0.0-linux-amd64
+podman load -i image.tar
+./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+~~~
+
+The EULA flag records the operator's acknowledgement required for the Microsoft packages; it does not replace the vendor terms. On a system where SELinux labels are not applicable, remove `,Z` from the three `-v` options in `deployment/run.sh`.
 
 ## Configure `config.yaml`
 
@@ -98,6 +156,8 @@ defaults:
     bcp_tls_mode: optional
   target:
     type: oracle
+    # For Autonomous Database mTLS, uncomment this and keep TCPS URLs below.
+    # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_myadb
   offload_preferences:
     packet_size: 65535
   load_preferences:
@@ -109,7 +169,7 @@ defaults:
 migration_repository:
   type: oracle
   name: repo
-  conn: tcps://your-repo-host:1521/your_repo_service?ssl_server_dn_match=yes
+  conn: tcps://your-repo-host:1522/your_repo_service?ssl_server_dn_match=yes
   repo_user:
     connection_name: migration_repo
     user: migrep
@@ -126,11 +186,32 @@ migrations:
       user: sa
       password: "${SOURCE_PASSWORD}"
     target:
-      conn: tcps://your-target-host:1521/your_target_service?ssl_server_dn_match=yes
+      conn: tcps://your-target-host:1522/your_target_service?ssl_server_dn_match=yes
       user: admin
       password: "${TARGET_PASSWORD}"
       default_schema_password: "${MIGRATED_SCHEMA_PASSWORD}"
 ```
+
+For an Autonomous Database wallet, set `defaults.target.wallet_dir` to the
+unpacked wallet directory and use the full `tcps://host:port/service?...` URL
+in both Oracle `conn` fields. SQLcl can resolve a wallet TNS alias such as
+`myadb_high`, but SQL Developer 26.2's `sdcli migration -actions=mkconn`
+does not resolve that alias inside `-connDetails`; using it produces
+`ORA-17870` even when the wallet is valid.
+
+SDCLI commands have no timeout by default because metadata capture can take a
+long time over a high-latency database connection. Set
+`SDCLI_COMMAND_TIMEOUT_SEC` before running `migrate.sh` when an operator wants
+a bounded run, for example `SDCLI_COMMAND_TIMEOUT_SEC=1800`.
+
+Before a source connection is created or metadata is captured, the script tests
+the configured SQL Server `host:port` from inside its execution environment.
+This prevents SQL Developer's JTDS driver from waiting on a dropped TCP
+connection. The default preflight limit is 10 seconds; set
+`SDCLI_CONNECT_TIMEOUT_SEC` to use a different positive limit.
+
+Keep credentials in environment-variable placeholders as shown above. Their
+values are redacted from SDCLI console output, command summaries, and run logs.
 
 ### Migration name
 
@@ -168,6 +249,24 @@ source:
   conn: 10.0.1.165:1433:tpcc
 ```
 
+### Autonomous Database mTLS wallet
+
+For an Autonomous Database configured for mTLS, download the database's client-credentials wallet through the customer's OCI tenancy, transfer it separately, and unzip it into the running container's persistent data volume. Do not put the wallet in the image or source repository.
+
+```bash
+# On the customer VM, after run.sh has completed:
+mkdir -p /tmp/Wallet_myadb
+unzip /path/to/Wallet_myadb.zip -d /tmp/Wallet_myadb
+
+podman exec --user root sdcli-autokit mkdir -p /u01/data/sdcli-autokit/wallets
+podman cp /tmp/Wallet_myadb sdcli-autokit:/u01/data/sdcli-autokit/wallets/Wallet_myadb
+podman exec --user root sdcli-autokit chown -R sduser:sduser /u01/data/sdcli-autokit/wallets/Wallet_myadb
+```
+
+Set `defaults.target.wallet_dir` to that directory. Keep `migration_repository.conn` and each `migrations[].target.conn` in the existing `tcps://host:port/service?ssl_server_dn_match=yes` form, using the host, port, and service name from the wallet's `tnsnames.ora` file. The migration launcher sets both `TNS_ADMIN` for SQL*Plus/SQL*Loader and `oracle.net.tns_admin` for SDCLI's JDBC connections.
+
+Do not use a bare TNS alias in these fields: SQL Developer's SDCLI `-connDetails` parser rejects it. The wallet supplies the mTLS credentials; the TCPS URL supplies the database endpoint.
+
 ### Password variables
 
 Do not put literal passwords in `config.yaml`. Use environment variable placeholders instead:
@@ -200,16 +299,21 @@ If your config uses different placeholder names, export those names instead. The
 
 ## First-time setup
 
-### 1. Build and start the container
+### 1. Build and start the container on a connected development machine
 
 From the `deployment/` directory:
 
 ```bash
 ./build.sh
-./run.sh
 ```
 
-`build.sh` builds the Podman image and prepares the shared volume. `run.sh` creates or reuses the container and prepares the SQL Developer CLI environment.
+For an offline customer VM, use the bundle workflow above instead. After loading the offline image, run:
+
+```bash
+./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+```
+
+`run.sh` creates the separate data/log volumes, mounts the RPM directory read-only, and prepares the SQL Developer CLI environment without network downloads.
 
 For normal daily use after the container already exists:
 
@@ -221,6 +325,16 @@ For normal daily use after the container already exists:
 ### 2. Review migration configuration
 
 In `sdcli-scripts/`, update `config.yaml` for your repository connection, source database, target database, migration name, password placeholder names, and optional load/offload preferences.
+
+For an offline bundle, `run.sh` starts the container and copies this directory into the container on its first run. You can then configure it interactively inside the running container:
+
+```bash
+podman exec -it --user sduser sdcli-autokit bash
+cd ~/sdcli-scripts
+vi config.yaml
+```
+
+Exit the shell after saving. The configuration remains in the existing container; keep a copy of the edited `config.yaml` outside the container as well, so it can be reused if the container is deliberately recreated for an image upgrade.
 
 ### 3. Set password variables
 
@@ -278,7 +392,15 @@ The full flow runs:
 capture -> convert -> generate -> datamove -> offload -> deploy -> load -> postdeploy -> validate
 ```
 
-In plain language, this captures SQL Server metadata, converts it for Oracle, generates scripts, exports data, deploys the Oracle schema objects needed before load, loads data, runs selected post-load scripts, and checks logs for common issues.
+In plain language, this captures SQL Server metadata, converts it for Oracle,
+generates scripts, exports data, deploys the Oracle schema objects needed before
+load, loads data, runs every post-load object script listed by SQL Developer's
+generated `master.sql` files, and validates logs and per-table row counts.
+
+Only one repository workflow may run at a time. The script creates an atomic
+lock under `<project_root>/.locks` before repository work so SDCLI's `latest`
+model cannot be changed by another run. A stale lock is not removed
+automatically; the error identifies its directory for operator review.
 
 ## Run a single phase
 
@@ -307,8 +429,8 @@ Supported phases:
 | `offload` | Export data from SQL Server. |
 | `deploy` | Run generated Oracle schema setup needed before loading data. |
 | `load` | Load exported data into Oracle. |
-| `postdeploy` | Run selected post-load Oracle scripts. |
-| `validate` | Check migration logs for common errors and warnings. |
+| `postdeploy` | Run all non-predata scripts in generated master order, followed by each schema's `post.sql`. |
+| `validate` | Fail on log/load errors and reconcile exported, loaded, rejected, discarded, and final Oracle table row counts. |
 
 ### Model and run behavior
 
@@ -320,6 +442,18 @@ For normal use:
 - `--run <run_id>` is only for non-capture single-phase runs and reuses an existing run directory.
 
 Use `--run` when rerunning phases that depend on files already generated in a previous run, such as `deploy`, `load`, `postdeploy`, or `validate`.
+
+Phase status is append-only. Repeating a mutating phase that already succeeded
+is rejected by default. If the repeat is intentional, make it explicit:
+
+```bash
+./migrate.sh tpcc --phase load --run 20260427_014117 --rerun-completed
+```
+
+This flag does not clean or truncate the Oracle target. Before repeating
+`deploy` or `load`, the operator remains responsible for making the target safe
+for that operation. `validate` is read-only and may be repeated without the
+flag.
 
 The run id can be provided with or without the `run_` prefix:
 
@@ -362,8 +496,13 @@ Important files:
 | `autokit/migrate.log` | Main run log. Start here when troubleshooting. |
 | `autokit/sdcli_commands.log` | SDCLI commands executed by the run. |
 | `autokit/sdcli_commands_summary.txt` | Short command summary printed at the end of SDCLI runs. |
-| `autokit/migration_summary.csv` | High-level migration result summary. |
-| `autokit/deploy_manifest.csv` | SQL scripts executed or skipped during deploy/postdeploy. |
+| `autokit/migration_summary.csv` | Append-only high-level migration result summary. |
+| `autokit/phase_status.tsv` | Append-only phase attempts and their final status. |
+| `autokit/deploy_manifest.tsv` | Generated SQL inventory and scripts executed during deploy/postdeploy. |
+| `autokit/bcp_status.tsv` | Per-table SQL Server export status and exported row count. |
+| `autokit/sqlldr_status.tsv` | Per-table Oracle load status, loaded/rejected/discarded counts, and paths. |
+| `autokit/reconciliation.tsv` | Source-to-target per-table row reconciliation. Every row must be `PASS`. |
+| `autokit/validation_summary.txt` | Final `PASS` or `FAIL` and issue totals. |
 | `sdcli/` | SDCLI-generated scripts, logs, and data movement files. |
 
 If you rerun a phase with `--run`, the new output is appended to the existing run log.
@@ -373,8 +512,9 @@ If you rerun a phase with `--run`, the new output is appended to the existing ru
 Run deployment commands from `deployment/`:
 
 ```bash
-./build.sh          # Build image and prepare volume
-./run.sh            # Create/reuse/start container and prepare sdcli environment
+./build.sh          # Build image on a connected development machine
+./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+                    # Create/reuse container and install staged RPMs locally
 ./start.sh          # Start existing container
 ./stop.sh           # Stop running container
 ```
@@ -388,6 +528,7 @@ Run migration commands from `sdcli-scripts/`:
 ./migrate.sh <migration_name>
 ./migrate.sh <migration_name> --phase <phase_name>
 ./migrate.sh <migration_name> --phase <phase_name> --run <run_id>
+./migrate.sh <migration_name> --phase <phase_name> --run <run_id> --rerun-completed
 ./migrate.sh <migration_name> --migrate --dry-run
 ```
 
@@ -395,11 +536,13 @@ Run migration commands from `sdcli-scripts/`:
 
 - Start with `autokit/migrate.log` for the full run history.
 - Check `autokit/migration_summary.csv` for a quick status summary.
+- Treat a migration as successful only when `validation_summary.txt` is `PASS`
+  and every row in `reconciliation.tsv` is `PASS`.
 - Check `sdcli/log/error.txt` when SDCLI phases fail.
 - Use `--dry-run` to confirm config and command construction before a real run.
 - Run `--conn-setup` again if source or target connection details changed.
 - Use `--run <run_id>` when rerunning a later phase against files from an existing run.
-- If the container does not exist, run `deployment/run.sh` before `deployment/start.sh`.
+- If the container does not exist, run `deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula` before `deployment/start.sh`.
 
 ## Notes for maintainers
 

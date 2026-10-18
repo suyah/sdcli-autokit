@@ -1,0 +1,4 @@
+*
+!.dockerignore
+!deployment/
+!deployment/Dockerfile
