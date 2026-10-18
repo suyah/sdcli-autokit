@@ -163,8 +163,11 @@ assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_objects'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_constraints'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_indexes'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_errors'
+assert_contains_file "$SQLPLUS_INPUT_FILE" "e.attribute = 'ERROR'"
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_triggers'
 assert_contains_file "$SQLPLUS_INPUT_FILE" 'all_tab_cols'
+assert_contains_file "$SQLPLUS_INPUT_FILE" "'COMPILER_ERRORS'"
+assert_contains_file "$SQLPLUS_INPUT_FILE" "'line_position'"
 assert_contains_file "$SQLPLUS_INPUT_FILE" "col.hidden_column = 'NO'"
 assert_contains_file "$SQLPLUS_INPUT_FILE" "c.generated = 'USER NAME'"
 if grep -Eiq '(^|[^[:alpha:]])(insert|update|delete|merge|drop|truncate)([^[:alpha:]]|$)' "$SQLPLUS_INPUT_FILE"; then
@@ -206,8 +209,7 @@ RUN_ID=20261016_130000
 
 run_validation_report "$tmpdir/sdcli" 0
 assert_contains_file "$PYTHON_ARGS_FILE" "$REPO_ROOT/sdcli-scripts/lib/generate_validation_report.py"
-assert_contains_file "$PYTHON_ARGS_FILE" '--sdcli-dir'
-assert_contains_file "$PYTHON_ARGS_FILE" "$tmpdir/sdcli"
+assert_not_contains_file "$PYTHON_ARGS_FILE" '--sdcli-dir'
 assert_contains_file "$PYTHON_ARGS_FILE" '--evidence-dir'
 assert_contains_file "$PYTHON_ARGS_FILE" "$tmpdir/autokit"
 assert_contains_file "$PYTHON_ARGS_FILE" '--migration'

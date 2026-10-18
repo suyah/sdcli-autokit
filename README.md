@@ -581,32 +581,30 @@ uses the BCP exported count, SQL*Loader loaded/rejected/discarded counts, and th
 final Oracle table count. This is preferable to recounting a live SQL Server
 database later, when its data may have changed.
 
-The offline `migration_report.html` contains:
+The offline `migration_report.html` and `migration_report.txt` contain the same
+direct-evidence sections:
 
-- the run result and evidence health;
-- derived schema mappings;
+- validation summary and evidence health;
 - table data reconciliation;
-- source, generated-target, and actual-target object inventories;
-- conversion and deployment exceptions;
-- routine validity and compiler diagnostics; and
-- visible supporting context such as SQL Developer conversion helpers.
+- deploy, postdeploy, and cleanup script outcomes;
+- Oracle invalid objects and compiler errors;
+- source and target inventory counts; and
+- metadata coverage status.
 
-`PASS` means all required evidence was collected and the required data/object
-comparisons passed. `FAIL` means a mismatch or invalid target object was found.
-`CONTEXT` is visible supporting or platform-generated metadata and does not fail
-the migration by itself. Missing or malformed evidence is reported as
-`INCOMPLETE` in both reports and causes the validate phase to fail.
+`PASS` means all required evidence was collected and every evaluated check
+passed. `FAIL` means a concrete mismatch, failed deployment script, or invalid
+target object was found. Missing, malformed, not-run, or plan-only execution
+evidence is reported as `INCOMPLETE` and causes the validate phase to fail.
+Oracle compiler diagnostics count `ERROR` records; compiler warnings alone do
+not make an object invalid.
 
-The HTML report is a single local file with embedded styling and sorting code;
-it does not load internet resources. Its terminal-readable companion,
-`migration_report.txt`, contains the run summary, schema mapping, data
-reconciliation, evidence health, and non-matching object comparisons. View it
-on the migration host with `less autokit/migration_report.txt`. Reports can
-contain customer schema names, object names, and compiler messages, so handle
-them as migration evidence. A rerun atomically replaces completed report and
-comparison artifacts rather than appending duplicate rows. If rendering is
-interrupted, an existing complete HTML report is preserved, but the current
-validate command still fails.
+The HTML report is a single local file with embedded styling; it does not load
+internet resources. View the terminal-readable companion on the migration host
+with `less autokit/migration_report.txt`. Reports can contain customer schema
+names, object names, and compiler messages, so handle them as migration
+evidence. A rerun atomically replaces completed reports rather than appending
+duplicate rows. If rendering is interrupted, an existing complete report is
+preserved, but the current validate command still fails.
 
 The run id can be provided with or without the `run_` prefix:
 
@@ -656,17 +654,32 @@ Important files:
 | `autokit/sqlldr_status.tsv` | Per-table Oracle load status, loaded/rejected/discarded counts, and paths. |
 | `autokit/reconciliation.tsv` | Source-to-target per-table row reconciliation. Every row must be `PASS`. |
 | `autokit/source_object_inventory.tsv` | Read-only SQL Server user-object inventory collected during validation. |
-| `autokit/generated_target_inventory.tsv` | Expected Oracle object inventory parsed from generated SQL Developer DDL. |
 | `autokit/target_object_inventory.tsv` | Read-only Oracle inventory for generated target owners. |
-| `autokit/schema_mapping.tsv` | Automatically derived source-schema to Oracle-owner mappings and evidence. |
-| `autokit/object_comparison.tsv` | Per-object conversion/deployment comparison and status. |
 | `autokit/validation_checks.tsv` | Normalized log, reconciliation, target-object, and metadata findings consumed by the validation reports. |
 | `autokit/validation_summary.txt` | Final `PASS` or `FAIL` and issue totals. |
-| `autokit/migration_report.html` | Self-contained human-readable report, also written for failed or incomplete validation. |
-| `autokit/migration_report.txt` | Terminal-readable companion report with validation findings and non-matching objects. |
+| `autokit/migration_report.html` | Self-contained direct-evidence report, also written for failed or incomplete validation. |
+| `autokit/migration_report.txt` | Terminal-readable companion report with the same sections and findings. |
 | `sdcli/` | SDCLI-generated scripts, logs, and data movement files. |
 
 If you rerun a phase with `--run`, the new output is appended to the existing run log.
+
+The validation report uses only structured evidence collected by the autokit:
+
+- table export, load, and target row counts;
+- deploy and postdeploy outcomes from `deploy_manifest.tsv`;
+- Oracle invalid objects and compiler diagnostics from catalog queries;
+- SQL Server and Oracle inventory counts; and
+- evidence-health status for missing or malformed artifacts.
+
+The report does not parse generated SQL to compare SQL Server and Oracle DDL.
+Expected cross-database syntax differences are therefore not reported as
+`DIFFERENT`, and object omissions are not guessed by matching generated file
+text. Until a supported structured SQL Developer repository query provides an
+object-level source-to-converted mapping, metadata conversion coverage is
+shown as `NOT_EVALUATED`. This limitation is informational and is not by
+itself a validation failure. SQL Server is the only source database supported
+by the current validation collectors; additional source RDBMS adapters are
+planned separately.
 
 ## Command reference
 

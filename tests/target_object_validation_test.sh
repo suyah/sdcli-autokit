@@ -38,6 +38,7 @@ touch "$RUN_LOG_FILE"
 
 validate_target_objects 0 "$tmpdir/sdcli"
 grep -F "owner IN (UPPER('customer_app'))" "$SQL_INPUT_FILE" >/dev/null
+grep -F "attribute = 'ERROR'" "$SQL_INPUT_FILE" >/dev/null
 if grep -F 'TargetPass1' "$RUN_LOG_FILE" >/dev/null; then
   echo "Target password leaked to run log" >&2
   exit 1

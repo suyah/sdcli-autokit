@@ -2446,7 +2446,8 @@ WITH inventory AS (
          o.status,
          NVL((SELECT MIN(e.type || ':' || e.line || ':' || e.position || ':' || e.text)
               FROM all_errors e
-              WHERE e.owner = o.owner AND e.name = o.object_name AND e.type = o.object_type), '') AS detail
+              WHERE e.owner = o.owner AND e.name = o.object_name AND e.type = o.object_type
+                AND e.attribute = 'ERROR'), '') AS detail
   FROM all_objects o
   WHERE o.owner IN (${owners})
     AND o.object_type IN ('TABLE','VIEW','PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY','SEQUENCE','SYNONYM')
@@ -2456,7 +2457,8 @@ WITH inventory AS (
          CASE WHEN o.status = 'VALID' AND tr.status = 'ENABLED' THEN 'VALID' ELSE 'INVALID' END,
          NVL((SELECT MIN(e.type || ':' || e.line || ':' || e.position || ':' || e.text)
               FROM all_errors e
-              WHERE e.owner = tr.owner AND e.name = tr.trigger_name AND e.type = 'TRIGGER'), '')
+              WHERE e.owner = tr.owner AND e.name = tr.trigger_name AND e.type = 'TRIGGER'
+                AND e.attribute = 'ERROR'), '')
   FROM all_triggers tr
   LEFT JOIN all_objects o
     ON o.owner = tr.owner AND o.object_name = tr.trigger_name AND o.object_type = 'TRIGGER'
@@ -2521,6 +2523,12 @@ WITH inventory AS (
   WHERE col.owner IN (${owners}) AND col.default_length > 0
     AND col.hidden_column = 'NO'
     AND col.identity_column = 'NO' AND col.virtual_column = 'NO'
+  UNION ALL
+  SELECT e.owner, 'COMPILER_ERRORS', e.name, e.owner, e.name, e.type,
+         e.sequence, 'line_position', TO_CHAR(e.line) || ':' || TO_CHAR(e.position),
+         'INVALID', e.text
+  FROM all_errors e
+  WHERE e.owner IN (${owners}) AND e.attribute = 'ERROR'
 )
 SELECT 'SDCLI_INVENTORY' || CHR(9) ||
        REPLACE(REPLACE(REPLACE(schema_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
@@ -2640,7 +2648,7 @@ validate_target_objects() {
     printf '%s\n' 'WHENEVER SQLERROR EXIT SQL.SQLCODE;'
     printf '%s\n' 'SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF ECHO OFF TERMOUT ON;'
     printf "SELECT 'SDCLI_INVALID|' || COUNT(*) FROM all_objects WHERE owner IN (%s) AND status = 'INVALID';\n" "$owners"
-    printf "SELECT 'SDCLI_COMPILE_ERRORS|' || COUNT(*) FROM all_errors WHERE owner IN (%s);\n" "$owners"
+    printf "SELECT 'SDCLI_COMPILE_ERRORS|' || COUNT(*) FROM all_errors WHERE owner IN (%s) AND attribute = 'ERROR';\n" "$owners"
     printf '%s\n' 'EXIT;'
   } > "$query_file"
 
@@ -2791,10 +2799,17 @@ run_validation_report() {
   report_run_id="${RUN_NAME#run_}"
   [[ -n "$report_run_id" ]] || report_run_id="$RUN_ID"
 
+  # Remove artifacts created by the retired generated-DDL comparison report so
+  # a rerun cannot leave false DIFFERENT/MISSING/EXTRA findings beside the new
+  # direct-evidence report.
+  rm -f \
+    "$AUTOKIT_DIR/generated_target_inventory.tsv" \
+    "$AUTOKIT_DIR/schema_mapping.tsv" \
+    "$AUTOKIT_DIR/object_comparison.tsv"
+
   [[ "$-" == *e* ]] && errexit_enabled=true
   set +e
   python3 "$SCRIPT_DIR/lib/generate_validation_report.py" \
-    --sdcli-dir "$output_dir" \
     --evidence-dir "$AUTOKIT_DIR" \
     --output "$report_file" \
     --migration "$migration_name" \

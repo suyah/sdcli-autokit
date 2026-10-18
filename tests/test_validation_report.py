@@ -1,664 +1,328 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import shutil
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from io import StringIO
 from pathlib import Path
-from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "sdcli-scripts" / "lib" / "generate_validation_report.py"
-SPEC = importlib.util.spec_from_file_location("generate_validation_report", MODULE_PATH)
-REPORT = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules[SPEC.name] = REPORT
-SPEC.loader.exec_module(REPORT)
+SPEC = importlib.util.spec_from_file_location("validation_report", MODULE_PATH)
+assert SPEC and SPEC.loader
+report = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = report
+SPEC.loader.exec_module(report)
 
-FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "validation" / "base"
-
-
-def object_record(
-    schema: str,
-    category: str,
-    name: str,
-    *,
-    subtype: str = "",
-    parent_schema: str = "",
-    parent_name: str = "",
-    status: str = "VALID",
-    attributes: tuple = (),
-):
-    return REPORT.ObjectRecord(
-        schema=schema,
-        category=category,
-        name=name,
-        parent_schema=parent_schema,
-        parent_name=parent_name,
-        subtype=subtype,
-        attributes=attributes,
-        status=status,
-        detail="",
-        origin="fixture",
-    )
+FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "validation" / "base"
+INVENTORY_HEADER = (
+    "schema\tcategory\tobject_name\tparent_schema\tparent_name\tsubtype\t"
+    "ordinal\tattribute_name\tattribute_value\tstatus\tdetail\torigin\n"
+)
 
 
-class InventoryAndMappingTests(unittest.TestCase):
-    def test_inventory_reader_preserves_mixed_case_spaces_and_quotes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            inventory = Path(tmp) / "inventory.tsv"
-            inventory.write_text(
-                "schema\tcategory\tobject_name\tparent_schema\tparent_name\t"
-                "subtype\tordinal\tattribute_name\tattribute_value\tstatus\tdetail\torigin\n"
-                'Mixed Case\tVIEWS\tA "Quoted" View\t\t\tVIEW\t\t\t\tVALID\t\tfixture\n',
-                encoding="utf-8",
-            )
-            records = REPORT.load_inventory(inventory)
-
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].schema, "Mixed Case")
-        self.assertEqual(records[0].name, 'A "Quoted" View')
-
-    def test_status_evidence_maps_multiple_tables_by_full_data_path(self):
-        mappings = REPORT.build_table_mappings(FIXTURE_ROOT)
-
-        self.assertEqual(
-            mappings,
-            [
-                REPORT.SchemaMapping(
-                    source_schema="sales",
-                    target_schema="APP",
-                    method="DATA_FILE",
-                    evidence_count=2,
-                    status="MAPPED",
-                    reason="",
-                )
-            ],
+class ReportEvidenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.evidence_dir = Path(self.temporary.name)
+        for name in (
+            "validation_checks.tsv",
+            "reconciliation.tsv",
+            "source_object_inventory.tsv",
+            "target_object_inventory.tsv",
+        ):
+            shutil.copy(FIXTURE_DIR / name, self.evidence_dir / name)
+        (self.evidence_dir / "deploy_manifest.tsv").write_text(
+            "phase\tpath\tstatus\tnote\n"
+            "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n"
+            "deploy\tsdcli/APP/user.sql\texecuted\t\n"
+            "deploy\tsdcli/APP/tables.sql\texecuted\tpre-data master include\n"
+            "postdeploy\tsdcli/APP/indexes.sql\texecuted\tpost-data master include\n",
+            encoding="utf-8",
         )
 
-    def test_relative_and_absolute_paths_normalize_to_the_same_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = Path(tmp)
-            data_file = evidence / "data" / "customer.dat"
-            data_file.parent.mkdir()
-            data_file.touch()
-            (evidence / "bcp_status.tsv").write_text(
-                "0\tdemo.sales.customer\tdata/customer.dat\t1\n", encoding="utf-8"
-            )
-            (evidence / "sqlldr_status.tsv").write_text(
-                f"0\tAPP.CUSTOMER\tcontrol.ctl\t{data_file}\t1\t0\t0\tloader.log\n",
-                encoding="utf-8",
-            )
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
 
-            mappings = REPORT.build_table_mappings(evidence)
-
-        self.assertEqual(mappings[0].status, "MAPPED")
-        self.assertEqual(mappings[0].evidence_count, 1)
-
-    def test_same_basename_in_different_directories_does_not_cross_map(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = Path(tmp)
-            (evidence / "bcp_status.tsv").write_text(
-                "0\tdemo.sales.customer\ta/customer.dat\t1\n"
-                "0\tdemo.audit.customer\tb/customer.dat\t1\n",
-                encoding="utf-8",
-            )
-            (evidence / "sqlldr_status.tsv").write_text(
-                "0\tAPP.CUSTOMER\tapp.ctl\ta/customer.dat\t1\t0\t0\tapp.log\n"
-                "0\tAUDIT_APP.CUSTOMER\taudit.ctl\tb/customer.dat\t1\t0\t0\taudit.log\n",
-                encoding="utf-8",
-            )
-
-            mappings = REPORT.build_table_mappings(evidence)
-
-        self.assertEqual(
-            {(row.source_schema, row.target_schema) for row in mappings},
-            {("sales", "APP"), ("audit", "AUDIT_APP")},
+    def build(self):
+        return report._build_report_data(
+            self.evidence_dir,
+            "demo",
+            "20261019_120000",
+            "2026-10-19T01:00:00Z",
         )
-        self.assertTrue(all(row.status == "MAPPED" for row in mappings))
 
-    def test_duplicate_unpaired_failed_and_conflicting_status_records_fail_mapping(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = Path(tmp)
-            (evidence / "bcp_status.tsv").write_text(
-                "0\tdemo.sales.customer\tdata/customer.dat\t1\n"
-                "0\tdemo.sales.customer_copy\tdata/customer.dat\t1\n"
-                "7\tdemo.sales.failed\tdata/failed.dat\t\n"
-                "0\tdemo.sales.unpaired\tdata/unpaired.dat\t1\n"
-                "0\tdemo.sales.invoice\tdata/invoice.dat\t1\n"
-                "0\tdemo.sales.orders\tdata/orders.dat\t1\n",
-                encoding="utf-8",
-            )
-            (evidence / "sqlldr_status.tsv").write_text(
-                "0\tAPP.CUSTOMER\tc.ctl\tdata/customer.dat\t1\t0\t0\tc.log\n"
-                "0\tAPP.INVOICE\ti.ctl\tdata/invoice.dat\t1\t0\t0\ti.log\n"
-                "0\tOTHER.ORDERS\to.ctl\tdata/orders.dat\t1\t0\t0\to.log\n",
-                encoding="utf-8",
-            )
+    def test_report_uses_only_direct_evidence(self) -> None:
+        data = self.build()
 
-            mappings = REPORT.build_table_mappings(evidence)
+        self.assertEqual("PASS", data.status)
+        self.assertEqual(2, len(data.reconciliation))
+        self.assertEqual(4, len(data.deployment_records))
+        metadata = next(row for row in data.summary if row.check == "metadata_coverage")
+        self.assertEqual("NOT_EVALUATED", metadata.status)
+        self.assertIn("structured source-to-converted object mapping", metadata.detail)
+        self.assertFalse(hasattr(report, "parse_generated_inventory"))
+        self.assertFalse(hasattr(report, "compare_objects"))
+        self.assertFalse(hasattr(report, "_strip_sql_comments"))
 
-        self.assertTrue(any(row.status == "UNRESOLVED" for row in mappings))
-        reasons = " ".join(row.reason for row in mappings)
-        self.assertIn("duplicate", reasons)
-        self.assertIn("failed", reasons)
-        self.assertIn("unpaired", reasons)
-        self.assertIn("multiple target schemas", reasons)
+    def test_missing_target_inventory_is_incomplete_without_invented_findings(self) -> None:
+        (self.evidence_dir / "target_object_inventory.tsv").unlink()
 
-    def test_generated_inventory_follows_master_includes_and_skips_cleanup(self):
-        records = REPORT.parse_generated_inventory(FIXTURE_ROOT / "sdcli")
-        identities = {(row.schema, row.category, row.name) for row in records}
+        data = self.build()
+        output = self.evidence_dir / "migration_report.txt"
+        report.render_text_report(data, output)
+        text = output.read_text(encoding="utf-8")
 
-        self.assertIn(("APP", "TABLES", "CUSTOMER"), identities)
-        self.assertIn(("APP", "VIEWS", "ACTIVE CUSTOMERS"), identities)
-        self.assertIn(("APP", "ROUTINES", "GetCustomer"), identities)
-        self.assertIn(("APP", "PRIMARY_KEYS", "PK_CUSTOMER"), identities)
-        self.assertIn(("APP", "INDEXES", "UK_CUSTOMER_NAME"), identities)
-        self.assertIn(("Emulation", "PACKAGES", "UTILS"), identities)
-        self.assertEqual(sum(1 for row in records if row.name == "CUSTOMER" and row.category == "TABLES"), 1)
-
-    def test_generated_inventory_uses_each_schema_master_when_root_is_incomplete(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sdcli = Path(tmp) / "sdcli"
-            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
-            (sdcli / "master.sql").write_text("@@Emulation/master.sql\n", encoding="utf-8")
-
-            records = REPORT.parse_generated_inventory(sdcli)
-
-        identities = {(row.schema, row.category, row.name) for row in records}
-        self.assertIn(("APP", "TABLES", "CUSTOMER"), identities)
-        self.assertIn(("Emulation", "PACKAGES", "UTILS"), identities)
-
-    def test_generated_inventory_supports_root_relative_schema_master_includes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sdcli = Path(tmp) / "sdcli"
-            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
-            (sdcli / "APP" / "master.sql").write_text(
-                "@@APP/user.sql\n@@APP/tables.sql\n@@APP/views.sql\n"
-                "@@APP/routines.sql\n@@APP/constraints.sql\n",
-                encoding="utf-8",
-            )
-
-            records = REPORT.parse_generated_inventory(sdcli)
-
-        identities = {(row.schema, row.category, row.name) for row in records}
-        self.assertIn(("APP", "TABLES", "CUSTOMER"), identities)
-
-    def test_generated_inventory_infers_schema_for_unqualified_package_in_schema_directory(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sdcli = Path(tmp) / "sdcli"
-            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
-            (sdcli / "Emulation" / "routines.sql").write_text(
-                "CREATE OR REPLACE PACKAGE UTILS AS\nEND UTILS;\n/\n",
-                encoding="utf-8",
-            )
-
-            records = REPORT.parse_generated_inventory(sdcli)
-
-        identities = {(row.schema, row.category, row.name) for row in records}
-        self.assertIn(("Emulation", "PACKAGES", "UTILS"), identities)
-
-    def test_generated_inventory_does_not_treat_package_body_as_package_named_body(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sdcli = Path(tmp) / "sdcli"
-            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
-            (sdcli / "Emulation" / "routines.sql").write_text(
-                "CREATE OR REPLACE PACKAGE BODY UTILS AS\nEND UTILS;\n/\n",
-                encoding="utf-8",
-            )
-
-            records = REPORT.parse_generated_inventory(sdcli)
-
-        identities = {(row.schema, row.category, row.name) for row in records}
-        self.assertIn(("Emulation", "PACKAGE_BODIES", "UTILS"), identities)
-        self.assertNotIn(("Emulation", "PACKAGES", "BODY"), identities)
-
-    def test_generated_inventory_captures_trigger_parent_and_column_default(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ddl = root / "objects.sql"
-            ddl.write_text(
-                "CREATE TABLE APP.ORDERS (\n"
-                "  ID NUMBER DEFAULT 0 NOT NULL,\n"
-                "  CREATED_AT TIMESTAMP DEFAULT SYSTIMESTAMP\n"
-                ");\n"
-                "CREATE OR REPLACE TRIGGER APP.ORDERS_BI\n"
-                "BEFORE INSERT ON APP.ORDERS FOR EACH ROW\n"
-                "BEGIN NULL; END;\n/\n",
-                encoding="utf-8",
-            )
-
-            records = REPORT._parse_generated_file(ddl, root)
-
-        defaults = [row for row in records if row.category == "DEFAULT_CONSTRAINTS"]
-        trigger = next(row for row in records if row.category == "TRIGGERS")
-        self.assertEqual(
-            {(row.parent_name, row.attributes[0].value) for row in defaults},
-            {("ORDERS", "ID"), ("ORDERS", "CREATED_AT")},
+        self.assertEqual("INCOMPLETE", data.status)
+        invalid_summary = next(
+            row for row in data.summary if row.check == "invalid_target_objects"
         )
-        self.assertEqual((trigger.parent_schema, trigger.parent_name), ("APP", "ORDERS"))
+        self.assertEqual("INCOMPLETE", invalid_summary.status)
+        self.assertIn("target inventory", text)
+        self.assertNotIn("MISSING_IN_TARGET", text)
+        self.assertNotIn("EXTRA_IN_TARGET", text)
 
-    def test_unknown_active_generated_ddl_is_incomplete_evidence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sdcli = Path(tmp) / "sdcli"
-            shutil.copytree(FIXTURE_ROOT / "sdcli", sdcli)
-            (sdcli / "APP" / "unknown.sql").write_text(
-                "CREATE MATERIALIZED VIEW APP.MV_CUSTOMER AS SELECT * FROM APP.CUSTOMER;\n",
-                encoding="utf-8",
-            )
-            with (sdcli / "APP" / "master.sql").open("a", encoding="utf-8") as handle:
-                handle.write("@@unknown.sql\n")
+    def test_missing_deployment_manifest_is_not_reported_as_pass(self) -> None:
+        (self.evidence_dir / "deploy_manifest.tsv").unlink()
 
-            with self.assertRaises(REPORT.EvidenceError):
-                REPORT.parse_generated_inventory(sdcli)
+        data = self.build()
+        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
 
-    def test_tableless_schema_maps_only_on_unique_object_identity(self):
-        source = [object_record("api", "ROUTINES", "GetOrder", subtype="PROCEDURE")]
-        generated = [object_record("API_APP", "ROUTINES", "GETORDER", subtype="FUNCTION")]
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertEqual("INCOMPLETE", deployment.status)
 
-        mappings = REPORT.resolve_schema_mappings(source, generated, [])
+    def test_plan_only_deployment_manifest_is_incomplete(self) -> None:
+        (self.evidence_dir / "deploy_manifest.tsv").write_text(
+            "phase\tpath\tstatus\tnote\n"
+            "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n",
+            encoding="utf-8",
+        )
 
-        self.assertEqual(mappings[0].source_schema, "api")
-        self.assertEqual(mappings[0].target_schema, "API_APP")
-        self.assertEqual(mappings[0].method, "OBJECT_IDENTITY")
-        self.assertEqual(mappings[0].status, "MAPPED")
+        data = self.build()
+        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
 
-    def test_empty_source_schema_does_not_require_a_target_mapping(self):
-        source = [object_record(r"nswhealth\SRV-NSWH-Solarwinds", "SCHEMAS", r"nswhealth\SRV-NSWH-Solarwinds")]
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertEqual("INCOMPLETE", deployment.status)
 
-        mappings = REPORT.resolve_schema_mappings(source, [], [])
+    def test_not_run_deployment_is_incomplete(self) -> None:
+        manifest = self.evidence_dir / "deploy_manifest.tsv"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "postdeploy\tsdcli/APP/routines.sql\tnot_run\tawaiting manual correction\n",
+            encoding="utf-8",
+        )
 
-        self.assertEqual(mappings, [])
+        data = self.build()
+        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
 
-    def test_tableless_tie_remains_unresolved_and_emulation_is_context(self):
-        source = [
-            object_record("api_one", "VIEWS", "STATUS"),
-            object_record("api_two", "VIEWS", "STATUS"),
-        ]
-        generated = [
-            object_record("API_APP", "VIEWS", "STATUS"),
-            object_record("Emulation", "PACKAGES", "UTILS"),
-        ]
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertEqual("INCOMPLETE", deployment.status)
 
-        mappings = REPORT.resolve_schema_mappings(source, generated, [])
+    def test_unknown_deployment_status_is_incomplete_evidence(self) -> None:
+        manifest = self.evidence_dir / "deploy_manifest.tsv"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "postdeploy\tsdcli/APP/routines.sql\tmaybe\tunknown state\n",
+            encoding="utf-8",
+        )
 
+        data = self.build()
+
+        self.assertEqual("INCOMPLETE", data.status)
         self.assertTrue(
-            any(row.target_schema == "API_APP" and row.status == "UNRESOLVED" for row in mappings)
-        )
-        self.assertTrue(
-            any(row.target_schema.casefold() == "emulation" and row.status == "CONTEXT" for row in mappings)
+            any(row.section == "deployment manifest" for row in data.evidence_health)
         )
 
-
-class ComparisonTests(unittest.TestCase):
-    def setUp(self):
-        self.mapping = [
-            REPORT.SchemaMapping("sales", "APP", "DATA_FILE", 2, "MAPPED", "")
-        ]
-
-    def test_routines_match_across_procedure_and_function_types(self):
-        source = [object_record("sales", "ROUTINES", "CalculateTax", subtype="PROCEDURE")]
-        generated = [object_record("APP", "ROUTINES", "CALCULATETAX", subtype="FUNCTION")]
-        target = [object_record("APP", "ROUTINES", "CalculateTax", subtype="FUNCTION")]
-
-        rows = REPORT.compare_objects(source, generated, target, self.mapping)
-
-        self.assertEqual([row.status for row in rows], ["MATCH"])
-
-    def test_structural_constraint_and_index_matching_ignores_generated_names(self):
-        columns = (
-            REPORT.InventoryAttribute(1, "column", "CUSTOMER_ID"),
-            REPORT.InventoryAttribute(2, "column", "ORDER_ID"),
-        )
-        source = [
-            object_record(
-                "sales",
-                "PRIMARY_KEYS",
-                "PK_orders",
-                parent_schema="sales",
-                parent_name="orders",
-                subtype="PRIMARY_KEY",
-                attributes=columns,
-            ),
-            object_record(
-                "sales",
-                "INDEXES",
-                "IX_orders",
-                parent_schema="sales",
-                parent_name="orders",
-                subtype="INDEX",
-                attributes=columns,
-            ),
-        ]
-        generated = [
-            object_record(
-                "APP",
-                "PRIMARY_KEYS",
-                "SYS_C001",
-                parent_schema="APP",
-                parent_name="ORDERS",
-                subtype="PRIMARY_KEY",
-                attributes=columns,
-            ),
-            object_record(
-                "APP",
-                "INDEXES",
-                "GENERATED_IX_42",
-                parent_schema="APP",
-                parent_name="ORDERS",
-                subtype="INDEX",
-                attributes=columns,
-            ),
-        ]
-        target = list(generated)
-
-        rows = REPORT.compare_objects(source, generated, target, self.mapping)
-
-        self.assertEqual([row.status for row in rows], ["MATCH", "MATCH"])
-
-    def test_default_constraint_matches_by_table_and_column_not_generated_name(self):
-        column = (REPORT.InventoryAttribute(1, "column", "STATUS"),)
-        source = [
-            object_record(
-                "sales",
-                "DEFAULT_CONSTRAINTS",
-                "DF_orders_status",
-                parent_schema="sales",
-                parent_name="orders",
-                attributes=column,
+    def test_invalid_objects_include_structured_compiler_diagnostics(self) -> None:
+        target = self.evidence_dir / "target_object_inventory.tsv"
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(
+                "APP\tROUTINES\tBROKEN_PROC\t\t\tPROCEDURE\t\t\t\tINVALID\t\toracle\n"
+                "APP\tCOMPILER_ERRORS\tBROKEN_PROC\tAPP\tBROKEN_PROC\tPROCEDURE\t1\tline_position\t10:7\tINVALID\tPLS-00103: bad token\toracle\n"
+                "APP\tCOMPILER_ERRORS\tBROKEN_PROC\tAPP\tBROKEN_PROC\tPROCEDURE\t2\tline_position\t11:2\tINVALID\tPLS-00103: bad token\toracle\n"
             )
-        ]
-        generated = [
-            object_record(
-                "APP",
-                "DEFAULT_CONSTRAINTS",
-                "ORDERS_STATUS_DEFAULT",
-                parent_schema="APP",
-                parent_name="ORDERS",
-                attributes=column,
-            )
-        ]
-        target = list(generated)
-
-        rows = REPORT.compare_objects(source, generated, target, self.mapping)
-
-        self.assertEqual([row.status for row in rows], ["MATCH"])
-
-    def test_all_failure_and_context_statuses_are_deterministic(self):
-        source = [
-            object_record("sales", "TABLES", "missing_conversion"),
-            object_record("sales", "TABLES", "missing_target"),
-            object_record("sales", "VIEWS", "invalid_view"),
-        ]
-        generated = [
-            object_record("APP", "TABLES", "missing_target"),
-            object_record("APP", "VIEWS", "invalid_view"),
-            object_record("Emulation", "PACKAGES", "UTILS"),
-        ]
-        target = [
-            object_record("APP", "VIEWS", "invalid_view", status="INVALID"),
-            object_record("APP", "TABLES", "unexpected_table"),
-            object_record("APP", "SEQUENCES", "ISEQ$$_12345"),
-            object_record("Emulation", "PACKAGES", "UTILS"),
-        ]
-
-        rows = REPORT.compare_objects(source, generated, target, self.mapping)
-        by_name = {(row.source_name or row.generated_name or row.target_name): row for row in rows}
-
-        self.assertEqual(by_name["missing_conversion"].status, "MISSING_IN_CONVERSION")
-        self.assertEqual(by_name["missing_target"].status, "MISSING_IN_TARGET")
-        self.assertEqual(by_name["invalid_view"].status, "INVALID_IN_TARGET")
-        self.assertEqual(by_name["unexpected_table"].status, "EXTRA_IN_TARGET")
-        self.assertEqual(by_name["ISEQ$$_12345"].status, "CONTEXT")
-        self.assertEqual(by_name["UTILS"].status, "CONTEXT")
-
-    def test_attribute_difference_and_unresolved_mapping_fail_explicitly(self):
-        source = [
-            object_record(
-                "sales",
-                "INDEXES",
-                "IX_customer",
-                parent_schema="sales",
-                parent_name="customer",
-                attributes=(REPORT.InventoryAttribute(1, "column", "NAME"),),
+        checks = self.evidence_dir / "validation_checks.tsv"
+        checks.write_text(
+            checks.read_text(encoding="utf-8").replace(
+                "target_objects\tPASS\t0\tno issues",
+                "target_objects\tFAIL\t1\tOracle invalid objects or compiler errors",
             ),
-            object_record("unmapped", "TABLES", "orphan"),
-        ]
-        generated = [
-            object_record(
-                "APP",
-                "INDEXES",
-                "IX_generated",
-                parent_schema="APP",
-                parent_name="CUSTOMER",
-                attributes=(REPORT.InventoryAttribute(1, "column", "EMAIL"),),
+            encoding="utf-8",
+        )
+
+        data = self.build()
+
+        self.assertEqual("FAIL", data.status)
+        self.assertEqual(2, len(data.invalid_objects))
+        self.assertEqual("10", data.invalid_objects[0].line)
+        self.assertEqual("7", data.invalid_objects[0].position)
+        self.assertEqual("PLS-00103: bad token", data.invalid_objects[0].message)
+        invalid_summary = next(
+            row for row in data.summary if row.check == "invalid_target_objects"
+        )
+        self.assertEqual(1, invalid_summary.issues)
+        self.assertIn("compiler_errors=2", invalid_summary.detail)
+
+    def test_quoted_case_sensitive_objects_keep_separate_diagnostics(self) -> None:
+        target = self.evidence_dir / "target_object_inventory.tsv"
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(
+                "APP\tROUTINES\tCalc\t\t\tPROCEDURE\t\t\t\tINVALID\tfirst error\toracle\n"
+                "APP\tROUTINES\tCALC\t\t\tPROCEDURE\t\t\t\tINVALID\tsecond error\toracle\n"
             )
-        ]
-        mappings = self.mapping + [
-            REPORT.SchemaMapping("unmapped", "", "OBJECT_IDENTITY", 0, "UNRESOLVED", "no unique owner")
-        ]
 
-        rows = REPORT.compare_objects(source, generated, [], mappings)
-        statuses = {row.source_name: row.status for row in rows if row.source_name}
+        data = self.build()
 
-        self.assertEqual(statuses["IX_customer"], "DIFFERENT")
-        self.assertEqual(statuses["orphan"], "UNRESOLVED_MAPPING")
+        self.assertEqual(["CALC", "Calc"], sorted(row.name for row in data.invalid_objects))
 
-    def test_narrow_artifact_rule_does_not_hide_similarly_named_user_sequence(self):
-        target = [
-            object_record("APP", "SEQUENCES", "ISEQ$$_123"),
-            object_record("APP", "SEQUENCES", "ISEQ$$_CUSTOM"),
-        ]
-
-        rows = REPORT.compare_objects([], [], target, self.mapping)
-        statuses = {row.target_name: row.status for row in rows}
-
-        self.assertEqual(statuses["ISEQ$$_123"], "CONTEXT")
-        self.assertEqual(statuses["ISEQ$$_CUSTOM"], "EXTRA_IN_TARGET")
-
-    def test_evidence_outputs_have_stable_headers_and_sort_order(self):
-        mappings = [
-            REPORT.SchemaMapping("zeta", "Z_APP", "DATA_FILE", 1, "MAPPED", ""),
-            REPORT.SchemaMapping("alpha", "A_APP", "DATA_FILE", 1, "MAPPED", ""),
-        ]
-        generated = [
-            object_record("Z_APP", "TABLES", "Z_TABLE"),
-            object_record("A_APP", "TABLES", "A_TABLE"),
-        ]
-        comparisons = REPORT.compare_objects([], [], generated, [])
-
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = Path(tmp)
-            REPORT.write_evidence_outputs(evidence, mappings, generated, comparisons)
-            mapping_lines = (evidence / "schema_mapping.tsv").read_text(encoding="utf-8").splitlines()
-            inventory_lines = (evidence / "generated_target_inventory.tsv").read_text(encoding="utf-8").splitlines()
-            comparison_lines = (evidence / "object_comparison.tsv").read_text(encoding="utf-8").splitlines()
-
-        self.assertEqual(
-            mapping_lines[0],
-            "source_schema\ttarget_schema\tmethod\tevidence_count\tstatus\treason",
-        )
-        self.assertTrue(mapping_lines[1].startswith("alpha\tA_APP\t"))
-        self.assertEqual(inventory_lines[0], "\t".join(REPORT.INVENTORY_HEADER))
-        self.assertIn("A_APP\tTABLES\tA_TABLE", inventory_lines[1])
-        self.assertTrue(comparison_lines[0].startswith("source_schema\tsource_category"))
-        self.assertIn("A_APP", comparison_lines[1])
-
-
-class RendererAndCliTests(unittest.TestCase):
-    def make_report_data(self, *, status="PASS", detail=""):
-        mapping = REPORT.SchemaMapping("sales", "APP", "DATA_FILE", 1, "MAPPED", "")
-        source = object_record("sales", "VIEWS", "special <view>")
-        generated = object_record("APP", "VIEWS", "special <view>")
-        target = object_record("APP", "VIEWS", "special <view>", status="VALID")
-        comparison = REPORT.ComparisonRecord(
-            source_schema=source.schema,
-            source_category=source.category,
-            source_name=source.name,
-            generated_schema=generated.schema,
-            generated_category=generated.category,
-            generated_name=generated.name,
-            target_schema=target.schema,
-            target_category=target.category,
-            target_name=target.name,
-            status=status,
-            reason=detail,
-            origin="fixture & evidence",
-        )
-        return REPORT.ReportData(
-            migration="sales & reporting",
-            run_id="20261016_010203",
-            generated_at="2026-10-16T01:02:03Z",
-            status="PASS" if status == "MATCH" else status,
-            mappings=(mapping,),
-            reconciliation=({"source_object": "sales.customer", "status": "PASS"},),
-            source_inventory=(source,),
-            generated_inventory=(generated,),
-            target_inventory=(target,),
-            comparisons=(comparison,),
-            evidence_issues=(),
+    def test_latest_deployment_outcome_supersedes_an_earlier_failure(self) -> None:
+        manifest = self.evidence_dir / "deploy_manifest.tsv"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "postdeploy\tsdcli/APP/routines.sql\tfailed\tSQL errors\n"
+            + "postdeploy\tsdcli/APP/routines.sql\texecuted\tmanual fix rerun\n",
+            encoding="utf-8",
         )
 
-    def test_renderer_is_self_contained_escaped_and_readable_without_javascript(self):
-        report_data = self.make_report_data(status="INVALID_IN_TARGET", detail='<broken & "bad">')
-        with tempfile.TemporaryDirectory() as tmp:
-            output = Path(tmp) / "migration_report.html"
-            REPORT.render_report(report_data, output)
-            html = output.read_text(encoding="utf-8")
+        data = self.build()
+        routine = next(
+            row
+            for row in data.deployment_records
+            if row.path == "sdcli/APP/routines.sql"
+        )
+
+        self.assertEqual("executed", routine.status)
+        self.assertEqual("PASS", data.status)
+
+    def test_current_failed_deployment_is_a_concrete_failure(self) -> None:
+        manifest = self.evidence_dir / "deploy_manifest.tsv"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "postdeploy\tsdcli/APP/routines.sql\tfailed\tpost-data SQL errors\n",
+            encoding="utf-8",
+        )
+
+        data = self.build()
+
+        self.assertEqual("FAIL", data.status)
+        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
+        self.assertEqual("FAIL", deployment.status)
+        self.assertEqual(1, deployment.issues)
+
+    def test_reports_share_sections_escape_html_and_omit_ddl_comparison(self) -> None:
+        data = report._build_report_data(
+            self.evidence_dir,
+            "demo<script>",
+            "20261019_120000",
+            "2026-10-19T01:00:00Z",
+        )
+        html_output = self.evidence_dir / "migration_report.html"
+        text_output = self.evidence_dir / "migration_report.txt"
+
+        report.render_report(data, html_output)
+        report.render_text_report(data, text_output)
+        html_text = html_output.read_text(encoding="utf-8")
+        terminal_text = text_output.read_text(encoding="utf-8")
 
         for heading in (
-            "Run Summary",
-            "Schema Mapping",
+            "Validation Summary",
             "Data Reconciliation",
-            "Object Inventory",
-            "Object Exceptions",
-            "Routine Validation",
-            "Supporting Migration Context",
+            "Deployment Script Outcomes",
+            "Invalid Oracle Objects and Compiler Diagnostics",
+            "Metadata Coverage",
+            "Inventory Counts",
             "Evidence Health",
         ):
-            self.assertIn(heading, html)
-        self.assertIn("data-sortable", html)
-        self.assertIn("filterTable", html)
-        self.assertIn("<table", html)
-        self.assertIn("&lt;broken &amp; &quot;bad&quot;&gt;", html)
-        self.assertIn("sales &amp; reporting", html)
-        self.assertNotIn("http://", html)
-        self.assertNotIn("https://", html)
+            self.assertIn(heading, html_text)
+            self.assertIn(heading, terminal_text)
+        self.assertIn("demo&lt;script&gt;", html_text)
+        self.assertNotIn("demo<script>", html_text)
+        self.assertIn("demo<script>", terminal_text)
+        for obsolete in ("DIFFERENT", "MISSING_IN_CONVERSION", "EXTRA_IN_TARGET"):
+            self.assertNotIn(obsolete, html_text)
+            self.assertNotIn(obsolete, terminal_text)
 
-    def test_rendering_is_deterministic_when_generation_time_is_fixed(self):
-        report_data = self.make_report_data(status="MATCH")
-        with tempfile.TemporaryDirectory() as tmp:
-            first = Path(tmp) / "first.html"
-            second = Path(tmp) / "second.html"
-            REPORT.render_report(report_data, first)
-            REPORT.render_report(report_data, second)
-            self.assertEqual(first.read_bytes(), second.read_bytes())
+    def test_empty_inventory_is_incomplete_evidence(self) -> None:
+        (self.evidence_dir / "source_object_inventory.tsv").write_text(
+            INVENTORY_HEADER, encoding="utf-8"
+        )
 
-    def test_failed_atomic_replace_preserves_existing_report(self):
-        report_data = self.make_report_data(status="MATCH")
-        with tempfile.TemporaryDirectory() as tmp:
-            output = Path(tmp) / "migration_report.html"
-            output.write_text("known complete report", encoding="utf-8")
-            with mock.patch.object(REPORT.os, "replace", side_effect=OSError("simulated")):
-                with self.assertRaises(OSError):
-                    REPORT.render_report(report_data, output)
-            self.assertEqual(output.read_text(encoding="utf-8"), "known complete report")
+        data = self.build()
 
-    def run_cli(self, fixture: Path, output: Path):
-        stdout = StringIO()
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertTrue(
+            any(row.section == "source inventory" for row in data.evidence_health)
+        )
+
+    def test_truncated_inventory_row_is_incomplete_without_crashing(self) -> None:
+        (self.evidence_dir / "target_object_inventory.tsv").write_text(
+            INVENTORY_HEADER + "APP\tTABLES\tCUSTOMER\n", encoding="utf-8"
+        )
+
+        data = self.build()
+
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertTrue(
+            any(row.section == "target inventory" for row in data.evidence_health)
+        )
+
+    def test_validation_checks_require_the_complete_contract(self) -> None:
+        (self.evidence_dir / "validation_checks.tsv").write_text(
+            "check\tstatus\tissues\tdetail\nrun_log\tPASS\t0\tno issues\n",
+            encoding="utf-8",
+        )
+
+        data = self.build()
+
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertTrue(
+            any(row.section == "validation checks" for row in data.evidence_health)
+        )
+
+    def test_pass_reconciliation_requires_valid_row_counts(self) -> None:
+        reconciliation = self.evidence_dir / "reconciliation.tsv"
+        reconciliation.write_text(
+            reconciliation.read_text(encoding="utf-8").replace(
+                "demo.sales.customer\tAPP.CUSTOMER\tdata/sales/customer.dat\t2\t2\t0\t0\t2\tPASS",
+                "demo.sales.customer\tAPP.CUSTOMER\tdata/sales/customer.dat\tNaN\t2\t0\t0\t2\tPASS",
+            ),
+            encoding="utf-8",
+        )
+
+        data = self.build()
+
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertTrue(
+            any(row.section == "data reconciliation" for row in data.evidence_health)
+        )
+
+    def test_cli_writes_both_reports_without_sdcli_directory(self) -> None:
+        output = self.evidence_dir / "migration_report.html"
+        stdout = io.StringIO()
+
         with redirect_stdout(stdout):
-            rc = REPORT.main(
-                [
-                    "--sdcli-dir",
-                    str(fixture / "sdcli"),
+            rc = report.main(
+                (
                     "--evidence-dir",
-                    str(fixture),
+                    str(self.evidence_dir),
                     "--output",
                     str(output),
                     "--migration",
-                    "sales",
+                    "demo",
                     "--run-id",
-                    "20261016_010203",
-                ]
+                    "20261019_120000",
+                )
             )
-        return rc, stdout.getvalue()
 
-    def test_cli_writes_pass_report_and_normalized_evidence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "fixture"
-            shutil.copytree(FIXTURE_ROOT, fixture)
-            output = Path(tmp) / "migration_report.html"
-            rc, stdout = self.run_cli(fixture, output)
-
-            self.assertEqual(rc, 0)
-            self.assertTrue(output.is_file())
-            text_output = output.with_suffix(".txt")
-            self.assertTrue(text_output.is_file())
-            text_report = text_output.read_text(encoding="utf-8")
-            self.assertIn("Migration Validation Report", text_report)
-            self.assertIn("Status: PASS", text_report)
-            self.assertIn("Object comparison issues (0)", text_report)
-            self.assertIn("status=PASS", stdout)
-            self.assertTrue((fixture / "schema_mapping.tsv").is_file())
-            self.assertTrue((fixture / "generated_target_inventory.tsv").is_file())
-            self.assertTrue((fixture / "object_comparison.tsv").is_file())
-
-    def test_cli_writes_fail_report_for_invalid_target(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "fixture"
-            shutil.copytree(FIXTURE_ROOT, fixture)
-            inventory = fixture / "target_object_inventory.tsv"
-            inventory.write_text(
-                inventory.read_text(encoding="utf-8").replace(
-                    "APP\tVIEWS\tACTIVE CUSTOMERS\t\t\tVIEW\t\t\t\tVALID\t\tfixture",
-                    "APP\tVIEWS\tACTIVE CUSTOMERS\t\t\tVIEW\t\t\t\tINVALID\t<compile & error>\tfixture",
-                ),
-                encoding="utf-8",
-            )
-            output = Path(tmp) / "migration_report.html"
-            rc, stdout = self.run_cli(fixture, output)
-            html = output.read_text(encoding="utf-8")
-
-            self.assertEqual(rc, 2)
-            self.assertIn("status=FAIL", stdout)
-            self.assertIn("&lt;compile &amp; error&gt;", html)
-
-    def test_cli_report_fails_when_shell_validation_check_failed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "fixture"
-            shutil.copytree(FIXTURE_ROOT, fixture)
-            checks = fixture / "validation_checks.tsv"
-            checks.write_text(
-                checks.read_text(encoding="utf-8").replace(
-                    "run_log\tPASS\t0\tno issues",
-                    "run_log\tFAIL\t2\tERROR entries found in migration log",
-                ),
-                encoding="utf-8",
-            )
-            output = Path(tmp) / "migration_report.html"
-            rc, stdout = self.run_cli(fixture, output)
-            html = output.read_text(encoding="utf-8")
-
-            self.assertEqual(rc, 2)
-            self.assertIn("status=FAIL", stdout)
-            self.assertIn("ERROR entries found in migration log", html)
-
-    def test_cli_writes_incomplete_report_for_missing_evidence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "fixture"
-            shutil.copytree(FIXTURE_ROOT, fixture)
-            (fixture / "source_object_inventory.tsv").unlink()
-            output = Path(tmp) / "migration_report.html"
-            rc, stdout = self.run_cli(fixture, output)
-            html = output.read_text(encoding="utf-8")
-
-            self.assertEqual(rc, 2)
-            self.assertIn("status=INCOMPLETE", stdout)
-            self.assertIn("INCOMPLETE", html)
+        self.assertEqual(0, rc)
+        self.assertTrue(output.is_file())
+        self.assertTrue(output.with_suffix(".txt").is_file())
+        self.assertIn("REPORT_RESULT status=PASS", stdout.getvalue())
+        self.assertIn("not_evaluated_sections=1", stdout.getvalue())
 
 
 if __name__ == "__main__":
