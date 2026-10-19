@@ -31,7 +31,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 RUN_DIR="$tmpdir/run"
 AUTOKIT_DIR="$RUN_DIR/autokit"
 output_dir="$RUN_DIR/sdcli"
-mkdir -p "$AUTOKIT_DIR" "$output_dir/gen"
+mkdir -p "$AUTOKIT_DIR" "$output_dir/tpcc"
 
 cat > "$output_dir/passworddefinition.sql" <<'SQL'
 ACCEPT tpcc_password PROMPT "Provide the password for tpcc: " HIDE
@@ -39,14 +39,7 @@ ACCEPT tpcc_copy_tpcc_password PROMPT "Provide the password for tpcc_copy_tpcc: 
 ACCEPT Emulation_password PROMPT "Provide the password for Emulation: " HIDE
 SQL
 
-cat > "$output_dir/role.sql" <<'SQL'
-CREATE ROLE old_fallback_role;
-SQL
-
-cat > "$output_dir/gen/generated-1.sql" <<'SQL'
-@passworddefinition.sql
-DROP ROLE ROLE_tpcc_20260427_014117 ;
-CREATE ROLE ROLE_tpcc_20260427_014117 ;
+cat > "$output_dir/tpcc/user.sql" <<'SQL'
 CREATE USER tpcc IDENTIFIED BY &&tpcc_password PASSWORD EXPIRE ACCOUNT LOCK;
 SQL
 
@@ -71,7 +64,21 @@ while IFS= read -r line; do
       ;;
   esac
 done <<< "$stdin_text"
-cat passworddefinition.sql > "$SQLPLUS_PASSWORD_FILE"
+define_path="$(awk '
+  /^@".*"$/ {
+    path=$0
+    sub(/^@"/, "", path)
+    sub(/"$/, "", path)
+    if (path ~ /passworddefinition/) {
+      print path
+      exit
+    }
+  }
+' "$SQLPLUS_WRAPPER_FILE")"
+if [[ -n "$define_path" ]]; then
+  printf '%s\n' "$define_path" > "$SQLPLUS_PASSWORD_PATH_FILE"
+  cat "$define_path" > "$SQLPLUS_PASSWORD_FILE"
+fi
 printf '%s\n' "${SQLPLUS_FAKE_OUTPUT:-CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;}"
 SCRIPT
 chmod +x "$fakebin/sqlplus"
@@ -79,8 +86,9 @@ chmod +x "$fakebin/sqlplus"
 SQLPLUS_ARGS_FILE="$tmpdir/sqlplus.args"
 SQLPLUS_STDIN_FILE="$tmpdir/sqlplus.stdin"
 SQLPLUS_PASSWORD_FILE="$tmpdir/passworddefinition.executed.sql"
+SQLPLUS_PASSWORD_PATH_FILE="$tmpdir/passworddefinition.path"
 SQLPLUS_WRAPPER_FILE="$tmpdir/sqlplus.wrapper.sql"
-export SQLPLUS_ARGS_FILE SQLPLUS_STDIN_FILE SQLPLUS_PASSWORD_FILE SQLPLUS_WRAPPER_FILE
+export SQLPLUS_ARGS_FILE SQLPLUS_STDIN_FILE SQLPLUS_PASSWORD_FILE SQLPLUS_PASSWORD_PATH_FILE SQLPLUS_WRAPPER_FILE
 PATH="$fakebin:$PATH"
 
 RUN_LOG_FILE="$tmpdir/sqlplus.log"
@@ -90,7 +98,8 @@ schema_password='Sch@ma Safe;R"8'
 escaped_schema_password="${schema_password//\"/\"\"}"
 SQLPLUS_FAKE_OUTPUT="CREATE USER tpcc IDENTIFIED BY \"${escaped_schema_password}\" PASSWORD EXPIRE ACCOUNT LOCK;"
 export SQLPLUS_FAKE_OUTPUT
-run_sqlplus_file "$output_dir" "gen/generated-1.sql" "adb.example/high" "admin" "$target_password" "$schema_password" 3
+password_file_before="$(cksum "$output_dir/passworddefinition.sql")"
+run_sqlplus_file "$output_dir" "tpcc/user.sql" "adb.example/high" "admin" "$target_password" "$schema_password" 3
 unset SQLPLUS_FAKE_OUTPUT
 sqlplus_args="$(cat "$SQLPLUS_ARGS_FILE")"
 sqlplus_stdin="$(cat "$SQLPLUS_STDIN_FILE")"
@@ -99,20 +108,26 @@ sqlplus_wrapper="$(cat "$SQLPLUS_WRAPPER_FILE")"
 assert_contains "$sqlplus_args" "/nolog"
 assert_not_contains "$sqlplus_args" "$target_password"
 assert_contains "$sqlplus_stdin" 'connect admin/"Adm@in Safe;Q""9"@adb.example/high'
-assert_not_contains "$sqlplus_stdin" "@gen/generated-1.sql"
 assert_not_contains "$sqlplus_stdin" "$schema_password"
 assert_not_contains "$sqlplus_wrapper" "alter session set current_schema"
 assert_contains "$sqlplus_wrapper" "SET VERIFY OFF"
+password_define_path="$(cat "$SQLPLUS_PASSWORD_PATH_FILE")"
+if [[ "$password_define_path" != /* ]]; then
+  echo "Expected an absolute private password definition path, got: $password_define_path" >&2
+  exit 1
+fi
+assert_not_contains "$password_define_path" "$output_dir"
+assert_contains "$sqlplus_wrapper" "@\"$password_define_path\""
 assert_contains "$sqlplus_password_file" 'DEFINE tpcc_password = "Sch@ma Safe;R""8"'
 assert_contains "$sqlplus_password_file" 'DEFINE tpcc_copy_tpcc_password = "Sch@ma Safe;R""8"'
 assert_contains "$sqlplus_password_file" 'DEFINE Emulation_password = "Sch@ma Safe;R""8"'
 assert_not_contains "$sqlplus_password_file" "ACCEPT"
+[[ "$(cksum "$output_dir/passworddefinition.sql")" == "$password_file_before" ]]
 assert_contains "$(cat "$output_dir/passworddefinition.sql")" "ACCEPT tpcc_password"
 assert_not_contains "$(cat "$RUN_LOG_FILE")" "$target_password"
 assert_not_contains "$(cat "$RUN_LOG_FILE")" "$schema_password"
 assert_not_contains "$(cat "$RUN_LOG_FILE")" 'Sch@ma Safe'
 
-mkdir -p "$output_dir/tpcc"
 touch "$output_dir/tpcc/tables.sql"
 cat > "$output_dir/tpcc/master.sql" <<'SQL'
 @@"tpcc/tables.sql"
@@ -123,6 +138,25 @@ assert_contains "$sqlplus_wrapper" "alter session set current_schema = tpcc;"
 assert_contains "$sqlplus_wrapper" "set define off"
 assert_contains "$sqlplus_wrapper" "@\"tpcc/tables.sql\""
 assert_contains "$sqlplus_wrapper" "set define on"
+
+signal_runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/sdcli_sqlplus_signal_XXXXXX")"
+set +e
+(
+  SQLPLUS_RUNTIME_TEMP_DIRS=()
+  register_sqlplus_runtime_dir "$signal_runtime_dir"
+  trap on_exit EXIT
+  on_signal 143
+)
+signal_rc=$?
+set -e
+if [[ $signal_rc -ne 143 ]]; then
+  echo "Expected handled TERM exit 143, got: $signal_rc" >&2
+  exit 1
+fi
+if [[ -e "$signal_runtime_dir" ]]; then
+  echo "Handled TERM left runtime secret directory behind: $signal_runtime_dir" >&2
+  exit 1
+fi
 
 SQLPLUS_FAKE_OUTPUT='ORA-00907: missing right parenthesis'
 export SQLPLUS_FAKE_OUTPUT
@@ -136,6 +170,12 @@ sqlplus_wrapper="$(cat "$SQLPLUS_WRAPPER_FILE")"
 assert_contains "$sqlplus_wrapper" "WHENEVER SQLERROR CONTINUE NONE;"
 
 declare -a file_calls=()
+
+cat > "$output_dir/role.sql" <<'SQL'
+CREATE ROLE old_fallback_role;
+SQL
+mkdir -p "$output_dir/gen"
+touch "$output_dir/gen/generated-1.sql"
 
 get_required_value() {
   case "$1" in
