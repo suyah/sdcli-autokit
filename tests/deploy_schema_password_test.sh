@@ -179,3 +179,33 @@ masked="$(printf '%s\n' \
   | filter_sqlplus_deploy_output)"
 assert_contains "$masked" "IDENTIFIED BY *** PASSWORD"
 assert_not_contains "$masked" "$schema_password"
+
+assert_password_prompts_rejected() {
+  local expected="$1"
+  local output rc
+  set +e
+  output="$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql" 2>&1)"
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || {
+    echo "Expected passworddefinition.sql to be rejected" >&2
+    exit 1
+  }
+  assert_contains "$output" "$expected"
+}
+
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+ACCEPT repeated_password PROMPT "Password: " HIDE
+ACCEPT REPEATED_PASSWORD PROMPT "Password again: " HIDE
+SQL
+assert_password_prompts_rejected "duplicate ACCEPT identifier"
+
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+ACCEPT bad-name PROMPT "Password: " HIDE
+SQL
+assert_password_prompts_rejected "invalid ACCEPT identifier"
+
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+ACCEPT visible_password PROMPT "Password: "
+SQL
+assert_password_prompts_rejected "must end with HIDE"

@@ -53,7 +53,7 @@ touch "$output_dir/gen/generated-1.sql"
 
 touch "$output_dir/Emulation/user.sql"
 cat > "$output_dir/Emulation/master.sql" <<'SQL'
-@@"Emulation/packages.sql"
+@"Emulation/packages.sql"
 SQL
 touch "$output_dir/Emulation/packages.sql"
 touch "$output_dir/Emulation/post.sql"
@@ -63,6 +63,12 @@ touch "$output_dir/tpcc/tables.sql"
 touch "$output_dir/tpcc/indexes.sql"
 touch "$output_dir/tpcc/synonyms.sql"
 touch "$output_dir/tpcc/procedures.sql"
+cat > "$output_dir/tpcc/foreignkeys.sql" <<'SQL'
+ALTER TABLE Proda_Doctors
+  ADD CONSTRAINT Proda_Doctors_fk
+  FOREIGN KEY (provider_id)
+  REFERENCES Providers (provider_id);
+SQL
 cat > "$output_dir/tpcc/master.sql" <<'SQL'
 @@"tpcc/tables.sql"
 @@"tpcc/indexes.sql"
@@ -74,6 +80,7 @@ touch "$output_dir/tpcc/post.sql"
 touch "$output_dir/tpcc_copy_tpcc/user.sql"
 touch "$output_dir/tpcc_copy_tpcc/tables.sql"
 touch "$output_dir/tpcc_copy_tpcc/synonyms.sql"
+touch "$output_dir/tpcc_copy_tpcc/foreignkeys.sql"
 cat > "$output_dir/tpcc_copy_tpcc/master.sql" <<'SQL'
 @@"tpcc_copy_tpcc/tables.sql"
 @@"tpcc_copy_tpcc/synonyms.sql"
@@ -154,18 +161,24 @@ assert_contains "$post_calls" "Emulation/packages.sql||0|Emulation"
 assert_contains "$post_calls" "tpcc/indexes.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc/synonyms.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc/procedures.sql||0|tpcc"
+assert_contains "$post_calls" "tpcc/foreignkeys.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc/post.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc_copy_tpcc/synonyms.sql||0|tpcc_copy_tpcc"
+assert_contains "$post_calls" "tpcc_copy_tpcc/foreignkeys.sql||0|tpcc_copy_tpcc"
 assert_contains "$post_calls" "tpcc_copy_tpcc/post.sql||0|tpcc_copy_tpcc"
 assert_not_contains "$post_calls" "master.sql"
+[[ "$(printf '%s\n' "${calls[@]}" | grep -Fxc 'tpcc/foreignkeys.sql||0|tpcc')" == "1" ]]
+[[ "$(printf '%s\n' "${calls[@]}" | grep -Fxc 'tpcc_copy_tpcc/foreignkeys.sql||0|tpcc_copy_tpcc')" == "1" ]]
 
 assert_line "$manifest" $'postdeploy\tsdcli/Emulation/packages.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/Emulation/post.sql\texecuted\tpost-load compile and status script'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/indexes.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/synonyms.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/procedures.sql\texecuted\tpost-data master include'
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc/foreignkeys.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/post.sql\texecuted\tpost-load compile and status script'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/synonyms.sql\texecuted\tpost-data master include'
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/foreignkeys.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/post.sql\texecuted\tpost-load compile and status script'
 
 rm -f "$manifest"
@@ -207,3 +220,14 @@ set +e
 unknown_rc=$?
 set -e
 [[ $unknown_rc -ne 0 ]]
+
+rm -f "$output_dir/tpcc/unplanned.sql"
+cat >> "$output_dir/tpcc/master.sql" <<'SQL'
+@@"tpcc/tables.sql" unexpected_argument
+SQL
+set +e
+unsupported_include_output="$(validate_generated_sql_inventory "$output_dir" 2>&1)"
+unsupported_include_rc=$?
+set -e
+[[ $unsupported_include_rc -ne 0 ]]
+assert_contains "$unsupported_include_output" "Unsupported generated master include"
