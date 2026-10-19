@@ -22,6 +22,8 @@
 # Track sdcli-scripts folder
 !sdcli-scripts/
 !sdcli-scripts/**
+# Customer configuration is created from the tracked neutral example.
+sdcli-scripts/config.yaml
 sdcli-scripts/**/__pycache__/
 sdcli-scripts/**/*.pyc
 

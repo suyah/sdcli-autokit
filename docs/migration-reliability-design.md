@@ -109,7 +109,11 @@ The initial supported classification is based on generated file purpose, not alp
 
 Within a class, preserve the order in the generated master. Across schemas, use a stable sorted schema order. Each child script executes exactly once and is recorded in `deploy_manifest.tsv`.
 
-If a supported SQL Developer version emits only one monolithic generated script, execute that script once in pre-data mode and record that post-data separation is unavailable. Do not execute both a master and its children.
+Only the tested flat per-schema layout is automated: each schema directory has
+`user.sql` and `master.sql`, and executable schema scripts are directly listed
+in the bounded master plan. A monolithic `gen/*.sql`-only layout or nested SQL
+directory is unsupported and must fail before SQL\*Plus executes generated
+schema SQL; the tool does not guess cleanup or phase semantics for those files.
 
 ### 6.3 Oracle error handling
 
@@ -177,14 +181,18 @@ All secret values remain environment substitutions in the real config. They are 
 
 For `passworddefinition.sql`:
 
-1. create a permission-`0600` backup;
-2. register cleanup before writing the replacement;
-3. write the temporary replacement with `umask 077` and atomic rename;
-4. run SQL\*Plus;
-5. restore the original on return, error, `INT`, and `TERM`; and
-6. make restoration failure fatal and name the affected file.
+1. leave the generated file unchanged;
+2. create a private runtime directory with permission `0700`;
+3. write a DEFINE-only file with permission `0600` from the validated prompt
+   identifiers and the current schema password;
+4. have the SQL\*Plus wrapper source that private file before the generated
+   schema script; and
+5. remove the runtime directory on return, error, `INT`, and `TERM`.
 
-The cleanup stack must support both password restoration and repository-lock release without one cleanup overwriting the other trap.
+The cleanup stack must support both temporary-secret cleanup and
+repository-lock release without one cleanup overwriting the other trap. An
+uncatchable process or host failure can leave only the private temporary copy,
+not a modified durable migration artifact.
 
 ## 10. Configuration and preflight
 
@@ -244,7 +252,8 @@ Minimum automated coverage:
 - all offload/load scripts execute and table coverage mismatches fail;
 - generated SQL inventory rejects duplicates, unknown files, missing includes, traversal, and master-plus-child double execution;
 - phase history survives resume and completed mutating phases require explicit override;
-- password files restore after success, failure, and signal interruption;
+- generated password files remain unchanged and private DEFINE files are
+  removed after success, failure, and handled signal interruption;
 - repository lock blocks a second workflow;
 - config validation rejects unsupported types, unsafe names, bad ports, missing secrets, and incomplete wallets;
 - Docker and Podman lifecycle scripts use the configured engine and reject mismatched existing containers;

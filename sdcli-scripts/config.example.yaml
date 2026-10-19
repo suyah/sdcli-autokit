@@ -10,9 +10,9 @@ defaults:
 
   target:
     type: oracle
-    # Optional. For Autonomous Database mTLS, set this to the unzipped
-    # customer wallet directory and keep each Oracle conn in tcps:// URL form.
-    # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_myadb
+    # For an mTLS Oracle target, uncomment wallet_dir and use the unzipped
+    # customer wallet directory mounted inside the container.
+    # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_example
 
   offload_preferences:
     packet_size: 65535
@@ -22,11 +22,11 @@ defaults:
     rows: 50000
     bindsize: 268435456
     readsize: 268435456
-    
+
 migration_repository:
   type: oracle
   name: repo
-  conn: tcps://adb.ap-hyderabad-1.oraclecloud.com:1521/g207e55d6197742_test23atp_high.adb.oraclecloud.com?ssl_server_dn_match=yes
+  conn: tcps://oracle-repository.example.internal:1522/example_repo_service?ssl_server_dn_match=yes
 
   repo_user:
     connection_name: migration_repo
@@ -39,13 +39,13 @@ migration_repository:
     password: "${MIGRATION_SUPER_PASSWORD}"
 
 migrations:
-  - name: tpcc
+  - name: example_migration
     source:
-      conn: 10.0.1.165:1433:tpcc
-      user: sa
+      conn: sqlserver.example.internal:1433:example_database
+      user: migration_user
       password: "${SOURCE_PASSWORD}"
     target:
-      conn: tcps://adb.ap-hyderabad-1.oraclecloud.com:1521/g207e55d6197742_test23atp_high.adb.oraclecloud.com?ssl_server_dn_match=yes
+      conn: tcps://oracle-target.example.internal:1522/example_target_service?ssl_server_dn_match=yes
       user: admin
       password: "${TARGET_PASSWORD}"
       default_schema_password: "${MIGRATED_SCHEMA_PASSWORD}"
