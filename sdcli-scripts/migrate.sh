@@ -25,6 +25,7 @@ RUN_DIR=""
 AUTOKIT_DIR=""
 SDCLI_OUTPUT_DIR=""
 RUN_LOG_FILE=""
+RUN_LOG_START_LINE=0
 SDCLI_COMMAND_LOG=""
 SDCLI_SUMMARY_FILE=""
 MIGRATION_SUMMARY_FILE=""
@@ -35,15 +36,20 @@ ACTIVE_PHASE_ATTEMPT=""
 REPOSITORY_LOCK_DIR=""
 REPOSITORY_LOCK_HELD=false
 RERUN_COMPLETED=false
+SDCLI_LAST_ACTION=""
+SDCLI_LAST_SUCCESS_MARKER=false
+SDCLI_CAPTURE_OUTPUT_FILE=""
 
 declare -a SDCLI_COMMANDS=()
 declare -a SENSITIVE_VALUES=()
+declare -a DATATYPE_MAPPING_TEMP_DIRS=()
 
 # --- CLI and logging helpers -------------------------------------------------
 usage() {
   cat <<'USAGE'
 Usage:
   ./migrate.sh --init [options]
+  ./migrate.sh [<migration_name>] --show-datatype-mapping
   ./migrate.sh <migration_name> [options]
 
 Modes:
@@ -53,6 +59,8 @@ Modes:
   --deploy               Shorthand for --phase deploy (setup only; never runs cleanup)
   --cleanup              Run the separated generated role cleanup for an existing run
   --migrate              Run all phases: capture->convert->generate->datamove->offload->deploy->load->postdeploy->validate
+  --show-datatype-mapping
+                         Show persisted SQL Developer repository datatype mappings as TSV
 
 Options:
   --model <name>         Optional model for non-capture --phase mode only
@@ -66,6 +74,8 @@ Options:
 
 Examples:
   ./migrate.sh --init
+  ./migrate.sh --show-datatype-mapping
+  ./migrate.sh tpcc --show-datatype-mapping
   ./migrate.sh tpcc
   ./migrate.sh tpcc --conn-setup
   ./migrate.sh tpcc --phase capture
@@ -114,60 +124,17 @@ fail() {
 set_mode() {
   local new_mode="$1"
   if $MODE_EXPLICIT; then
-    fail "Choose only one mode: --init, --conn-setup, --phase, or --migrate"
+    fail "Choose only one mode: --init, --conn-setup, --phase, --migrate, or --show-datatype-mapping"
   fi
   MODE="$new_mode"
   MODE_EXPLICIT=true
-}
-
-mask_conn_details_value() {
-  local value="$1"
-  local part masked_parts=()
-
-  IFS=',' read -r -a parts <<< "$value"
-  for part in "${parts[@]}"; do
-    if [[ "$part" == *":oracle:"* || "$part" == *":sqlserver:"* ]]; then
-      local prefix rest suffix
-      prefix="${part%@*}"
-      suffix="${part##*@}"
-      if [[ "$prefix" == */* && "$part" == *"@"* ]]; then
-        rest="${prefix%%/*}/***@${suffix}"
-        masked_parts+=("$rest")
-      else
-        masked_parts+=("$part")
-      fi
-    elif [[ "$part" == *":mkrepouser:"* ]]; then
-      local left right
-      left="${part%%:*}"
-      right="${part#*:mkrepouser:}"
-      if [[ "$right" == */*:* ]]; then
-        masked_parts+=("${left}:mkrepouser:${right%%/*}/***:${right##*:}")
-      else
-        masked_parts+=("$part")
-      fi
-    else
-      masked_parts+=("$part")
-    fi
-  done
-
-  local joined
-  local IFS=,
-  joined="${masked_parts[*]}"
-  echo "$joined"
 }
 
 mask_sensitive() {
   local masked_args=()
   local arg
   for arg in "$@"; do
-    case "$arg" in
-      -connDetails=*)
-        masked_args+=("-connDetails=$(mask_conn_details_value "${arg#-connDetails=}")")
-        ;;
-      *)
-        masked_args+=("$arg")
-        ;;
-    esac
+    masked_args+=("$(redact_text "$arg")")
   done
 
   local rendered=""
@@ -202,6 +169,7 @@ on_exit() {
     record_phase_status "$ACTIVE_PHASE" "failed" "$rc" "process exited before phase completion" "${ACTIVE_PHASE_ATTEMPT:-1}" || true
     ACTIVE_PHASE=""
   fi
+  cleanup_datatype_mapping_temp_dirs || true
   release_repository_lock || true
 
   if [[ $rc -ne 0 ]]; then
@@ -217,6 +185,18 @@ on_exit() {
     echo "===== SDCLI COMMAND SUMMARY ====="
     cat "$SDCLI_SUMMARY_FILE"
   fi
+}
+
+register_datatype_mapping_temp_dir() {
+  DATATYPE_MAPPING_TEMP_DIRS+=("$1")
+}
+
+cleanup_datatype_mapping_temp_dirs() {
+  local temp_dir
+  for temp_dir in "${DATATYPE_MAPPING_TEMP_DIRS[@]+"${DATATYPE_MAPPING_TEMP_DIRS[@]}"}"; do
+    [[ -n "$temp_dir" && -d "$temp_dir" ]] && rm -rf -- "$temp_dir"
+  done
+  DATATYPE_MAPPING_TEMP_DIRS=()
 }
 
 on_signal() {
@@ -284,64 +264,100 @@ configure_oracle_wallet() {
 
 configure_sqldeveloper_file_output_option() {
   local output_option="${SQLDEVELOPER_FILE_OUTPUT_OPTION:-1}"
-  local prefs_root preference_file tmp_file
+  local prefs_root preference_file="" template_file tmp_file candidate
+  local existing_count=0 directory_count=0
+  local -a existing_files=() preference_dirs=()
 
   [[ "$output_option" =~ ^[0-9]+$ ]] || fail "SQLDEVELOPER_FILE_OUTPUT_OPTION must be a non-negative integer"
   prefs_root="${HOME}/.sqldeveloper"
   [[ -d "$prefs_root" ]] || return 0
 
-  preference_file="$(find "$prefs_root" -type f -path '*/o.sqldeveloper/product-preferences.xml' | sort | head -n 1 || true)"
-  [[ -n "$preference_file" ]] || return 0
+  template_file="$SCRIPT_DIR/templates/product-preferences.xml"
+  [[ -f "$template_file" ]] || fail "SQL Developer preferences template not found: $template_file"
 
-  tmp_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_preferences_XXXXXX")" || return 1
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    existing_files+=("$candidate")
+    existing_count=$((existing_count + 1))
+  done < <(find "$prefs_root" -type f -path '*/o.sqldeveloper/product-preferences.xml' | LC_ALL=C sort)
+
+  if (( existing_count == 1 )); then
+    preference_file="${existing_files[0]}"
+  elif (( existing_count > 1 )); then
+    log_warn "Found multiple SQL Developer product-preferences.xml files under $prefs_root; all were left unchanged because the active SQL Developer version is ambiguous"
+    return 0
+  else
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] || continue
+      preference_dirs+=("$candidate")
+      directory_count=$((directory_count + 1))
+    done < <(find "$prefs_root" -type d -path '*/o.sqldeveloper' | LC_ALL=C sort)
+
+    if (( directory_count == 0 )); then
+      log_warn "SQL Developer preference directory not found under $prefs_root; run sdcli once, then retry"
+      return 0
+    fi
+    if (( directory_count > 1 )); then
+      log_warn "Found multiple SQL Developer preference directories under $prefs_root; no product-preferences.xml was installed"
+      return 0
+    fi
+
+    preference_file="${preference_dirs[0]}/product-preferences.xml"
+    tmp_file="$(mktemp "${preference_file}.XXXXXX")" || return 1
+    if ! awk -v output_option="$output_option" '
+      {
+        if ($0 == "      <value n=\"FileOutputOption\" v=\"__SQLDEVELOPER_FILE_OUTPUT_OPTION__\"/>") {
+          print "      <value n=\"FileOutputOption\" v=\"" output_option "\"/>"
+          replaced++
+        } else {
+          print
+        }
+      }
+      END { if (replaced != 1) exit 2 }
+    ' "$template_file" > "$tmp_file"; then
+      rm -f "$tmp_file"
+      fail "Invalid SQL Developer preferences template: $template_file"
+    fi
+    mv "$tmp_file" "$preference_file"
+    log_info "Installed sdcli-autokit SQL Developer preferences: $preference_file"
+    return 0
+  fi
+
+  if ! grep -F '<!-- sdcli-autokit FileOutputOption v1 begin -->' "$preference_file" >/dev/null 2>&1 \
+      || ! grep -F '<!-- sdcli-autokit FileOutputOption v1 end -->' "$preference_file" >/dev/null 2>&1; then
+    log_warn "SQL Developer preferences are not managed by sdcli-autokit; left unchanged: $preference_file (set FileOutputOption manually, or back up and remove the file before rerunning)"
+    return 0
+  fi
+
+  tmp_file="$(mktemp "${preference_file}.XXXXXX")" || return 1
   if ! awk -v output_option="$output_option" '
-    BEGIN {
-      in_options = 0
-      inserted = 0
-    }
-    $0 ~ /<hash n="oracle\.dbtools\.migration\.workbench\.core\.preferences\.MigrationWorkbenchOptions">/ {
-      in_options = 1
-    }
-    in_options && $0 ~ /<value n="FileOutputOption"/ {
-      if (!inserted) {
-        match($0, /^[[:space:]]*/)
-        indent = substr($0, RSTART, RLENGTH)
-        print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-        inserted = 1
-      }
-      next
-    }
-    in_options && $0 ~ /<value n="DefaultRepository"/ && !inserted {
+    $0 ~ /^[[:space:]]*<!--[[:space:]]*sdcli-autokit FileOutputOption v1 begin[[:space:]]*-->[[:space:]]*$/ {
+      if (in_managed || begin_count > 0) exit 2
+      in_managed=1
+      begin_count++
       print
-      match($0, /^[[:space:]]*/)
-      indent = substr($0, RSTART, RLENGTH)
-      print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-      inserted = 1
       next
     }
-    in_options && $0 ~ /<list n="MigrationRepositories">/ && !inserted {
-      match($0, /^[[:space:]]*/)
-      indent = substr($0, RSTART, RLENGTH)
-      print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-      inserted = 1
+    $0 ~ /^[[:space:]]*<!--[[:space:]]*sdcli-autokit FileOutputOption v1 end[[:space:]]*-->[[:space:]]*$/ {
+      if (!in_managed || end_count > 0) exit 2
+      in_managed=0
+      end_count++
+      print
+      next
     }
-    $0 ~ /<\/ide:preferences>/ && !in_options && !inserted {
-      print "   <hash n=\"oracle.dbtools.migration.workbench.core.preferences.MigrationWorkbenchOptions\">"
+    in_managed && $0 ~ /^[[:space:]]*<value n="FileOutputOption" v="[0-9]+"\/>[[:space:]]*$/ {
+      if (replaced > 0) exit 2
       print "      <value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-      print "   </hash>"
-      inserted = 1
+      replaced++
+      next
     }
-    {
-      print
-    }
+    { print }
     END {
-      if (!inserted) {
-        exit 2
-      }
+      if (in_managed || begin_count != 1 || end_count != 1 || replaced != 1) exit 2
     }
   ' "$preference_file" > "$tmp_file"; then
     rm -f "$tmp_file"
-    log_warn "SQL Developer MigrationWorkbenchOptions block not found: $preference_file"
+    log_warn "SQL Developer preferences contain an invalid sdcli-autokit managed block; left unchanged: $preference_file"
     return 0
   fi
 
@@ -415,12 +431,80 @@ resolve_env_placeholder() {
 register_sensitive_value() {
   local value="$1"
   local existing
+  local inserted=false
+  local -a ordered=()
 
   [[ -n "$value" ]] || return 0
   for existing in "${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}"; do
     [[ "$existing" == "$value" ]] && return 0
   done
-  SENSITIVE_VALUES+=("$value")
+
+  # Replace longer literals first so an overlapping shorter secret cannot
+  # expose the unmatched suffix of a longer credential.
+  for existing in "${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}"; do
+    if [[ "$inserted" == "false" ]] && (( ${#value} > ${#existing} )); then
+      ordered+=("$value")
+      inserted=true
+    fi
+    ordered+=("$existing")
+  done
+  if [[ "$inserted" == "false" ]]; then
+    ordered+=("$value")
+  fi
+  SENSITIVE_VALUES=("${ordered[@]}")
+}
+
+register_environment_secrets() {
+  local env_name env_value
+
+  while IFS='=' read -r env_name env_value; do
+    case "$env_name" in
+      *PASSWORD*|*PASSWD*|*SECRET*|*TOKEN*)
+        register_sensitive_value "$env_value"
+        ;;
+    esac
+  done < <(env)
+}
+
+redact_text() {
+  local redacted="$1"
+  local secret
+
+  for secret in "${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}"; do
+    [[ -n "$secret" ]] || continue
+    redacted="${redacted//"$secret"/***}"
+  done
+  printf '%s' "$redacted"
+}
+
+validate_single_line_secret() {
+  local label="$1"
+  local value="$2"
+
+  register_sensitive_value "$value"
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    fail "$label contains an unsupported line-break character"
+  fi
+}
+
+register_sqlplus_secret() {
+  local label="$1"
+  local value="$2"
+
+  validate_single_line_secret "$label" "$value"
+  # SQL*Plus double-quotes embedded quotes in both CONNECT commands and DEFINE
+  # values. Register that exact transport literal as well as the raw value.
+  register_sensitive_value "${value//\"/\"\"}"
+}
+
+validate_sdcli_conn_details_password() {
+  local label="$1"
+  local value="$2"
+
+  validate_single_line_secret "$label" "$value"
+  if [[ "$value" == *','* || "$value" == *'/'* ]]; then
+    fail "$label contains an unsupported SDCLI -connDetails delimiter (comma or slash); use a password without those characters"
+  fi
 }
 
 get_secret_value() {
@@ -454,6 +538,16 @@ get_repository_connection_name() {
 
 to_lower() {
   echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+validate_supported_migration_pair() {
+  local source_type target_type
+  source_type="$(to_lower "$(get_required_value '.defaults.source.type' 'defaults.source.type')")"
+  target_type="$(to_lower "$(get_required_value '.defaults.target.type' 'defaults.target.type')")"
+
+  if [[ "$source_type" != "sqlserver" || "$target_type" != "oracle" ]]; then
+    fail "Unsupported migration pair: $source_type -> $target_type. Supported migration pair: sqlserver -> oracle"
+  fi
 }
 
 normalize_bcp_tls_mode() {
@@ -530,28 +624,15 @@ check_source_tcp_connectivity() {
 
 # --- SDCLI execution ---------------------------------------------------------
 redact_sdcli_output() {
-  local line secret env_name env_value
-  local secrets=("${SENSITIVE_VALUES[@]+"${SENSITIVE_VALUES[@]}"}")
+  local line
 
-  # Secret values are normally supplied through environment placeholders in
-  # config.yaml. Build this list at execution time because many of the config
-  # helpers are called through command substitution, which runs in a subshell.
-  # That way a password never has to be deliberately written to a log in order
-  # to be redacted from one.
-  while IFS='=' read -r env_name env_value; do
-    case "$env_name" in
-      *PASSWORD*|*PASSWD*|*SECRET*|*TOKEN*)
-        [[ -n "$env_value" ]] && secrets+=("$env_value")
-        ;;
-    esac
-  done < <(env)
+  # Config helpers often resolve placeholders through command substitutions,
+  # so collect conventionally named environment secrets again at the output
+  # boundary. Replacement remains literal and does not parse tool syntax.
+  register_environment_secrets
 
   while IFS= read -r line || [[ -n "$line" ]]; do
-    for secret in "${secrets[@]+"${secrets[@]}"}"; do
-      [[ -n "$secret" ]] || continue
-      line="${line//"$secret"/***}"
-    done
-    printf '%s\n' "$line"
+    printf '%s\n' "$(redact_text "$line")"
   done
 }
 
@@ -607,6 +688,9 @@ run_sdcli() {
       [[ "$action" == "convert" ]] && is_convert=true
     fi
   done
+  SDCLI_LAST_ACTION="$action"
+  SDCLI_LAST_SUCCESS_MARKER=false
+  register_environment_secrets
   printable="$(mask_sensitive "${cmd[@]}")"
 
   log_info "+ $printable"
@@ -644,6 +728,7 @@ run_sdcli() {
   # returning zero. Only an exact, understood init diagnostic is benign.
   if [[ -n "$action" ]] && grep -Eqi "^[[:space:]]*${action}[[:space:]]+completed successfully[[:space:]]*$" "$output_file"; then
     completed_successfully=true
+    SDCLI_LAST_SUCCESS_MARKER=true
   fi
   if grep -Eqi '^[[:space:]]*(error|fatal)[[:space:]:]' "$output_file"; then
     if ! sdcli_has_only_benign_diagnostics "$action" "$completed_successfully" "$output_file"; then
@@ -653,6 +738,9 @@ run_sdcli() {
   if $is_convert && grep -Eq '\[[[:space:]]*line[[:space:]]+[0-9]+:[0-9]+:' "$output_file"; then
     log_error "SQL Developer reported conversion diagnostics; review the object errors before generating deployment SQL"
     rc=1
+  fi
+  if [[ -n "${SDCLI_CAPTURE_OUTPUT_FILE:-}" ]]; then
+    cp "$output_file" "$SDCLI_CAPTURE_OUTPUT_FILE" || rc=1
   fi
   rm -f "$output_file"
   $errexit_enabled && set -e
@@ -848,6 +936,7 @@ validate_migration_config() {
 validate_config() {
   local require_migrations="${1:-true}"
 
+  validate_supported_migration_pair
   get_required_value '.defaults.driver_file' 'defaults.driver_file' >/dev/null
   get_required_value '.defaults.paths.project_root' 'defaults.paths.project_root' >/dev/null
   local bcp_tls_mode
@@ -880,6 +969,181 @@ validate_config() {
   done
 }
 
+validate_datatype_mapping_config() {
+  get_required_value '.migration_repository.conn' 'migration_repository.conn' >/dev/null
+  get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user' >/dev/null
+  validate_secret_placeholder '.migration_repository.repo_user.password' 'migration_repository.repo_user.password'
+}
+
+run_repository_sql_capture() {
+  local sql_file="$1"
+  local output_file="$2"
+  local repo_conn repo_user repo_password connect_password rc producer_rc
+  local errexit_enabled=false
+  local -a pipeline_status=()
+
+  repo_conn="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
+  repo_user="$(get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user')"
+  repo_password="$(get_secret_value '.migration_repository.repo_user.password' 'migration_repository.repo_user.password')"
+  register_sqlplus_secret "migration_repository.repo_user.password" "$repo_password"
+  connect_password="${repo_password//\"/\"\"}"
+
+  [[ "$-" == *e* ]] && errexit_enabled=true
+  set +e
+  {
+    printf 'connect %s/"%s"@%s\n' "$repo_user" "$connect_password" "$repo_conn"
+    cat "$sql_file"
+  } | sqlplus -S -L /nolog > "$output_file" 2>&1
+  pipeline_status=("${PIPESTATUS[@]}")
+  producer_rc=${pipeline_status[0]}
+  rc=${pipeline_status[1]}
+  $errexit_enabled && set -e
+
+  if [[ $producer_rc -ne 0 || $rc -ne 0 ]]; then
+    redact_sdcli_output < "$output_file" >&2
+    [[ $producer_rc -eq 0 ]] || return "$producer_rc"
+    return "$rc"
+  fi
+  return 0
+}
+
+datatype_mapping_preflight() {
+  local temp_dir="$1"
+  local query_file="$temp_dir/preflight.sql"
+  local raw_file="$temp_dir/preflight.out"
+  local missing_count
+
+  cat > "$query_file" <<'SQL'
+WHENEVER OSERROR EXIT FAILURE;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 VERIFY OFF ECHO OFF TERMOUT ON TRIMSPOOL ON;
+SET DEFINE OFF
+WITH required_columns (table_name, column_name) AS (
+  SELECT 'MD_PROJECTS', 'ID' FROM dual UNION ALL
+  SELECT 'MD_PROJECTS', 'PROJECT_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_MAP', 'ID' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_MAP', 'PROJECT_ID_FK' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_MAP', 'MAP_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'ID' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'MAP_ID_FK' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'SOURCE_DATA_TYPE_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'SOURCE_PRECISION' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'SOURCE_SCALE' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'TARGET_DATA_TYPE_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'TARGET_PRECISION' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'TARGET_SCALE' FROM dual
+)
+SELECT 'SDCLI_DATATYPE_PRECHECK' || CHR(9) || COUNT(*)
+FROM required_columns required
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM user_tab_columns actual
+  WHERE actual.table_name = required.table_name
+    AND actual.column_name = required.column_name
+);
+EXIT;
+SQL
+
+  if ! run_repository_sql_capture "$query_file" "$raw_file"; then
+    cleanup_datatype_mapping_temp_dirs
+    fail "Failed to inspect the SQL Developer repository datatype mapping schema"
+  fi
+
+  if ! missing_count="$(awk -F '\t' '
+    /^[[:space:]]*$/ { next }
+    $1 != "SDCLI_DATATYPE_PRECHECK" || NF != 2 || $2 !~ /^[0-9]+$/ { invalid=1; next }
+    { rows++; value=$2 }
+    END {
+      if (invalid || rows != 1) exit 1
+      print value
+    }
+  ' "$raw_file")"; then
+    redact_sdcli_output < "$raw_file" >&2
+    cleanup_datatype_mapping_temp_dirs
+    fail "Unsupported SQL Developer repository schema: datatype mapping preflight returned malformed evidence"
+  fi
+
+  if (( missing_count != 0 )); then
+    cleanup_datatype_mapping_temp_dirs
+    fail "Unsupported SQL Developer repository schema: $missing_count required datatype mapping table/column definition(s) are missing"
+  fi
+}
+
+show_datatype_mapping() {
+  local project_name="${1:-}"
+  local project_filter="WHERE 1 = 1" escaped_project=""
+  local temp_dir query_file raw_file rows_file
+
+  if [[ "$project_name" == *$'\n'* || "$project_name" == *$'\r'* ]]; then
+    fail "Migration project name contains an unsupported line-break character"
+  fi
+
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/sdcli_datatype_mapping_XXXXXX")" || return 1
+  register_datatype_mapping_temp_dir "$temp_dir"
+  query_file="$temp_dir/query.sql"
+  raw_file="$temp_dir/query.out"
+  rows_file="$temp_dir/rows.tsv"
+
+  datatype_mapping_preflight "$temp_dir"
+
+  if [[ -n "$project_name" ]]; then
+    escaped_project="${project_name//\'/\'\'}"
+    project_filter="WHERE p.project_name = '${escaped_project}'"
+  fi
+
+  cat > "$query_file" <<SQL
+WHENEVER OSERROR EXIT FAILURE;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 VERIFY OFF ECHO OFF TERMOUT ON TRIMSPOOL ON;
+SET DEFINE OFF
+SELECT 'SDCLI_DATATYPE_MAPPING' || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(p.project_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(m.map_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(r.source_data_type_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       NVL(TO_CHAR(r.source_precision), '') || CHR(9) ||
+       NVL(TO_CHAR(r.source_scale), '') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(r.target_data_type_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       NVL(TO_CHAR(r.target_precision), '') || CHR(9) ||
+       NVL(TO_CHAR(r.target_scale), '')
+FROM md_projects p
+JOIN migr_datatype_transform_map m ON m.project_id_fk = p.id
+JOIN migr_datatype_transform_rule r ON r.map_id_fk = m.id
+${project_filter}
+ORDER BY p.project_name, m.map_name, r.source_data_type_name,
+         r.source_precision NULLS FIRST, r.source_scale NULLS FIRST,
+         r.target_data_type_name, r.target_precision NULLS FIRST,
+         r.target_scale NULLS FIRST, r.id;
+SELECT 'SDCLI_DATATYPE_COMPLETE' FROM dual;
+EXIT;
+SQL
+
+  if ! run_repository_sql_capture "$query_file" "$raw_file"; then
+    cleanup_datatype_mapping_temp_dirs
+    fail "Failed to query SQL Developer repository datatype mappings"
+  fi
+
+  if ! awk -F '\t' -v OFS='\t' '
+    /^[[:space:]]*$/ { next }
+    $1 == "SDCLI_DATATYPE_COMPLETE" && NF == 1 { completed++; next }
+    $1 != "SDCLI_DATATYPE_MAPPING" || NF != 9 { invalid=1; next }
+    $2 == "" || $3 == "" || $4 == "" || $7 == "" { invalid=1; next }
+    {
+      for (i=2; i<=9; i++) printf "%s%s", $i, (i == 9 ? ORS : OFS)
+    }
+    END { if (invalid || completed != 1) exit 1 }
+  ' "$raw_file" > "$rows_file"; then
+    redact_sdcli_output < "$raw_file" >&2
+    cleanup_datatype_mapping_temp_dirs
+    fail "SQL Developer repository datatype mapping query returned malformed evidence"
+  fi
+
+  printf 'project\tmap_name\tsource_type\tsource_precision\tsource_scale\ttarget_type\ttarget_precision\ttarget_scale\n'
+  if [[ -s "$rows_file" ]]; then
+    LC_ALL=C sort -t $'\t' -k1,1 -k2,2 -k3,3 -k4,4 -k5,5 -k6,6 -k7,7 -k8,8 "$rows_file"
+  fi
+  cleanup_datatype_mapping_temp_dirs
+}
+
 setup_repository() {
   local driver_file
   driver_file="$(get_required_value '.defaults.driver_file' 'defaults.driver_file')"
@@ -892,11 +1156,13 @@ setup_repository() {
   repo_conn="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
   repo_user="$(get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user')"
   repo_password="$(get_secret_value '.migration_repository.repo_user.password' 'migration_repository.repo_user.password')"
+  validate_sdcli_conn_details_password "migration_repository.repo_user.password" "$repo_password"
 
   local super_name super_user super_password
   super_name="$(get_required_value '.migration_repository.super_user.connection_name' 'migration_repository.super_user.connection_name')"
   super_user="$(get_required_value '.migration_repository.super_user.user' 'migration_repository.super_user.user')"
   super_password="$(get_secret_value '.migration_repository.super_user.password' 'migration_repository.super_user.password')"
+  validate_sdcli_conn_details_password "migration_repository.super_user.password" "$super_password"
 
   local init_conn_details
   init_conn_details="${super_name}:oracle:${super_user}/${super_password}@${repo_conn},${repo_name}:mkrepouser:${repo_user}/${repo_password}:${super_name}"
@@ -1290,657 +1556,8 @@ is_sqlldr_loader_script() {
   grep -Eiq '(^|[[:space:]])sqlldr([[:space:]]|$)' "$script"
 }
 
-# --- SQL*Plus deploy helpers -------------------------------------------------
-prepare_role_scripts() {
-  local output_dir="$1"
-  local source_file="$output_dir/role.sql"
-  local setup_dir="$AUTOKIT_DIR/deploy"
-  local cleanup_dir="$AUTOKIT_DIR/cleanup"
-  local setup_file="$setup_dir/role_setup.sql"
-  local cleanup_file="$cleanup_dir/role_cleanup.sql"
-  local drop_count
 
-  [[ -f "$source_file" ]] || return 0
-  mkdir -p "$setup_dir" "$cleanup_dir"
-
-  # SQL Developer emits role setup and teardown statements in the same file.
-  # Keep the generated source untouched, make deploy non-destructive, and use
-  # an explicit cleanup command for only the extracted DROP ROLE statements.
-  # This is intentionally a narrow parser for SQL Developer role.sql, whose
-  # generated contract is one role statement per line. It is comment-aware so
-  # examples inside -- or /* ... */ comments cannot become executable cleanup.
-  # Fail closed rather than allowing an unrecognised active DROP into deploy.
-  drop_count="$(awk -v setup_file="$setup_file" -v cleanup_file="$cleanup_file" '
-    function fail_split(message) {
-      print message > "/dev/stderr"
-      failed = 1
-      exit 2
-    }
-    function uncomment_sql(line,    result, i, ch, next_ch, in_single_quote, in_double_quote) {
-      result = ""
-      in_single_quote = 0
-      in_double_quote = 0
-
-      for (i = 1; i <= length(line); i++) {
-        ch = substr(line, i, 1)
-        next_ch = substr(line, i + 1, 1)
-
-        if (in_block_comment) {
-          if (ch == "*" && next_ch == "/") {
-            in_block_comment = 0
-            if (result !~ /[[:space:]]$/) result = result " "
-            i++
-          }
-          continue
-        }
-
-        if (!in_single_quote && !in_double_quote && ch == "-" && next_ch == "-") {
-          break
-        }
-        if (!in_single_quote && !in_double_quote && ch == "/" && next_ch == "*") {
-          in_block_comment = 1
-          if (result !~ /[[:space:]]$/) result = result " "
-          i++
-          continue
-        }
-
-        result = result ch
-        if (ch == "\047" && !in_double_quote) {
-          if (in_single_quote && next_ch == "\047") {
-            result = result next_ch
-            i++
-          } else {
-            in_single_quote = !in_single_quote
-          }
-        } else if (ch == "\"" && !in_single_quote) {
-          if (in_double_quote && next_ch == "\"") {
-            result = result next_ch
-            i++
-          } else {
-            in_double_quote = !in_double_quote
-          }
-        }
-      }
-
-      return result
-    }
-    BEGIN {
-      print "-- Generated by migrate.sh from role.sql; deploy setup only." > setup_file
-      print "-- Generated by migrate.sh from role.sql; explicit role cleanup only." > cleanup_file
-      drop_count = 0
-      failed = 0
-      in_block_comment = 0
-    }
-    {
-      original = $0
-      statement = uncomment_sql(original)
-      sub(/^[[:space:]]+/, "", statement)
-      sub(/[[:space:]]+$/, "", statement)
-
-      if (statement ~ /^[Dd][Rr][Oo][Pp][[:space:]]+[Rr][Oo][Ll][Ee]([[:space:]]|$)/) {
-        if (statement !~ /;[[:space:]]*$/) {
-          fail_split("Unsupported generated DROP ROLE statement in " FILENAME ": " original)
-        }
-        sub(/;[[:space:]]*$/, "", statement)
-        if (statement ~ /^[Dd][Rr][Oo][Pp][[:space:]]+[Rr][Oo][Ll][Ee][[:space:]]*$/) {
-          fail_split("Generated DROP ROLE statement has no role name in " FILENAME)
-        }
-
-        # A cleanup may follow a partially completed deployment. ORA-01919 is
-        # expected in that case; other errors remain fatal in the SQL*Plus
-        # wrapper. Quoting the complete DDL keeps quoted role names supported.
-        escaped = statement
-        gsub(/\047/, "\047\047", escaped)
-        print "DECLARE" > cleanup_file
-        print "  role_missing EXCEPTION;" > cleanup_file
-        print "  PRAGMA EXCEPTION_INIT(role_missing, -1919);" > cleanup_file
-        print "BEGIN" > cleanup_file
-        print "  EXECUTE IMMEDIATE \047" escaped "\047;" > cleanup_file
-        print "EXCEPTION" > cleanup_file
-        print "  WHEN role_missing THEN NULL;" > cleanup_file
-        print "END;" > cleanup_file
-        print "/" > cleanup_file
-        drop_count++
-        next
-      }
-
-      if (statement ~ /^[Dd][Rr][Oo][Pp]([[:space:]]|$)/) {
-        fail_split("Unsupported generated DROP statement in " FILENAME ": " original)
-      }
-
-      print original > setup_file
-    }
-    END {
-      if (!failed) print drop_count
-    }
-  ' "$source_file")" || fail "Could not separate generated role setup and cleanup statements: $source_file"
-
-  [[ "$drop_count" =~ ^[0-9]+$ ]] || fail "Could not determine generated role cleanup statement count: $source_file"
-  if (( drop_count == 0 )); then
-    rm -f "$cleanup_file"
-  fi
-}
-
-role_setup_dir() {
-  echo "$AUTOKIT_DIR/deploy"
-}
-
-role_cleanup_dir() {
-  echo "$AUTOKIT_DIR/cleanup"
-}
-
-run_sqlplus_file() {
-  local base_dir="$1"
-  local sqlfile="$2"
-  local target_conn="$3"
-  local target_user="$4"
-  local target_password="$5"
-  local schema_password="${6:-}"
-  local prompt_count="${7:-0}"
-  local current_schema="${8:-}"
-  local execution_dir="${9:-$base_dir}"
-
-  local full_path="$base_dir/$sqlfile"
-  [[ -f "$full_path" ]] || return 0
-
-  log_info "Executing SQL*Plus script: $full_path"
-  if $DRY_RUN; then
-    log_info "+ sqlplus -S -L /nolog (connect ${target_user}/***@${target_conn}; @$full_path)"
-    return 0
-  fi
-
-  local wrapper_file password_file password_backup rc errexit_enabled=false script_reference="$sqlfile"
-  if [[ -n "${9:-}" ]]; then
-    script_reference="$full_path"
-  fi
-  wrapper_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlplus_XXXXXX.sql")" || return 1
-  {
-    printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE;'
-    printf '%s\n' 'WHENEVER SQLERROR EXIT SQL.SQLCODE;'
-    if (( prompt_count > 0 )); then
-      printf '%s\n' '@"passworddefinition.sql"'
-    fi
-    if [[ -n "$current_schema" ]]; then
-      printf 'alter session set current_schema = %s;\n' "$current_schema"
-      printf '%s\n' 'set define off'
-    fi
-    printf '@"%s"\n' "$script_reference"
-    if [[ -n "$current_schema" ]]; then
-      printf '%s\n' 'set define on'
-    fi
-    printf '%s\n' 'EXIT;'
-  } > "$wrapper_file"
-
-  if (( prompt_count > 0 )); then
-    password_file="$base_dir/passworddefinition.sql"
-    password_backup="$(install_sqlplus_password_defines "$password_file" "$schema_password")" || {
-      rm -f "$wrapper_file"
-      return 1
-    }
-  fi
-
-  [[ "$-" == *e* ]] && errexit_enabled=true
-  set +e
-  (
-    local connect_password
-    connect_password="${target_password//\"/\"\"}"
-    cd "$execution_dir"
-    {
-      printf 'connect %s/"%s"@%s\n' "$target_user" "$connect_password" "$target_conn"
-      printf '@"%s"\n' "$wrapper_file"
-    } | sqlplus -S -L /nolog
-  ) 2>&1 | filter_sqlplus_deploy_output | tee -a "$RUN_LOG_FILE"
-  rc=${PIPESTATUS[0]}
-  $errexit_enabled && set -e
-
-  if [[ -n "${password_backup:-}" ]]; then
-    rm -f "$password_file"
-    mv "$password_backup" "$password_file"
-  fi
-  rm -f "$wrapper_file"
-  return "$rc"
-}
-
-install_sqlplus_password_defines() {
-  local password_file="$1"
-  local schema_password="$2"
-  local backup_file var escaped_password
-
-  [[ -f "$password_file" ]] || fail "SQL*Plus password definition file not found: $password_file"
-
-  backup_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_passworddefinition_XXXXXX.sql")" || return 1
-  cp "$password_file" "$backup_file" || {
-    rm -f "$backup_file"
-    return 1
-  }
-
-  escaped_password="${schema_password//\"/\"\"}"
-  {
-    echo "-- Generated by migrate.sh for this deploy run; original restored after SQL*Plus exits."
-    while IFS= read -r var; do
-      printf 'DEFINE %s = "%s"\n' "$var" "$escaped_password"
-    done < <(awk 'toupper($1) == "ACCEPT" { print $2 }' "$backup_file")
-  } > "$password_file" || {
-    mv "$backup_file" "$password_file"
-    return 1
-  }
-
-  echo "$backup_file"
-}
-
-filter_sqlplus_deploy_output() {
-  local line password_regex
-  password_regex='^(.*[Ii][Dd][Ee][Nn][Tt][Ii][Ff][Ii][Ee][Dd][[:space:]]+[Bb][Yy][[:space:]]+)[^[:space:];]+(.*)$'
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ $password_regex ]]; then
-      line="${BASH_REMATCH[1]}***${BASH_REMATCH[2]}"
-    fi
-    printf '%s\n' "$line"
-  done
-}
-
-count_sqlplus_accept_prompts() {
-  local password_file="$1"
-  local count
-  [[ -f "$password_file" ]] || {
-    echo 0
-    return 0
-  }
-  count="$(grep -Eci '^[[:space:]]*ACCEPT[[:space:]]+' "$password_file" 2>/dev/null || true)"
-  echo "${count:-0}"
-}
-
-deploy_manifest_file() {
-  echo "$AUTOKIT_DIR/deploy_manifest.tsv"
-}
-
-ensure_deploy_manifest() {
-  local manifest
-  manifest="$(deploy_manifest_file)"
-  mkdir -p "$(dirname "$manifest")"
-  [[ -f "$manifest" ]] || printf 'phase\tpath\tstatus\tnote\n' > "$manifest"
-}
-
-init_deploy_manifest() {
-  local manifest
-  manifest="$(deploy_manifest_file)"
-  mkdir -p "$(dirname "$manifest")"
-  printf 'phase\tpath\tstatus\tnote\n' > "$manifest"
-}
-
-record_deploy_manifest() {
-  local phase="$1"
-  local path="$2"
-  local status="$3"
-  local note="${4:-}"
-  ensure_deploy_manifest
-  [[ -z "${RUN_DIR:-}" || "$path" != "$RUN_DIR/"* ]] || path="${path#$RUN_DIR/}"
-  printf '%s\t%s\t%s\t%s\n' \
-    "$(sanitize_status_field "$phase")" \
-    "$(sanitize_status_field "$path")" \
-    "$(sanitize_status_field "$status")" \
-    "$(sanitize_status_field "$note")" >> "$(deploy_manifest_file)"
-}
-
-schema_dirs() {
-  local output_dir="$1"
-  find "$output_dir" -mindepth 2 -maxdepth 2 -type f -name 'user.sql' 2>/dev/null | while IFS= read -r user_sql; do
-    dirname "$user_sql"
-  done | sort
-}
-
-generated_sql_files() {
-  local output_dir="$1"
-
-  # SQL Developer versions can emit either a per-schema hierarchy or a set of
-  # generated scripts below gen/. Only use this fallback when the hierarchy is
-  # absent; it avoids applying the same DDL twice.
-  find "$output_dir/gen" -type f -name '*.sql' ! -name 'passworddefinition.sql' 2>/dev/null | sort
-}
-
-master_include_paths() {
-  local master_file="$1"
-  awk '
-    /^[[:space:]]*@@[[:space:]]*/ {
-      line=$0
-      sub(/^[[:space:]]*@@[[:space:]]*/, "", line)
-      if (substr(line, 1, 1) == "\"") {
-        line=substr(line, 2)
-        sub(/".*/, "", line)
-      } else {
-        sub(/[[:space:]].*/, "", line)
-      }
-      if (line != "") print line
-    }
-  ' "$master_file"
-}
-
-validate_relative_sql_path() {
-  local output_dir="$1"
-  local rel_path="$2"
-
-  [[ -n "$rel_path" && "$rel_path" != /* ]] || fail "Unsafe generated SQL include path: $rel_path"
-  case "/$rel_path/" in
-    */../*|*/./*) fail "Unsafe generated SQL include path: $rel_path" ;;
-  esac
-  [[ -f "$output_dir/$rel_path" ]] || fail "Generated SQL include does not exist: $output_dir/$rel_path"
-}
-
-is_predata_sql() {
-  local basename_sql
-  basename_sql="$(basename "$1")"
-  case "$basename_sql" in
-    types.sql|sequences.sql|tables.sql) return 0 ;;
-  esac
-  return 1
-}
-
-schema_master_includes() {
-  local output_dir="$1"
-  local schema_dir="$2"
-  local master_file="$schema_dir/master.sql"
-  local include_path seen_file
-
-  [[ -f "$master_file" ]] || fail "Generated schema master script is missing: $master_file"
-  seen_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_master_includes_XXXXXX")" || return 1
-  while IFS= read -r include_path; do
-    validate_relative_sql_path "$output_dir" "$include_path"
-    if grep -Fx "$include_path" "$seen_file" >/dev/null 2>&1; then
-      rm -f "$seen_file"
-      fail "Generated schema master contains a duplicate include: $include_path"
-    fi
-    printf '%s\n' "$include_path" >> "$seen_file"
-    printf '%s\n' "$include_path"
-  done < <(master_include_paths "$master_file")
-  rm -f "$seen_file"
-}
-
-schema_post_files() {
-  local output_dir="$1"
-  local schema_dir="$2"
-  local include_path foreign_keys_rel
-
-  while IFS= read -r include_path; do
-    is_predata_sql "$include_path" || printf '%s\n' "$include_path"
-  done < <(schema_master_includes "$output_dir" "$schema_dir")
-
-  # SQL Developer may emit foreignkeys.sql outside master.sql. Execute it only
-  # when it contains actual constraint DDL; empty wrapper files are ignored.
-  foreign_keys_rel="${schema_dir#$output_dir/}/foreignkeys.sql"
-  if [[ -f "$output_dir/$foreign_keys_rel" ]] \
-      && ! schema_master_includes "$output_dir" "$schema_dir" | grep -Fx "$foreign_keys_rel" >/dev/null 2>&1 \
-      && grep -Eiq '^[[:space:]]*ALTER[[:space:]]+TABLE.+(ADD|ENABLE)[[:space:]]+.*CONSTRAINT' "$output_dir/$foreign_keys_rel"; then
-    printf '%s\n' "$foreign_keys_rel"
-  fi
-}
-
-schema_file_is_covered() {
-  local output_dir="$1"
-  local schema_dir="$2"
-  local rel_path="$3"
-  local schema_rel rest group include_path
-  schema_rel="${schema_dir#$output_dir/}"
-
-  case "$rel_path" in
-    "$schema_rel/user.sql"|"$schema_rel/master.sql"|"$schema_rel/post.sql"|\
-    "$schema_rel/dropobjects.sql"|"$schema_rel/dropobjecttypes.sql"|\
-    "$schema_rel/disable.sql"|"$schema_rel/enable.sql"|\
-    "$schema_rel/reportallstatus.sql"|"$schema_rel/reportinvalidstatus.sql"|\
-    "$schema_rel/foreignkeys.sql") return 0 ;;
-    "$schema_rel/post/"*) [[ -f "$schema_dir/post.sql" ]] && return 0 ;;
-  esac
-
-  while IFS= read -r include_path; do
-    [[ "$rel_path" == "$include_path" ]] && return 0
-  done < <(schema_master_includes "$output_dir" "$schema_dir")
-
-  rest="${rel_path#"$schema_rel/"}"
-  if [[ "$rest" == */* ]]; then
-    group="${rest%%/*}"
-    while IFS= read -r include_path; do
-      [[ "$include_path" == "$schema_rel/$group.sql" ]] && return 0
-    done < <(schema_master_includes "$output_dir" "$schema_dir")
-  fi
-  return 1
-}
-
-validate_generated_sql_inventory() {
-  local output_dir="$1"
-  local found_schema=false schema_dir sql_file rel_path generated_count
-
-  while IFS= read -r sql_file; do
-    case "$(basename "$sql_file")" in
-      role.sql|passworddefinition.sql|dropallschemas.sql|reportallstatus.sql) ;;
-      *) fail "Generated root SQL file is not part of the supported deployment plan: $sql_file" ;;
-    esac
-  done < <(find "$output_dir" -mindepth 1 -maxdepth 1 -type f -name '*.sql' | sort)
-
-  while IFS= read -r schema_dir; do
-    found_schema=true
-    schema_master_includes "$output_dir" "$schema_dir" >/dev/null
-    while IFS= read -r sql_file; do
-      rel_path="${sql_file#$output_dir/}"
-      schema_file_is_covered "$output_dir" "$schema_dir" "$rel_path" \
-        || fail "Generated SQL file is not accounted for by the schema master plan: $sql_file"
-    done < <(find "$schema_dir" -type f -name '*.sql' | sort)
-  done < <(schema_dirs "$output_dir")
-
-  if $found_schema; then
-    return 0
-  fi
-
-  generated_count="$(generated_sql_files "$output_dir" | awk 'NF {count++} END {print count+0}')"
-  [[ "$generated_count" == "1" ]] \
-    || fail "Expected exactly one generated SQL script when no schema hierarchy exists; found $generated_count under $output_dir/gen"
-}
-
-record_root_sql_inventory() {
-  local output_dir="$1"
-  local sql_file
-  while IFS= read -r sql_file; do
-    case "$(basename "$sql_file")" in
-      role.sql) ;;
-      passworddefinition.sql)
-        record_deploy_manifest "plan" "$sql_file" "control" "temporary schema password definitions"
-        ;;
-      dropallschemas.sql)
-        record_deploy_manifest "plan" "$sql_file" "excluded" "destructive cleanup script"
-        ;;
-      reportallstatus.sql)
-        record_deploy_manifest "plan" "$sql_file" "excluded" "manual status utility"
-        ;;
-    esac
-  done < <(find "$output_dir" -mindepth 1 -maxdepth 1 -type f -name '*.sql' | sort)
-}
-
-record_schema_inventory() {
-  local output_dir="$1"
-  local schema_dir="$2"
-  local schema_rel sql_file rel_path include_path
-  schema_rel="${schema_dir#$output_dir/}"
-
-  record_deploy_manifest "plan" "$schema_dir/master.sql" "control" "ordered include source"
-  while IFS= read -r sql_file; do
-    rel_path="${sql_file#$output_dir/}"
-    case "$rel_path" in
-      "$schema_rel/user.sql"|"$schema_rel/master.sql") ;;
-      "$schema_rel/post.sql") ;;
-      "$schema_rel/post/"*) record_deploy_manifest "plan" "$sql_file" "covered" "executed by post.sql" ;;
-      "$schema_rel/dropobjects.sql"|"$schema_rel/dropobjecttypes.sql")
-        record_deploy_manifest "plan" "$sql_file" "excluded" "destructive cleanup script"
-        ;;
-      "$schema_rel/disable.sql"|"$schema_rel/enable.sql")
-        record_deploy_manifest "plan" "$sql_file" "excluded" "not needed without generated disable step"
-        ;;
-      "$schema_rel/reportallstatus.sql"|"$schema_rel/reportinvalidstatus.sql")
-        record_deploy_manifest "plan" "$sql_file" "covered" "status utility or post.sql include"
-        ;;
-      "$schema_rel/foreignkeys.sql")
-        if schema_post_files "$output_dir" "$schema_dir" | grep -Fx "$rel_path" >/dev/null 2>&1; then
-          :
-        else
-          record_deploy_manifest "plan" "$sql_file" "excluded" "no constraint DDL and not referenced by master.sql"
-        fi
-        ;;
-      *)
-        # Direct master includes are recorded when executed. Nested generated
-        # files are covered by their master-listed group script.
-        if [[ "$rel_path" == "$schema_rel/"*/* ]]; then
-          record_deploy_manifest "plan" "$sql_file" "covered" "executed by master-listed group script"
-        fi
-        ;;
-    esac
-  done < <(find "$schema_dir" -type f -name '*.sql' | sort)
-}
-
-run_deploy() {
-  local idx="$1"
-  local output_dir="$2"
-
-  local target_conn target_user target_password prompt_count schema_password=""
-  target_conn="$(migration_required_value "$idx" target conn)"
-  target_user="$(migration_required_value "$idx" target user)"
-  target_password="$(migration_secret_value "$idx" target password)"
-  prompt_count="$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql")"
-  if (( prompt_count > 0 )); then
-    schema_password="$(migration_secret_value "$idx" target default_schema_password)"
-  fi
-
-  log_info "Deploying generated Oracle schema for data load"
-  log_info "Target: $target_user@$target_conn"
-  if (( prompt_count > 0 )); then
-    log_info "Deploy schema password prompts: $prompt_count from migrations[$idx].target.default_schema_password"
-  fi
-
-  if $DRY_RUN; then
-    log_info "[DRY-RUN] deploy root: $output_dir"
-    log_info "[DRY-RUN] derive and execute setup-only role script from: $output_dir/role.sql"
-    log_info "[DRY-RUN] deploy script glob: $output_dir/*/user.sql"
-    log_info "[DRY-RUN] deploy pre-data scripts: master-listed types.sql, sequences.sql, and tables.sql"
-    log_info "[DRY-RUN] deploy fallback: exactly one SQL file under $output_dir/gen"
-    log_info "[DRY-RUN] deploy manifest: $(deploy_manifest_file)"
-    return 0
-  fi
-
-  validate_generated_sql_inventory "$output_dir"
-  if [[ -f "$output_dir/role.sql" ]]; then
-    prepare_role_scripts "$output_dir"
-  fi
-  init_deploy_manifest
-  record_root_sql_inventory "$output_dir"
-
-  if [[ -f "$output_dir/role.sql" ]]; then
-    run_sqlplus_file "$(role_setup_dir)" "role_setup.sql" "$target_conn" "$target_user" "$target_password" "" 0 "" "$output_dir" || fail "Generated role setup failed"
-    record_deploy_manifest "deploy" "$(role_setup_dir)/role_setup.sql" "executed" "derived from sdcli/role.sql; DROP ROLE is available through --cleanup"
-  fi
-
-  local found_any=false schema_dir schema_name rel_user_sql include_path
-  while IFS= read -r schema_dir; do
-    found_any=true
-    record_schema_inventory "$output_dir" "$schema_dir"
-    rel_user_sql="${schema_dir#$output_dir/}/user.sql"
-    run_sqlplus_file "$output_dir" "$rel_user_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count" || fail "user.sql failed in $schema_dir"
-    record_deploy_manifest "deploy" "$schema_dir/user.sql" "executed"
-  done < <(schema_dirs "$output_dir")
-
-  local generated_sql rel_generated_sql
-  if $found_any; then
-    while IFS= read -r schema_dir; do
-      schema_name="$(basename "$schema_dir")"
-      while IFS= read -r include_path; do
-        is_predata_sql "$include_path" || continue
-        run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" || fail "Pre-data generated SQL failed: $include_path"
-        record_deploy_manifest "deploy" "$output_dir/$include_path" "executed" "pre-data master include"
-      done < <(schema_master_includes "$output_dir" "$schema_dir")
-    done < <(schema_dirs "$output_dir")
-
-    while IFS= read -r generated_sql; do
-      record_deploy_manifest "plan" "$generated_sql" "excluded" "duplicate monolithic output; schema hierarchy selected"
-    done < <(generated_sql_files "$output_dir")
-  else
-    generated_sql="$(generated_sql_files "$output_dir")"
-
-    log_info "No per-schema user.sql files found; deploying the single generated SQL output"
-    rel_generated_sql="${generated_sql#$output_dir/}"
-    run_sqlplus_file "$output_dir" "$rel_generated_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count" || fail "generated SQL failed: $generated_sql"
-    record_deploy_manifest "deploy" "$generated_sql" "executed" "single generated fallback"
-  fi
-
-  log_info "Deploy manifest: $(deploy_manifest_file)"
-}
-
-run_cleanup() {
-  local idx="$1"
-  local output_dir="$2"
-  local target_conn target_user target_password cleanup_dir cleanup_file
-
-  [[ -f "$output_dir/role.sql" ]] || fail "Generated role.sql not found for cleanup: $output_dir/role.sql"
-
-  target_conn="$(migration_required_value "$idx" target conn)"
-  target_user="$(migration_required_value "$idx" target user)"
-  target_password="$(migration_secret_value "$idx" target password)"
-
-  prepare_role_scripts "$output_dir"
-  cleanup_dir="$(role_cleanup_dir)"
-  cleanup_file="$cleanup_dir/role_cleanup.sql"
-
-  if [[ ! -f "$cleanup_file" ]]; then
-    log_info "No DROP ROLE statements found in generated role.sql; cleanup has nothing to run"
-    return 0
-  fi
-
-  log_warn "Running explicit generated role cleanup; this removes only migration roles from role.sql"
-  log_info "Target: $target_user@$target_conn"
-  if $DRY_RUN; then
-    log_info "[DRY-RUN] role cleanup script: $cleanup_file"
-    return 0
-  fi
-
-  ensure_deploy_manifest
-  run_sqlplus_file "$cleanup_dir" "role_cleanup.sql" "$target_conn" "$target_user" "$target_password" \
-    || fail "Generated role cleanup failed"
-  record_deploy_manifest "cleanup" "$cleanup_file" "executed" "explicit role cleanup"
-  log_info "Role cleanup manifest: $(deploy_manifest_file)"
-}
-
-run_postdeploy() {
-  local idx="$1"
-  local output_dir="$2"
-
-  local target_conn target_user target_password
-  target_conn="$(migration_required_value "$idx" target conn)"
-  target_user="$(migration_required_value "$idx" target user)"
-  target_password="$(migration_secret_value "$idx" target password)"
-
-  log_info "Running postdeploy Oracle scripts"
-  log_info "Target: $target_user@$target_conn"
-
-  if $DRY_RUN; then
-    log_info "[DRY-RUN] postdeploy root: $output_dir"
-    log_info "[DRY-RUN] postdeploy scripts: ordered non-predata master.sql includes, then post.sql; stop at first failure"
-    log_info "[DRY-RUN] deploy manifest: $(deploy_manifest_file)"
-    return 0
-  fi
-
-  ensure_deploy_manifest
-
-  local schema_dir schema_name rel_script include_path
-  while IFS= read -r schema_dir; do
-    schema_name="$(basename "$schema_dir")"
-    while IFS= read -r include_path; do
-      run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" || fail "Post-data generated SQL failed: $include_path"
-      record_deploy_manifest "postdeploy" "$output_dir/$include_path" "executed" "post-data master include"
-    done < <(schema_post_files "$output_dir" "$schema_dir")
-
-    if [[ -f "$schema_dir/post.sql" ]]; then
-      rel_script="${schema_dir#$output_dir/}/post.sql"
-      run_sqlplus_file "$output_dir" "$rel_script" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" || fail "post.sql failed in $schema_dir"
-      record_deploy_manifest "postdeploy" "$schema_dir/post.sql" "executed" "post-load compile and status script"
-    fi
-  done < <(schema_dirs "$output_dir")
-
-  log_info "Deploy manifest: $(deploy_manifest_file)"
-}
+source "$SCRIPT_DIR/lib/sqlplus_deploy.sh"
 
 VALIDATION_LAST_COUNT=0
 
@@ -1951,10 +1568,12 @@ is_ignored_validation_diagnostic() {
 
 validate_run_log() {
   local log_file="$1"
-  local count=0 ignored=0 match line_no line
+  local start_line="${2:-0}"
+  local count=0 ignored=0 historical=0 match line_no line
   local matches
 
   VALIDATION_LAST_COUNT=0
+  [[ "$start_line" =~ ^[0-9]+$ ]] || start_line=0
   if [[ ! -f "$log_file" ]]; then
     log_warn "Run log not found: $log_file"
     return 0
@@ -1965,6 +1584,10 @@ validate_run_log() {
     [[ -n "$match" ]] || continue
     line_no="${match%%:*}"
     line="${match#*:}"
+    if (( line_no <= start_line )); then
+      historical=$((historical + 1))
+      continue
+    fi
     if [[ "$line" == *"Run log issue:"* || "$line" == *"Run log diagnostics:"* \
         || "$line" == *"Validation summary:"* || "$line" == *"Migration validation failed with"* \
         || "$line" == *"Validate failed for migration"* ]]; then
@@ -1978,7 +1601,7 @@ validate_run_log() {
     log_warn "Run log issue: $log_file:$line_no: $line"
   done <<< "$matches"
 
-  log_info "Run log diagnostics: issues=$count ignored=$ignored"
+  log_info "Run log diagnostics: issues=$count ignored=$ignored historical=$historical"
   VALIDATION_LAST_COUNT=$count
 }
 
@@ -2053,6 +1676,7 @@ run_target_sql_capture() {
   target_conn="$(migration_required_value "$idx" target conn)"
   target_user="$(migration_required_value "$idx" target user)"
   target_password="$(migration_secret_value "$idx" target password)"
+  register_sensitive_value "$target_password"
   connect_password="${target_password//\"/\"\"}"
 
   [[ "$-" == *e* ]] && errexit_enabled=true
@@ -2069,6 +1693,381 @@ run_target_sql_capture() {
     return "$rc"
   fi
   return 0
+}
+
+inventory_tsv_header() {
+  printf '%s\n' $'schema\tcategory\tobject_name\tparent_schema\tparent_name\tsubtype\tordinal\tattribute_name\tattribute_value\tstatus\tdetail\torigin'
+}
+
+write_marked_inventory() {
+  local raw_file="$1"
+  local output_file="$2"
+  local label="$3"
+  local output_dir tmp_file row_count
+
+  output_dir="$(dirname "$output_file")"
+  mkdir -p "$output_dir"
+  tmp_file="$(mktemp "$output_dir/.inventory_XXXXXX")" || return 1
+
+  inventory_tsv_header > "$tmp_file"
+  if ! awk -F '\t' -v OFS='\t' '
+    /^[[:space:]]*$/ { next }
+    $1 != "SDCLI_INVENTORY" { invalid=1; next }
+    NF != 13 || $2 == "" || $3 == "" || $4 == "" { invalid=1; next }
+    {
+      for (i=2; i<=13; i++) printf "%s%s", $i, (i == 13 ? ORS : OFS)
+      rows++
+    }
+    END { if (invalid || rows == 0) exit 1 }
+  ' "$raw_file" >> "$tmp_file"; then
+    rm -f "$tmp_file"
+    awk -F '\t' -v label="$label" '
+      /^[[:space:]]*$/ { next }
+      $1 != "SDCLI_INVENTORY" {
+        printf "%s inventory parse diagnostic: line %d: expected SDCLI_INVENTORY marker\n", label, NR
+        next
+      }
+      NF != 13 {
+        printf "%s inventory parse diagnostic: line %d: expected 13 tab-separated fields, got %d\n", label, NR, NF
+        next
+      }
+      $2 == "" || $3 == "" || $4 == "" {
+        printf "%s inventory parse diagnostic: line %d: schema, category, and object name are required\n", label, NR
+      }
+    ' "$raw_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" >&2
+    redact_sdcli_output < "$raw_file" | tee -a "$RUN_LOG_FILE" >&2
+    log_error "$label inventory query returned empty or malformed evidence"
+    return 1
+  fi
+
+  row_count=$(( $(wc -l < "$tmp_file" | tr -d '[:space:]') - 1 ))
+  mv "$tmp_file" "$output_file"
+  log_info "$label object inventory: rows=$row_count file=$output_file"
+}
+
+collect_source_object_inventory() {
+  local idx="$1"
+  local output_file="$2"
+  local source_conn source_user source_password parsed source_host source_port source_database tls_mode
+  local query raw_file
+  local -a tls_args=()
+
+  source_conn="$(migration_required_value "$idx" source conn)"
+  source_user="$(migration_required_value "$idx" source user)"
+  source_password="$(migration_secret_value "$idx" source password)"
+  validate_single_line_secret "migrations[$idx].source.password" "$source_password"
+  parsed="$(parse_source_conn "$source_conn")"
+  IFS='|' read -r source_host source_port source_database <<< "$parsed"
+  tls_mode="$(normalize_bcp_tls_mode "$(get_required_value '.defaults.source.bcp_tls_mode' 'defaults.source.bcp_tls_mode')")"
+  case "$tls_mode" in
+    strict) tls_args=(-Ns) ;;
+    trust) tls_args=(-Nm -C) ;;
+    optional) tls_args=(-No) ;;
+  esac
+
+  query="$(cat <<'SQL'
+SET NOCOUNT ON;
+DECLARE @tab nchar(1) = NCHAR(9);
+WITH inventory AS (
+  SELECT s.name AS schema_name, 'SCHEMAS' AS category, s.name AS object_name,
+         '' AS parent_schema, '' AS parent_name, 'SCHEMA' AS subtype,
+         0 AS ordinal, '' AS attribute_name, '' AS attribute_value,
+         'VALID' AS status, '' AS detail
+  FROM sys.schemas s
+  WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
+    AND s.schema_id < 16384
+  UNION ALL
+  SELECT SCHEMA_NAME(t.schema_id), 'TABLES', t.name, '', '', 'TABLE',
+         0, '', '', 'VALID', ''
+  FROM sys.tables t
+  WHERE t.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(v.schema_id), 'VIEWS', v.name, '', '', 'VIEW',
+         0, '', '', 'VALID', ''
+  FROM sys.views v
+  WHERE v.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(o.schema_id), 'ROUTINES', o.name, '', '',
+         CASE WHEN o.type = 'P' THEN 'PROCEDURE' ELSE 'FUNCTION' END,
+         0, '', '', 'VALID', ''
+  FROM sys.objects o
+  LEFT JOIN sys.procedures p ON p.object_id = o.object_id
+  WHERE o.type IN ('P', 'FN', 'IF', 'TF') AND o.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'TRIGGERS', tr.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'TRIGGER',
+         0, '', '',
+         CASE WHEN tr.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END, ''
+  FROM sys.triggers tr
+  JOIN sys.objects parent ON parent.object_id = tr.parent_id
+  WHERE tr.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id),
+         CASE kc.type WHEN 'PK' THEN 'PRIMARY_KEYS' ELSE 'UNIQUE_CONSTRAINTS' END,
+         kc.name, SCHEMA_NAME(parent.schema_id), parent.name, kc.type_desc,
+         ic.key_ordinal, 'column', col.name, 'VALID', ''
+  FROM sys.key_constraints kc
+  JOIN sys.tables parent ON parent.object_id = kc.parent_object_id
+  JOIN sys.index_columns ic ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
+  JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id
+  WHERE parent.is_ms_shipped = 0 AND ic.key_ordinal > 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'FOREIGN_KEYS', fk.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'FOREIGN_KEY',
+         fkc.constraint_column_id, 'column', parent_col.name, 'VALID',
+         ''
+  FROM sys.foreign_keys fk
+  JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+  JOIN sys.tables parent ON parent.object_id = fk.parent_object_id
+  JOIN sys.columns parent_col ON parent_col.object_id = fkc.parent_object_id AND parent_col.column_id = fkc.parent_column_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'CHECK_CONSTRAINTS', cc.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'CHECK',
+         0, 'expression', cc.definition,
+         CASE WHEN cc.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END, ''
+  FROM sys.check_constraints cc
+  JOIN sys.tables parent ON parent.object_id = cc.parent_object_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'DEFAULT_CONSTRAINTS', dc.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'DEFAULT',
+         col.column_id, 'column', col.name, 'VALID', dc.definition
+  FROM sys.default_constraints dc
+  JOIN sys.tables parent ON parent.object_id = dc.parent_object_id
+  JOIN sys.columns col ON col.object_id = dc.parent_object_id AND col.column_id = dc.parent_column_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'INDEXES', i.name,
+         SCHEMA_NAME(parent.schema_id), parent.name,
+         CASE WHEN i.is_unique = 1 THEN 'UNIQUE' ELSE 'INDEX' END,
+         0, 'unique', CASE WHEN i.is_unique = 1 THEN 'true' ELSE 'false' END,
+         CASE WHEN i.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END, ''
+  FROM sys.indexes i
+  JOIN sys.tables parent ON parent.object_id = i.object_id
+  WHERE parent.is_ms_shipped = 0 AND i.name IS NOT NULL AND i.is_hypothetical = 0
+    AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'INDEXES', i.name,
+         SCHEMA_NAME(parent.schema_id), parent.name,
+         CASE WHEN i.is_unique = 1 THEN 'UNIQUE' ELSE 'INDEX' END,
+         ic.key_ordinal, 'column', col.name,
+         CASE WHEN i.is_disabled = 1 THEN 'DISABLED' ELSE 'VALID' END,
+         ''
+  FROM sys.indexes i
+  JOIN sys.tables parent ON parent.object_id = i.object_id
+  JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+  JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id
+  WHERE parent.is_ms_shipped = 0 AND i.name IS NOT NULL AND i.is_hypothetical = 0
+    AND i.is_primary_key = 0 AND i.is_unique_constraint = 0 AND ic.key_ordinal > 0
+  UNION ALL
+  SELECT SCHEMA_NAME(parent.schema_id), 'IDENTITY_COLUMNS', col.name,
+         SCHEMA_NAME(parent.schema_id), parent.name, 'IDENTITY',
+         0, '', '', 'VALID', ''
+  FROM sys.identity_columns col
+  JOIN sys.tables parent ON parent.object_id = col.object_id
+  WHERE parent.is_ms_shipped = 0
+  UNION ALL
+  SELECT SCHEMA_NAME(seq.schema_id), 'SEQUENCES', seq.name, '', '', 'SEQUENCE',
+         0, '', '', 'VALID', ''
+  FROM sys.sequences seq
+  UNION ALL
+  SELECT SCHEMA_NAME(syn.schema_id), 'SYNONYMS', syn.name, '', '', 'SYNONYM',
+         0, '', '', 'VALID', ''
+  FROM sys.synonyms syn
+)
+SELECT CONCAT(
+  'SDCLI_INVENTORY', @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), schema_name) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  category COLLATE DATABASE_DEFAULT, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), object_name) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_schema) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), parent_name) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  subtype COLLATE DATABASE_DEFAULT, @tab, CONVERT(varchar(12), ordinal), @tab,
+  attribute_name COLLATE DATABASE_DEFAULT, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), attribute_value) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  status COLLATE DATABASE_DEFAULT, @tab,
+  REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(max), detail) COLLATE DATABASE_DEFAULT, @tab, ' '), CHAR(13), ' '), CHAR(10), ' '), @tab,
+  'sqlserver')
+FROM inventory
+ORDER BY schema_name, category, object_name, ordinal;
+SQL
+)"
+
+  raw_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_source_inventory_XXXXXX.out")" || return 1
+  if ! SQLCMDPASSWORD="$source_password" sqlcmd \
+    -S "${source_host},${source_port}" -d "$source_database" -U "$source_user" \
+    -b -r 1 -h -1 -W -w 65535 "${tls_args[@]}" -Q "$query" > "$raw_file" 2>&1; then
+    redact_sdcli_output < "$raw_file" | tee -a "$RUN_LOG_FILE" >&2
+    rm -f "$raw_file"
+    log_error "Failed to query SQL Server object inventory"
+    return 1
+  fi
+
+  if ! write_marked_inventory "$raw_file" "$output_file" "SQL Server"; then
+    rm -f "$raw_file"
+    return 1
+  fi
+  rm -f "$raw_file"
+}
+
+collect_target_object_inventory() {
+  local idx="$1"
+  local output_dir="$2"
+  local output_file="$3"
+  local query_file raw_file schema_dir schema_name escaped_schema owners="" schema_count=0
+
+  while IFS= read -r schema_dir; do
+    schema_name="$(basename "$schema_dir")"
+    [[ "$schema_name" != *$'\t'* && "$schema_name" != *$'\n'* && "$schema_name" != *$'\r'* ]] || {
+      log_error "Generated schema directory contains a control character"
+      return 1
+    }
+    escaped_schema="${schema_name//\'/\'\'}"
+    [[ -z "$owners" ]] || owners+=","
+    owners+="'${escaped_schema}',UPPER('${escaped_schema}')"
+    schema_count=$((schema_count + 1))
+  done < <(schema_dirs "$output_dir")
+
+  if (( schema_count == 0 )); then
+    log_error "Cannot collect Oracle object inventory because no generated schema hierarchy was found"
+    return 1
+  fi
+
+  query_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_target_inventory_XXXXXX.sql")" || return 1
+  raw_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_target_inventory_XXXXXX.out")" || {
+    rm -f "$query_file"
+    return 1
+  }
+  {
+    printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE;'
+    printf '%s\n' 'WHENEVER SQLERROR EXIT SQL.SQLCODE;'
+    printf '%s\n' 'SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 LONG 1000000 LONGCHUNKSIZE 1000000 VERIFY OFF ECHO OFF TERMOUT ON TRIMSPOOL ON;'
+    cat <<SQL
+WITH inventory AS (
+  SELECT o.owner AS schema_name,
+         CASE o.object_type
+           WHEN 'TABLE' THEN 'TABLES' WHEN 'VIEW' THEN 'VIEWS'
+           WHEN 'PROCEDURE' THEN 'ROUTINES' WHEN 'FUNCTION' THEN 'ROUTINES'
+           WHEN 'PACKAGE' THEN 'PACKAGES' WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODIES'
+           WHEN 'SEQUENCE' THEN 'SEQUENCES'
+           WHEN 'SYNONYM' THEN 'SYNONYMS'
+         END AS category,
+         o.object_name, '' AS parent_schema, '' AS parent_name,
+         o.object_type AS subtype, 0 AS ordinal, '' AS attribute_name, '' AS attribute_value,
+         o.status,
+         NVL((SELECT MIN(e.type || ':' || e.line || ':' || e.position || ':' || e.text)
+              FROM all_errors e
+              WHERE e.owner = o.owner AND e.name = o.object_name AND e.type = o.object_type
+                AND e.attribute = 'ERROR'), '') AS detail
+  FROM all_objects o
+  WHERE o.owner IN (${owners})
+    AND o.object_type IN ('TABLE','VIEW','PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY','SEQUENCE','SYNONYM')
+  UNION ALL
+  SELECT tr.owner, 'TRIGGERS', tr.trigger_name, tr.table_owner, tr.table_name,
+         'TRIGGER', 0, '', '',
+         CASE WHEN o.status = 'VALID' AND tr.status = 'ENABLED' THEN 'VALID' ELSE 'INVALID' END,
+         NVL((SELECT MIN(e.type || ':' || e.line || ':' || e.position || ':' || e.text)
+              FROM all_errors e
+              WHERE e.owner = tr.owner AND e.name = tr.trigger_name AND e.type = 'TRIGGER'
+                AND e.attribute = 'ERROR'), '')
+  FROM all_triggers tr
+  LEFT JOIN all_objects o
+    ON o.owner = tr.owner AND o.object_name = tr.trigger_name AND o.object_type = 'TRIGGER'
+  WHERE tr.owner IN (${owners})
+  UNION ALL
+  SELECT c.owner,
+         CASE c.constraint_type WHEN 'P' THEN 'PRIMARY_KEYS' WHEN 'U' THEN 'UNIQUE_CONSTRAINTS'
+              WHEN 'R' THEN 'FOREIGN_KEYS' END,
+         c.constraint_name, c.owner, c.table_name,
+         CASE c.constraint_type WHEN 'P' THEN 'PRIMARY_KEY' WHEN 'U' THEN 'UNIQUE'
+              WHEN 'R' THEN 'FOREIGN_KEY' END,
+         NVL(cc.position, 0),
+         'column', cc.column_name,
+         CASE WHEN c.status = 'ENABLED' AND c.validated = 'VALIDATED' THEN 'VALID' ELSE 'INVALID' END,
+         CASE WHEN c.constraint_type = 'R' THEN
+           NVL((SELECT 'references=' || r.owner || '.' || r.table_name
+                FROM all_constraints r WHERE r.owner = c.r_owner AND r.constraint_name = c.r_constraint_name), '')
+           ELSE '' END
+  FROM all_constraints c
+  LEFT JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name AND cc.table_name = c.table_name
+  WHERE c.owner IN (${owners}) AND c.constraint_type IN ('P','U','R')
+  UNION ALL
+  SELECT c.owner, 'CHECK_CONSTRAINTS', c.constraint_name, c.owner, c.table_name,
+         'CHECK', 0, 'expression', c.search_condition_vc,
+         CASE WHEN c.status = 'ENABLED' AND c.validated = 'VALIDATED' THEN 'VALID' ELSE 'INVALID' END,
+         ''
+  FROM all_constraints c
+  WHERE c.owner IN (${owners}) AND c.constraint_type = 'C' AND c.generated = 'USER NAME'
+  UNION ALL
+  SELECT i.owner, 'INDEXES', i.index_name, i.table_owner, i.table_name,
+         CASE WHEN i.uniqueness = 'UNIQUE' THEN 'UNIQUE' ELSE 'INDEX' END,
+         0, 'unique', CASE WHEN i.uniqueness = 'UNIQUE' THEN 'true' ELSE 'false' END,
+         CASE WHEN i.status = 'VALID' THEN 'VALID' ELSE 'INVALID' END, ''
+  FROM all_indexes i
+  WHERE i.owner IN (${owners}) AND i.generated = 'N'
+    AND NOT EXISTS (
+      SELECT 1 FROM all_constraints k
+      WHERE k.owner = i.owner AND k.index_name = i.index_name AND k.constraint_type IN ('P','U')
+    )
+  UNION ALL
+  SELECT i.owner, 'INDEXES', i.index_name, i.table_owner, i.table_name,
+         CASE WHEN i.uniqueness = 'UNIQUE' THEN 'UNIQUE' ELSE 'INDEX' END,
+         c.column_position, 'column', c.column_name,
+         CASE WHEN i.status = 'VALID' THEN 'VALID' ELSE 'INVALID' END, ''
+  FROM all_indexes i
+  JOIN all_ind_columns c ON c.index_owner = i.owner AND c.index_name = i.index_name
+  WHERE i.owner IN (${owners}) AND i.generated = 'N'
+    AND NOT EXISTS (
+      SELECT 1 FROM all_constraints k
+      WHERE k.owner = i.owner AND k.index_name = i.index_name AND k.constraint_type IN ('P','U')
+    )
+  UNION ALL
+  SELECT ic.owner, 'IDENTITY_COLUMNS', ic.column_name, ic.owner, ic.table_name,
+         'IDENTITY', 0, '', '', 'VALID', ''
+  FROM all_tab_identity_cols ic
+  WHERE ic.owner IN (${owners})
+  UNION ALL
+  SELECT col.owner, 'DEFAULT_CONSTRAINTS', col.table_name || '_' || col.column_name || '_DEFAULT',
+         col.owner, col.table_name, 'DEFAULT', col.column_id, 'column', col.column_name,
+         'VALID', ''
+  FROM all_tab_cols col
+  WHERE col.owner IN (${owners}) AND col.default_length > 0
+    AND col.hidden_column = 'NO'
+    AND col.identity_column = 'NO' AND col.virtual_column = 'NO'
+  UNION ALL
+  SELECT e.owner, 'COMPILER_ERRORS', e.name, e.owner, e.name, e.type,
+         e.sequence, 'line_position', TO_CHAR(e.line) || ':' || TO_CHAR(e.position),
+         'INVALID', e.text
+  FROM all_errors e
+  WHERE e.owner IN (${owners}) AND e.attribute = 'ERROR'
+)
+SELECT 'SDCLI_INVENTORY' || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(schema_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       category || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(object_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(parent_schema, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(parent_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       subtype || CHR(9) || TO_CHAR(ordinal) || CHR(9) || attribute_name || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(attribute_value, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       status || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(detail, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) || 'oracle'
+FROM inventory
+ORDER BY schema_name, category, object_name, ordinal;
+EXIT;
+SQL
+  } > "$query_file"
+
+  if ! run_target_sql_capture "$idx" "$query_file" "$raw_file"; then
+    rm -f "$query_file" "$raw_file"
+    log_error "Failed to query Oracle object inventory"
+    return 1
+  fi
+  if ! write_marked_inventory "$raw_file" "$output_file" "Oracle"; then
+    rm -f "$query_file" "$raw_file"
+    return 1
+  fi
+  rm -f "$query_file" "$raw_file"
 }
 
 collect_target_row_counts() {
@@ -2148,7 +2147,7 @@ validate_target_objects() {
 
   if (( schema_count == 0 )); then
     log_warn "Oracle object validation skipped because no generated schema hierarchy was found"
-    return 0
+    return 2
   fi
 
   query_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_object_validation_XXXXXX.sql")" || return 1
@@ -2161,7 +2160,7 @@ validate_target_objects() {
     printf '%s\n' 'WHENEVER SQLERROR EXIT SQL.SQLCODE;'
     printf '%s\n' 'SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF ECHO OFF TERMOUT ON;'
     printf "SELECT 'SDCLI_INVALID|' || COUNT(*) FROM all_objects WHERE owner IN (%s) AND status = 'INVALID';\n" "$owners"
-    printf "SELECT 'SDCLI_COMPILE_ERRORS|' || COUNT(*) FROM all_errors WHERE owner IN (%s);\n" "$owners"
+    printf "SELECT 'SDCLI_COMPILE_ERRORS|' || COUNT(*) FROM all_errors WHERE owner IN (%s) AND attribute = 'ERROR';\n" "$owners"
     printf '%s\n' 'EXIT;'
   } > "$query_file"
 
@@ -2277,6 +2276,64 @@ run_data_reconciliation() {
   log_info "Table data reconciliation passed: $report_file"
 }
 
+write_validation_checks() {
+  local output_file="$1"
+  local run_log_issues="$2"
+  local sdcli_error_entries="$3"
+  local sqlldr_log_issues="$4"
+  local missing_evidence="$5"
+  local reconciliation_issues="$6"
+  local object_issues="$7"
+  local metadata_issues="$8"
+  local target_object_status="$9"
+  local tmp_file
+
+  tmp_file="$(mktemp "$(dirname "$output_file")/.validation_checks_XXXXXX")" || return 1
+  {
+    printf 'check\tstatus\tissues\tdetail\n'
+    printf 'run_log\t%s\t%s\t%s\n' "$([[ $run_log_issues -eq 0 ]] && echo PASS || echo FAIL)" "$run_log_issues" "migration run-log diagnostics"
+    printf 'sdcli_error_log\t%s\t%s\t%s\n' "$([[ $sdcli_error_entries -eq 0 ]] && echo PASS || echo FAIL)" "$sdcli_error_entries" "SDCLI ERROR/FATAL entries"
+    printf 'sqlldr_logs\t%s\t%s\t%s\n' "$([[ $sqlldr_log_issues -eq 0 ]] && echo PASS || echo FAIL)" "$sqlldr_log_issues" "SQL*Loader log diagnostics"
+    printf 'missing_evidence\t%s\t%s\t%s\n' "$([[ $missing_evidence -eq 0 ]] && echo PASS || echo INCOMPLETE)" "$missing_evidence" "required SQL*Loader log evidence"
+    printf 'reconciliation\t%s\t%s\t%s\n' "$([[ $reconciliation_issues -eq 0 ]] && echo PASS || echo FAIL)" "$reconciliation_issues" "table data reconciliation"
+    printf 'target_objects\t%s\t%s\t%s\n' "$target_object_status" "$object_issues" \
+      "$([[ "$target_object_status" == INCOMPLETE ]] && echo 'not evaluated: no generated schema hierarchy' || echo 'Oracle invalid objects or compiler errors')"
+    printf 'metadata_collection\t%s\t%s\t%s\n' "$([[ $metadata_issues -eq 0 ]] && echo PASS || echo INCOMPLETE)" "$metadata_issues" "source or target object inventory"
+  } > "$tmp_file"
+  mv "$tmp_file" "$output_file"
+}
+
+run_validation_report() {
+  local output_dir="$1"
+  local idx="$2"
+  local migration_name report_file report_run_id rc errexit_enabled=false
+
+  migration_name="$(migration_required_value "$idx" name)"
+  report_file="$AUTOKIT_DIR/migration_report.html"
+  report_run_id="${RUN_NAME#run_}"
+  [[ -n "$report_run_id" ]] || report_run_id="$RUN_ID"
+
+  # Remove artifacts created by the retired generated-DDL comparison report so
+  # a rerun cannot leave false DIFFERENT/MISSING/EXTRA findings beside the new
+  # direct-evidence report.
+  rm -f \
+    "$AUTOKIT_DIR/generated_target_inventory.tsv" \
+    "$AUTOKIT_DIR/schema_mapping.tsv" \
+    "$AUTOKIT_DIR/object_comparison.tsv"
+
+  [[ "$-" == *e* ]] && errexit_enabled=true
+  set +e
+  python3 "$SCRIPT_DIR/lib/generate_validation_report.py" \
+    --evidence-dir "$AUTOKIT_DIR" \
+    --output "$report_file" \
+    --migration "$migration_name" \
+    --run-id "$report_run_id" \
+    2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE"
+  rc=${PIPESTATUS[0]}
+  $errexit_enabled && set -e
+  return "$rc"
+}
+
 run_validate() {
   local output_dir="$1"
   local idx="${2:-}"
@@ -2291,9 +2348,10 @@ run_validate() {
   log_info "Validating migration output"
 
   local run_log="${RUN_LOG_FILE:-$AUTOKIT_DIR/migrate.log}"
-  local run_log_issues sdcli_error_entries sqlldr_logs_checked=0 sqlldr_log_issues=0 missing_evidence=0 reconciliation_issues=0 object_issues=0 total_issues
+  local run_log_issues sdcli_error_entries sqlldr_logs_checked=0 sqlldr_log_issues=0 missing_evidence=0 reconciliation_issues=0 object_issues=0 metadata_issues=0 report_issues=0 total_issues
+  local target_object_status=PASS object_validation_rc=0
 
-  validate_run_log "$run_log"
+  validate_run_log "$run_log" "$RUN_LOG_START_LINE"
   run_log_issues=$VALIDATION_LAST_COUNT
 
   validate_sdcli_error_log "$output_dir/log/error.txt"
@@ -2315,11 +2373,55 @@ run_validate() {
 
   if [[ -n "$idx" ]]; then
     run_data_reconciliation "$idx" || reconciliation_issues=1
-    validate_target_objects "$idx" "$output_dir" || object_issues=1
+    if validate_target_objects "$idx" "$output_dir"; then
+      :
+    else
+      object_validation_rc=$?
+      object_issues=1
+      if (( object_validation_rc == 2 )); then
+        target_object_status=INCOMPLETE
+      else
+        target_object_status=FAIL
+      fi
+    fi
+
+    local source_inventory="$AUTOKIT_DIR/source_object_inventory.tsv"
+    local target_inventory="$AUTOKIT_DIR/target_object_inventory.tsv"
+    # A failed rerun must not allow a previous inventory to be interpreted as
+    # current evidence by the report generator.
+    rm -f "$source_inventory" "$target_inventory"
+    if ! collect_source_object_inventory "$idx" "$source_inventory"; then
+      metadata_issues=$((metadata_issues + 1))
+    fi
+    if ! collect_target_object_inventory "$idx" "$output_dir" "$target_inventory"; then
+      metadata_issues=$((metadata_issues + 1))
+    fi
+    local validation_checks="$AUTOKIT_DIR/validation_checks.tsv"
+    rm -f "$validation_checks"
+    if ! write_validation_checks "$validation_checks" \
+      "$run_log_issues" "$sdcli_error_entries" "$sqlldr_log_issues" \
+      "$missing_evidence" "$reconciliation_issues" "$object_issues" "$metadata_issues" \
+      "$target_object_status"; then
+      metadata_issues=$((metadata_issues + 1))
+      log_error "Failed to write validation checks evidence: $validation_checks"
+    fi
+    if ! run_validation_report "$output_dir" "$idx"; then
+      report_issues=1
+    fi
+    if [[ -f "$AUTOKIT_DIR/migration_report.html" ]]; then
+      log_info "Migration validation report: $AUTOKIT_DIR/migration_report.html"
+    else
+      log_error "Migration validation report was not created: $AUTOKIT_DIR/migration_report.html"
+    fi
+    if [[ -f "$AUTOKIT_DIR/migration_report.txt" ]]; then
+      log_info "Migration validation text report: $AUTOKIT_DIR/migration_report.txt"
+    else
+      log_warn "Migration validation text report was not created: $AUTOKIT_DIR/migration_report.txt"
+    fi
   fi
 
-  total_issues=$((run_log_issues + sdcli_error_entries + sqlldr_log_issues + missing_evidence + reconciliation_issues + object_issues))
-  log_info "Validation summary: run_log_issues=$run_log_issues sdcli_error_entries=$sdcli_error_entries sqlldr_logs_checked=$sqlldr_logs_checked sqlldr_log_issues=$sqlldr_log_issues missing_evidence=$missing_evidence reconciliation_issues=$reconciliation_issues object_issues=$object_issues total_issues=$total_issues"
+  total_issues=$((run_log_issues + sdcli_error_entries + sqlldr_log_issues + missing_evidence + reconciliation_issues + object_issues + metadata_issues + report_issues))
+  log_info "Validation summary: run_log_issues=$run_log_issues sdcli_error_entries=$sdcli_error_entries sqlldr_logs_checked=$sqlldr_logs_checked sqlldr_log_issues=$sqlldr_log_issues missing_evidence=$missing_evidence reconciliation_issues=$reconciliation_issues object_issues=$object_issues metadata_issues=$metadata_issues report_issues=$report_issues total_issues=$total_issues"
   {
     printf 'status=%s\n' "$([[ $total_issues -eq 0 ]] && echo PASS || echo FAIL)"
     printf 'run_log_issues=%s\n' "$run_log_issues"
@@ -2329,6 +2431,8 @@ run_validate() {
     printf 'missing_evidence=%s\n' "$missing_evidence"
     printf 'reconciliation_issues=%s\n' "$reconciliation_issues"
     printf 'object_issues=%s\n' "$object_issues"
+    printf 'metadata_issues=%s\n' "$metadata_issues"
+    printf 'report_issues=%s\n' "$report_issues"
     printf 'total_issues=%s\n' "$total_issues"
   } > "$AUTOKIT_DIR/validation_summary.txt"
   if (( total_issues > 0 )); then
@@ -2347,6 +2451,7 @@ run_load() {
   target_conn="$(migration_required_value "$idx" target conn)"
   target_user="$(migration_required_value "$idx" target user)"
   target_password="$(migration_secret_value "$idx" target password)"
+  validate_single_line_secret "migrations[$idx].target.password" "$target_password"
 
   local datamove_dir="$output_dir/datamove"
   if $DRY_RUN; then
@@ -2363,7 +2468,7 @@ run_load() {
     if is_sqlldr_loader_script "$found_loader_script"; then
       loader_scripts+=("$found_loader_script")
     fi
-  done < <(find "$datamove_dir" -type f -name 'oracle_loader.sh' 2>/dev/null | sort)
+  done < <(find "$datamove_dir" -type f -name 'oracle_loader.sh' 2>/dev/null | LC_ALL=C sort)
   [[ ${#loader_scripts[@]} -gt 0 ]] || fail "Oracle loader script with sqlldr not found under $datamove_dir"
 
   local direct rows bindsize readsize
@@ -2435,7 +2540,7 @@ run_load() {
         exit "$script_rc"
       fi
     done
-  ) 2>&1 | tee -a "$RUN_LOG_FILE" | summarize_sqlldr_output
+  ) 2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | summarize_sqlldr_output
   rc=${PIPESTATUS[0]}
   $errexit_enabled && set -e
 
@@ -2470,6 +2575,7 @@ run_offload() {
   source_conn="$(migration_required_value "$idx" source conn)"
   source_user="$(migration_required_value "$idx" source user)"
   source_password="$(migration_secret_value "$idx" source password)"
+  validate_single_line_secret "migrations[$idx].source.password" "$source_password"
 
   local parsed source_host source_port source_db
   parsed="$(parse_source_conn "$source_conn")"
@@ -2536,7 +2642,7 @@ run_offload() {
       script_rc=$?
       [[ $script_rc -eq 0 ]] || exit "$script_rc"
     done
-  ) 2>&1 | tee -a "$RUN_LOG_FILE" | summarize_bcp_output "${bcp_tables[@]}"
+  ) 2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | summarize_bcp_output "${bcp_tables[@]}"
   rc=${PIPESTATUS[0]}
   $errexit_enabled && set -e
 
@@ -2565,6 +2671,354 @@ run_offload() {
 
   log_timed_result "BCP offload" "$rc" "$start_ts"
   return "$rc"
+}
+
+# --- Phase postconditions ---------------------------------------------------
+expected_run_model_name() {
+  local project_name="$1"
+  local run_id="${RUN_NAME#run_}"
+  [[ -n "$project_name" && -n "$run_id" ]] || return 1
+  printf '%s_%s\n' "$project_name" "$run_id"
+}
+
+sdcli_model_exists() {
+  local phase="$1"
+  local expected_model="$2"
+  local list_action output_file rc=0 saved_action saved_marker
+
+  case "$phase" in
+    capture) list_action="lscaptured" ;;
+    convert) list_action="lsconverted" ;;
+    *)
+      log_error "No SQL Developer model lookup is defined for phase '$phase'"
+      return 1
+      ;;
+  esac
+
+  output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_model_lookup_XXXXXX")" || return 1
+  saved_action="$SDCLI_LAST_ACTION"
+  saved_marker="$SDCLI_LAST_SUCCESS_MARKER"
+  SDCLI_CAPTURE_OUTPUT_FILE="$output_file"
+  if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action"; then
+    rc=1
+  elif ! LC_ALL=C awk -v expected="$expected_model" '
+    {
+      line=$0
+      gsub(/\r/, "", line)
+      marker=") --> Model Name : "
+      marker_pos=index(line, marker)
+      if (marker_pos > 1) {
+        model_index=substr(line, 1, marker_pos - 1)
+        model_name=substr(line, marker_pos + length(marker))
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_index)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_name)
+        if (model_index ~ /^[0-9]+$/ && model_name == expected) found=1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$output_file"; then
+    log_error "SQL Developer $phase model lookup did not return the expected model '$expected_model'"
+    rc=1
+  fi
+  SDCLI_CAPTURE_OUTPUT_FILE=""
+  SDCLI_LAST_ACTION="$saved_action"
+  SDCLI_LAST_SUCCESS_MARKER="$saved_marker"
+  rm -f "$output_file"
+  return "$rc"
+}
+
+verify_datamove_artifacts() {
+  local output_dir="$1"
+  local datamove_dir="$output_dir/datamove"
+  local bcp_script control_file bcp_script_count=0 control_file_count=0
+
+  [[ -d "$datamove_dir" ]] || {
+    log_error "Datamove postcondition failed: directory not found: $datamove_dir"
+    return 1
+  }
+  while IFS= read -r bcp_script; do
+    [[ -n "$bcp_script" ]] || continue
+    if [[ -z "$(extract_bcp_table_names "$bcp_script" | head -n 1)" ]]; then
+      log_error "Datamove postcondition failed: generated BCP script has no supported export command: $bcp_script"
+      return 1
+    fi
+    bcp_script_count=$((bcp_script_count + 1))
+  done < <(find "$datamove_dir" -type f -name 'MicrosoftSQLServer_data.sh' 2>/dev/null | LC_ALL=C sort)
+
+  while IFS= read -r control_file; do
+    [[ -n "$control_file" ]] || continue
+    control_file_count=$((control_file_count + 1))
+  done < <(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | LC_ALL=C sort)
+
+  (( bcp_script_count > 0 )) || {
+    log_error "Datamove postcondition failed: no generated BCP command script was found under $datamove_dir"
+    return 1
+  }
+  (( control_file_count > 0 )) || {
+    log_error "Datamove postcondition failed: no SQL*Loader control file was found under $datamove_dir"
+    return 1
+  }
+}
+
+verify_offload_evidence() {
+  local output_dir="$1"
+  local datamove_dir="$output_dir/datamove"
+  local status_file="$AUTOKIT_DIR/bcp_status.tsv"
+  local expected_file actual_file path rc=0
+
+  [[ -s "$status_file" ]] || {
+    log_error "Offload postcondition failed: BCP status evidence is missing or empty: $status_file"
+    return 1
+  }
+  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_expected_XXXXXX")" || return 1
+  actual_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_actual_XXXXXX")" || {
+    rm -f "$expected_file"
+    return 1
+  }
+  extract_bcp_table_names_from_dir "$datamove_dir" | LC_ALL=C sort > "$expected_file"
+  if [[ ! -s "$expected_file" ]]; then
+    log_error "Offload postcondition failed: no expected BCP invocation could be derived from $datamove_dir"
+    rc=1
+  elif ! LC_ALL=C awk -F '\t' '
+    NF != 4 || $1 != "0" || $2 == "" || $3 == "" || $3 == "-" || $4 !~ /^[0-9]+$/ { invalid=1; next }
+    { print $2 }
+    END { if (invalid) exit 1 }
+  ' "$status_file" | LC_ALL=C sort > "$actual_file"; then
+    log_error "Offload postcondition failed: BCP status evidence is malformed or contains a failed invocation"
+    rc=1
+  elif ! cmp -s "$expected_file" "$actual_file"; then
+    log_error "Offload postcondition failed: BCP status records do not match the expected invocations"
+    rc=1
+  fi
+
+  if (( rc == 0 )); then
+    while IFS=$'\t' read -r _ _ path _; do
+      [[ -f "$path" ]] || {
+        log_error "Offload postcondition failed: exported data file is missing: $path"
+        rc=1
+      }
+    done < "$status_file"
+  fi
+  rm -f "$expected_file" "$actual_file"
+  return "$rc"
+}
+
+verify_load_evidence() {
+  local output_dir="$1"
+  local datamove_dir="$output_dir/datamove"
+  local status_file="$AUTOKIT_DIR/sqlldr_status.tsv"
+  local expected_file actual_file control_file data_file rc=0
+
+  [[ -s "$status_file" ]] || {
+    log_error "Load postcondition failed: SQL*Loader status evidence is missing or empty: $status_file"
+    return 1
+  }
+  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlldr_expected_XXXXXX")" || return 1
+  actual_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlldr_actual_XXXXXX")" || {
+    rm -f "$expected_file"
+    return 1
+  }
+  find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | LC_ALL=C sort > "$expected_file"
+  if [[ ! -s "$expected_file" ]]; then
+    log_error "Load postcondition failed: no expected SQL*Loader control file was found under $datamove_dir"
+    rc=1
+  elif ! LC_ALL=C awk -F '\t' '
+    NF != 8 || $1 != "0" || $2 == "" || $3 == "" || $4 == "" ||
+      $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || $8 == "" { invalid=1; next }
+    { print $3 }
+    END { if (invalid) exit 1 }
+  ' "$status_file" | LC_ALL=C sort > "$actual_file"; then
+    log_error "Load postcondition failed: SQL*Loader status evidence is malformed or contains a failed invocation"
+    rc=1
+  elif ! cmp -s "$expected_file" "$actual_file"; then
+    log_error "Load postcondition failed: SQL*Loader status records do not match the expected control files"
+    rc=1
+  fi
+
+  if (( rc == 0 )); then
+    while IFS=$'\t' read -r _ _ control_file data_file _; do
+      [[ -f "$control_file" ]] || {
+        log_error "Load postcondition failed: control file is missing: $control_file"
+        rc=1
+      }
+      [[ -f "$data_file" ]] || {
+        log_error "Load postcondition failed: input data file is missing: $data_file"
+        rc=1
+      }
+    done < "$status_file"
+  fi
+  rm -f "$expected_file" "$actual_file"
+  return "$rc"
+}
+
+manifest_relative_path() {
+  local path="$1"
+  [[ -z "${RUN_DIR:-}" || "$path" != "$RUN_DIR/"* ]] || path="${path#$RUN_DIR/}"
+  printf '%s\n' "$path"
+}
+
+expected_manifest_paths() {
+  local phase="$1"
+  local output_dir="$2"
+  local schema_dir include_path generated_sql cleanup_file
+
+  case "$phase" in
+    deploy)
+      if [[ -f "$output_dir/role.sql" && -f "$(role_setup_dir)/role_setup.sql" ]]; then
+        manifest_relative_path "$(role_setup_dir)/role_setup.sql"
+      fi
+      while IFS= read -r schema_dir; do
+        manifest_relative_path "$schema_dir/user.sql"
+        while IFS= read -r include_path; do
+          is_predata_sql "$include_path" || continue
+          manifest_relative_path "$output_dir/$include_path"
+        done < <(schema_master_includes "$output_dir" "$schema_dir")
+      done < <(schema_dirs "$output_dir")
+      if [[ -z "$(schema_dirs "$output_dir")" ]]; then
+        generated_sql="$(generated_sql_files "$output_dir")"
+        [[ -n "$generated_sql" ]] && manifest_relative_path "$generated_sql"
+      fi
+      ;;
+    postdeploy)
+      while IFS= read -r schema_dir; do
+        while IFS= read -r include_path; do
+          manifest_relative_path "$output_dir/$include_path"
+        done < <(schema_post_files "$output_dir" "$schema_dir")
+        [[ ! -f "$schema_dir/post.sql" ]] || manifest_relative_path "$schema_dir/post.sql"
+      done < <(schema_dirs "$output_dir")
+      ;;
+    cleanup)
+      cleanup_file="$(role_cleanup_dir)/role_cleanup.sql"
+      [[ ! -f "$cleanup_file" ]] || manifest_relative_path "$cleanup_file"
+      ;;
+  esac
+}
+
+verify_deploy_manifest_phase() {
+  local phase="$1"
+  local output_dir="$2"
+  local manifest expected_file path status
+  manifest="$(deploy_manifest_file)"
+  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_manifest_expected_XXXXXX")" || return 1
+  if ! expected_manifest_paths "$phase" "$output_dir" > "$expected_file"; then
+    rm -f "$expected_file"
+    return 1
+  fi
+  [[ -f "$manifest" ]] || {
+    if [[ ! -s "$expected_file" ]]; then
+      rm -f "$expected_file"
+      return 0
+    fi
+    log_error "${phase^} postcondition failed: deploy manifest is missing: $manifest"
+    rm -f "$expected_file"
+    return 1
+  }
+  if ! LC_ALL=C awk -F '\t' '
+    NR == 1 { if ($0 != "phase\tpath\tstatus\tnote") invalid=1; next }
+    NF != 4 || $1 == "" || $2 == "" { invalid=1; next }
+    $3 != "executed" && $3 != "failed" && $3 != "control" &&
+      $3 != "excluded" && $3 != "covered" && $3 != "not_run" &&
+      $3 != "pending" && $3 != "planned" { invalid=1 }
+    END { if (invalid) exit 1 }
+  ' "$manifest"; then
+    log_error "${phase^} postcondition failed: deploy manifest is malformed: $manifest"
+    rm -f "$expected_file"
+    return 1
+  fi
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    status="$(awk -F '\t' -v phase="$phase" -v path="$path" '$1 == phase && $2 == path { status=$3 } END { print status }' "$manifest")"
+    if [[ "$status" != "executed" ]]; then
+      log_error "${phase^} postcondition failed: manifest has no successful result for $path"
+      rm -f "$expected_file"
+      return 1
+    fi
+  done < "$expected_file"
+  rm -f "$expected_file"
+}
+
+verify_validation_evidence() {
+  local checks_file="$AUTOKIT_DIR/validation_checks.tsv"
+  local summary_file="$AUTOKIT_DIR/validation_summary.txt"
+  local required_check
+
+  [[ -f "$checks_file" ]] || {
+    log_error "Validate postcondition failed: validation checks are missing: $checks_file"
+    return 1
+  }
+  if ! LC_ALL=C awk -F '\t' '
+    NR == 1 { if ($0 != "check\tstatus\tissues\tdetail") invalid=1; next }
+    NF != 4 || $1 == "" || $3 !~ /^[0-9]+$/ || $4 == "" { invalid=1; next }
+    $2 != "PASS" && $2 != "FAIL" && $2 != "INCOMPLETE" && $2 != "NOT_EVALUATED" { invalid=1 }
+    seen[$1]++
+    END {
+      required[1]="run_log"; required[2]="sdcli_error_log"; required[3]="sqlldr_logs"
+      required[4]="missing_evidence"; required[5]="reconciliation"; required[6]="target_objects"
+      required[7]="metadata_collection"
+      for (i=1; i<=7; i++) if (seen[required[i]] != 1) invalid=1
+      if (invalid) exit 1
+    }
+  ' "$checks_file"; then
+    log_error "Validate postcondition failed: validation checks are incomplete or malformed: $checks_file"
+    return 1
+  fi
+  [[ -f "$summary_file" ]] && grep -Fx 'status=PASS' "$summary_file" >/dev/null 2>&1 || {
+    log_error "Validate postcondition failed: validation summary does not report PASS: $summary_file"
+    return 1
+  }
+  for required_check in migration_report.html migration_report.txt; do
+    [[ -f "$AUTOKIT_DIR/$required_check" ]] || {
+      log_error "Validate postcondition failed: report is missing: $AUTOKIT_DIR/$required_check"
+      return 1
+    }
+  done
+}
+
+verify_phase_postcondition() {
+  local phase="$1"
+  local model_name="$2"
+  local project_name="$3"
+  local output_dir="$4"
+  local expected_model
+
+  $DRY_RUN && return 0
+  case "$phase" in
+    capture|convert)
+      if [[ "$SDCLI_LAST_ACTION" != "$phase" || "$SDCLI_LAST_SUCCESS_MARKER" != "true" ]]; then
+        log_error "${phase^} postcondition failed: exact '$phase completed successfully' marker was not observed"
+        return 1
+      fi
+      if [[ "$phase" == "capture" ]]; then
+        expected_model="$model_name"
+      else
+        expected_model="$(expected_run_model_name "$project_name")" || return 1
+      fi
+      sdcli_model_exists "$phase" "$expected_model"
+      ;;
+    generate)
+      ( validate_generated_sql_inventory "$output_dir" ) || {
+        log_error "Generate postcondition failed: generated execution-plan inventory is missing or unsupported"
+        return 1
+      }
+      ;;
+    datamove) verify_datamove_artifacts "$output_dir" ;;
+    offload) verify_offload_evidence "$output_dir" ;;
+    deploy|postdeploy)
+      ( validate_generated_sql_inventory "$output_dir" ) || {
+        log_error "${phase^} postcondition failed: generated execution-plan inventory is missing or unsupported"
+        return 1
+      }
+      verify_deploy_manifest_phase "$phase" "$output_dir"
+      ;;
+    cleanup) verify_deploy_manifest_phase "$phase" "$output_dir" ;;
+    load) verify_load_evidence "$output_dir" ;;
+    validate) verify_validation_evidence ;;
+    *)
+      log_error "No postcondition is defined for phase '$phase'"
+      return 1
+      ;;
+  esac
 }
 
 # --- Phase orchestration -----------------------------------------------------
@@ -2625,6 +3079,9 @@ run_phase() {
       ;;
   esac
 
+  verify_phase_postcondition "$phase_name" "$model_name" "$project_name" "$output_dir" \
+    || fail "Postcondition failed for migration '$project_name' phase '$phase_name'"
+
   complete_phase_status "$phase_name"
 }
 
@@ -2669,6 +3126,7 @@ run_connection_setup() {
   local source_user source_password src_conn_details source_host source_port source_database parsed_source
   source_user="$(migration_required_value "$idx" source user)"
   source_password="$(migration_secret_value "$idx" source password)"
+  validate_sdcli_conn_details_password "migrations[$idx].source.password" "$source_password"
   parsed_source="$(parse_source_conn "$source_conn")"
   IFS='|' read -r source_host source_port source_database <<< "$parsed_source"
   check_source_tcp_connectivity "$source_host" "$source_port"
@@ -2679,6 +3137,7 @@ run_connection_setup() {
   target_conn="$(migration_required_value "$idx" target conn)"
   target_user="$(migration_required_value "$idx" target user)"
   target_password="$(migration_secret_value "$idx" target password)"
+  validate_sdcli_conn_details_password "migrations[$idx].target.password" "$target_password"
   tgt_conn_details="${target_name}:oracle:${target_user}/${target_password}@${target_conn}"
   ensure_connection "$target_name" "$tgt_conn_details"
 }
@@ -2778,6 +3237,10 @@ parse_args() {
         set_mode "migrate"
         shift
         ;;
+      --show-datatype-mapping)
+        set_mode "show-datatype-mapping"
+        shift
+        ;;
       --model)
         shift
         [[ $# -gt 0 ]] || fail "--model requires a value"
@@ -2822,6 +3285,8 @@ parse_args() {
 
   if [[ "$MODE" == "init" ]]; then
     [[ -z "$MIGRATION_NAME" ]] || fail "Migration name is not allowed with --init"
+  elif [[ "$MODE" == "show-datatype-mapping" ]]; then
+    : # Migration project name is an optional repository filter.
   else
     [[ -n "$MIGRATION_NAME" ]] || fail "Migration name is required (example: ./migrate.sh tpcc)"
   fi
@@ -2851,6 +3316,10 @@ parse_args() {
 
   if $RERUN_COMPLETED && [[ ! ( "$MODE" == "phase" && -n "$RUN_NAME_INPUT" ) ]]; then
     fail "--rerun-completed requires --phase and --run"
+  fi
+
+  if [[ "$MODE" == "show-datatype-mapping" && "$DRY_RUN" == "true" ]]; then
+    fail "--dry-run is not supported with --show-datatype-mapping"
   fi
 }
 
@@ -2884,6 +3353,7 @@ bootstrap_logging() {
 
   RUN_LOG_FILE="$AUTOKIT_DIR/migrate.log"
   touch "$RUN_LOG_FILE"
+  RUN_LOG_START_LINE="$(wc -l < "$RUN_LOG_FILE" | tr -d '[:space:]')"
 
   SDCLI_COMMAND_LOG="$AUTOKIT_DIR/sdcli_commands.log"
   SDCLI_SUMMARY_FILE="$AUTOKIT_DIR/sdcli_commands_summary.txt"
@@ -2904,6 +3374,20 @@ main() {
   [[ -f "$CONFIG_FILE" ]] || fail "Config file not found: $CONFIG_FILE"
   require_command yq
 
+  if [[ "$MODE" == "show-datatype-mapping" ]]; then
+    validate_datatype_mapping_config
+    configure_oracle_wallet >&2
+    require_command sqlplus
+    show_datatype_mapping "$MIGRATION_NAME"
+    return 0
+  fi
+
+  if [[ "$MODE" == "init" ]]; then
+    validate_config "false"
+  else
+    validate_config "true"
+  fi
+
   bootstrap_logging
 
   log_info "Config file: $CONFIG_FILE"
@@ -2917,11 +3401,6 @@ main() {
   log_info "SDCLI command log: $SDCLI_COMMAND_LOG"
   log_info "Dry run mode: $DRY_RUN"
 
-  if [[ "$MODE" == "init" ]]; then
-    validate_config "false"
-  else
-    validate_config "true"
-  fi
   configure_oracle_wallet
   configure_sqldeveloper_file_output_option
   log_info "Config validation passed"
@@ -2936,10 +3415,16 @@ main() {
     case "$MODE" in
       full|migrate)
         require_command sqlplus
+        require_command sqlcmd
+        require_command python3
         ;;
       phase)
         if [[ "$PHASE_NAME" == "deploy" || "$PHASE_NAME" == "cleanup" || "$PHASE_NAME" == "postdeploy" || "$PHASE_NAME" == "validate" ]]; then
           require_command sqlplus
+        fi
+        if [[ "$PHASE_NAME" == "validate" ]]; then
+          require_command sqlcmd
+          require_command python3
         fi
         ;;
     esac

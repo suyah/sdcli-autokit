@@ -53,7 +53,7 @@ touch "$output_dir/gen/generated-1.sql"
 
 touch "$output_dir/Emulation/user.sql"
 cat > "$output_dir/Emulation/master.sql" <<'SQL'
-@@"Emulation/packages.sql"
+@"Emulation/packages.sql"
 SQL
 touch "$output_dir/Emulation/packages.sql"
 touch "$output_dir/Emulation/post.sql"
@@ -63,6 +63,12 @@ touch "$output_dir/tpcc/tables.sql"
 touch "$output_dir/tpcc/indexes.sql"
 touch "$output_dir/tpcc/synonyms.sql"
 touch "$output_dir/tpcc/procedures.sql"
+cat > "$output_dir/tpcc/foreignkeys.sql" <<'SQL'
+ALTER TABLE Proda_Doctors
+  ADD CONSTRAINT Proda_Doctors_fk
+  FOREIGN KEY (provider_id)
+  REFERENCES Providers (provider_id);
+SQL
 cat > "$output_dir/tpcc/master.sql" <<'SQL'
 @@"tpcc/tables.sql"
 @@"tpcc/indexes.sql"
@@ -74,6 +80,7 @@ touch "$output_dir/tpcc/post.sql"
 touch "$output_dir/tpcc_copy_tpcc/user.sql"
 touch "$output_dir/tpcc_copy_tpcc/tables.sql"
 touch "$output_dir/tpcc_copy_tpcc/synonyms.sql"
+touch "$output_dir/tpcc_copy_tpcc/foreignkeys.sql"
 cat > "$output_dir/tpcc_copy_tpcc/master.sql" <<'SQL'
 @@"tpcc_copy_tpcc/tables.sql"
 @@"tpcc_copy_tpcc/synonyms.sql"
@@ -147,6 +154,7 @@ assert_line "$manifest" $'plan\tsdcli/gen/generated-1.sql\texcluded\tduplicate m
 
 calls=()
 run_postdeploy 0 "$output_dir"
+verify_deploy_manifest_phase postdeploy "$output_dir"
 
 post_calls="${calls[*]}"
 assert_contains "$post_calls" "Emulation/post.sql||0|Emulation"
@@ -154,23 +162,84 @@ assert_contains "$post_calls" "Emulation/packages.sql||0|Emulation"
 assert_contains "$post_calls" "tpcc/indexes.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc/synonyms.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc/procedures.sql||0|tpcc"
+assert_contains "$post_calls" "tpcc/foreignkeys.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc/post.sql||0|tpcc"
 assert_contains "$post_calls" "tpcc_copy_tpcc/synonyms.sql||0|tpcc_copy_tpcc"
+assert_contains "$post_calls" "tpcc_copy_tpcc/foreignkeys.sql||0|tpcc_copy_tpcc"
 assert_contains "$post_calls" "tpcc_copy_tpcc/post.sql||0|tpcc_copy_tpcc"
 assert_not_contains "$post_calls" "master.sql"
+[[ "$(printf '%s\n' "${calls[@]}" | grep -Fxc 'tpcc/foreignkeys.sql||0|tpcc')" == "1" ]]
+[[ "$(printf '%s\n' "${calls[@]}" | grep -Fxc 'tpcc_copy_tpcc/foreignkeys.sql||0|tpcc_copy_tpcc')" == "1" ]]
 
 assert_line "$manifest" $'postdeploy\tsdcli/Emulation/packages.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/Emulation/post.sql\texecuted\tpost-load compile and status script'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/indexes.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/synonyms.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/procedures.sql\texecuted\tpost-data master include'
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc/foreignkeys.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc/post.sql\texecuted\tpost-load compile and status script'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/synonyms.sql\texecuted\tpost-data master include'
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/foreignkeys.sql\texecuted\tpost-data master include'
 assert_line "$manifest" $'postdeploy\tsdcli/tpcc_copy_tpcc/post.sql\texecuted\tpost-load compile and status script'
 
+rm -f "$manifest"
+postdeploy_calls="$tmpdir/postdeploy-calls.log"
+failed_script="tpcc/procedures.sql"
+run_sqlplus_file() {
+  printf '%s\n' "$2" >> "$postdeploy_calls"
+  [[ "$2" != "$failed_script" ]]
+}
+
+set +e
+failure_output="$({ run_postdeploy 0 "$output_dir"; } 2>&1)"
+failure_rc=$?
+set -e
+[[ $failure_rc -ne 0 ]]
+assert_contains "$failure_output" "Postdeploy completed with 1 failed script(s)"
+assert_contains "$(cat "$postdeploy_calls")" "tpcc/post.sql"
+assert_contains "$(cat "$postdeploy_calls")" "tpcc_copy_tpcc/synonyms.sql"
+assert_contains "$(cat "$postdeploy_calls")" "tpcc_copy_tpcc/post.sql"
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc/procedures.sql\tfailed\tpost-data SQL errors'
+assert_line "$manifest" $'postdeploy\tsdcli/tpcc/post.sql\texecuted\tpost-load compile and status script'
+
+failed_script=""
+: > "$postdeploy_calls"
+run_postdeploy 0 "$output_dir"
+
+retry_calls="$(cat "$postdeploy_calls")"
+assert_contains "$retry_calls" "tpcc/procedures.sql"
+assert_contains "$retry_calls" "Emulation/post.sql"
+assert_contains "$retry_calls" "tpcc/post.sql"
+assert_not_contains "$retry_calls" "Emulation/packages.sql"
+assert_not_contains "$retry_calls" "tpcc/indexes.sql"
+assert_not_contains "$retry_calls" "tpcc/synonyms.sql"
+assert_not_contains "$retry_calls" "tpcc_copy_tpcc/synonyms.sql"
+
 touch "$output_dir/tpcc/unplanned.sql"
+set +e
+( run_postdeploy 0 "$output_dir" ) >/dev/null 2>&1
+failed_rerun_rc=$?
+set -e
+[[ $failed_rerun_rc -ne 0 ]]
+latest_completion_status="$(awk -F '\t' '$1 == "postdeploy" && $2 == "__phase_complete__" { status=$3 } END { print status }' "$manifest")"
+[[ "$latest_completion_status" == "pending" ]] || {
+  echo "Failed postdeploy rerun retained stale completion status: $latest_completion_status" >&2
+  exit 1
+}
+
 set +e
 ( validate_generated_sql_inventory "$output_dir" ) >/dev/null 2>&1
 unknown_rc=$?
 set -e
 [[ $unknown_rc -ne 0 ]]
+
+rm -f "$output_dir/tpcc/unplanned.sql"
+cat >> "$output_dir/tpcc/master.sql" <<'SQL'
+@@"tpcc/tables.sql" unexpected_argument
+SQL
+set +e
+unsupported_include_output="$(validate_generated_sql_inventory "$output_dir" 2>&1)"
+unsupported_include_rc=$?
+set -e
+[[ $unsupported_include_rc -ne 0 ]]
+assert_contains "$unsupported_include_output" "Unsupported generated master include"

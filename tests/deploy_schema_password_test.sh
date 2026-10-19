@@ -72,7 +72,7 @@ while IFS= read -r line; do
   esac
 done <<< "$stdin_text"
 cat passworddefinition.sql > "$SQLPLUS_PASSWORD_FILE"
-printf '%s\n' 'CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;'
+printf '%s\n' "${SQLPLUS_FAKE_OUTPUT:-CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;}"
 SCRIPT
 chmod +x "$fakebin/sqlplus"
 
@@ -85,22 +85,32 @@ PATH="$fakebin:$PATH"
 
 RUN_LOG_FILE="$tmpdir/sqlplus.log"
 touch "$RUN_LOG_FILE"
-run_sqlplus_file "$output_dir" "gen/generated-1.sql" "adb.example/high" "admin" "AdminPass1" "SchemaPass1" 3
+target_password='Adm@in Safe;Q"9'
+schema_password='Sch@ma Safe;R"8'
+escaped_schema_password="${schema_password//\"/\"\"}"
+SQLPLUS_FAKE_OUTPUT="CREATE USER tpcc IDENTIFIED BY \"${escaped_schema_password}\" PASSWORD EXPIRE ACCOUNT LOCK;"
+export SQLPLUS_FAKE_OUTPUT
+run_sqlplus_file "$output_dir" "gen/generated-1.sql" "adb.example/high" "admin" "$target_password" "$schema_password" 3
+unset SQLPLUS_FAKE_OUTPUT
 sqlplus_args="$(cat "$SQLPLUS_ARGS_FILE")"
 sqlplus_stdin="$(cat "$SQLPLUS_STDIN_FILE")"
 sqlplus_password_file="$(cat "$SQLPLUS_PASSWORD_FILE")"
 sqlplus_wrapper="$(cat "$SQLPLUS_WRAPPER_FILE")"
 assert_contains "$sqlplus_args" "/nolog"
-assert_not_contains "$sqlplus_args" "AdminPass1"
-assert_contains "$sqlplus_stdin" 'connect admin/"AdminPass1"@adb.example/high'
+assert_not_contains "$sqlplus_args" "$target_password"
+assert_contains "$sqlplus_stdin" 'connect admin/"Adm@in Safe;Q""9"@adb.example/high'
 assert_not_contains "$sqlplus_stdin" "@gen/generated-1.sql"
-assert_not_contains "$sqlplus_stdin" "SchemaPass1"
+assert_not_contains "$sqlplus_stdin" "$schema_password"
 assert_not_contains "$sqlplus_wrapper" "alter session set current_schema"
-assert_contains "$sqlplus_password_file" "DEFINE tpcc_password = \"SchemaPass1\""
-assert_contains "$sqlplus_password_file" "DEFINE tpcc_copy_tpcc_password = \"SchemaPass1\""
-assert_contains "$sqlplus_password_file" "DEFINE Emulation_password = \"SchemaPass1\""
+assert_contains "$sqlplus_wrapper" "SET VERIFY OFF"
+assert_contains "$sqlplus_password_file" 'DEFINE tpcc_password = "Sch@ma Safe;R""8"'
+assert_contains "$sqlplus_password_file" 'DEFINE tpcc_copy_tpcc_password = "Sch@ma Safe;R""8"'
+assert_contains "$sqlplus_password_file" 'DEFINE Emulation_password = "Sch@ma Safe;R""8"'
 assert_not_contains "$sqlplus_password_file" "ACCEPT"
 assert_contains "$(cat "$output_dir/passworddefinition.sql")" "ACCEPT tpcc_password"
+assert_not_contains "$(cat "$RUN_LOG_FILE")" "$target_password"
+assert_not_contains "$(cat "$RUN_LOG_FILE")" "$schema_password"
+assert_not_contains "$(cat "$RUN_LOG_FILE")" 'Sch@ma Safe'
 
 mkdir -p "$output_dir/tpcc"
 touch "$output_dir/tpcc/tables.sql"
@@ -113,6 +123,17 @@ assert_contains "$sqlplus_wrapper" "alter session set current_schema = tpcc;"
 assert_contains "$sqlplus_wrapper" "set define off"
 assert_contains "$sqlplus_wrapper" "@\"tpcc/tables.sql\""
 assert_contains "$sqlplus_wrapper" "set define on"
+
+SQLPLUS_FAKE_OUTPUT='ORA-00907: missing right parenthesis'
+export SQLPLUS_FAKE_OUTPUT
+set +e
+run_sqlplus_file "$output_dir" "tpcc/tables.sql" "adb.example/high" "admin" "AdminPass1" "" 0 "tpcc" true
+continue_rc=$?
+set -e
+unset SQLPLUS_FAKE_OUTPUT
+[[ $continue_rc -ne 0 ]]
+sqlplus_wrapper="$(cat "$SQLPLUS_WRAPPER_FILE")"
+assert_contains "$sqlplus_wrapper" "WHENEVER SQLERROR CONTINUE NONE;"
 
 declare -a file_calls=()
 
@@ -153,8 +174,38 @@ assert_not_contains "${file_calls[*]}" "gen/generated-1.sql"
 assert_contains "$(cat "$AUTOKIT_DIR/deploy_manifest.tsv")" $'plan\tsdcli/gen/generated-1.sql\texcluded\tduplicate monolithic output; schema hierarchy selected'
 
 masked="$(printf '%s\n' \
-  'CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;' \
-  'new   1: CREATE USER tpcc IDENTIFIED BY SchemaPass1 PASSWORD EXPIRE ACCOUNT LOCK;' \
+  "CREATE USER tpcc IDENTIFIED BY ${schema_password} PASSWORD EXPIRE ACCOUNT LOCK;" \
+  "new   1: CREATE USER tpcc IDENTIFIED BY ${schema_password} PASSWORD EXPIRE ACCOUNT LOCK;" \
   | filter_sqlplus_deploy_output)"
 assert_contains "$masked" "IDENTIFIED BY *** PASSWORD"
-assert_not_contains "$masked" "SchemaPass1"
+assert_not_contains "$masked" "$schema_password"
+
+assert_password_prompts_rejected() {
+  local expected="$1"
+  local output rc
+  set +e
+  output="$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql" 2>&1)"
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || {
+    echo "Expected passworddefinition.sql to be rejected" >&2
+    exit 1
+  }
+  assert_contains "$output" "$expected"
+}
+
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+ACCEPT repeated_password PROMPT "Password: " HIDE
+ACCEPT REPEATED_PASSWORD PROMPT "Password again: " HIDE
+SQL
+assert_password_prompts_rejected "duplicate ACCEPT identifier"
+
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+ACCEPT bad-name PROMPT "Password: " HIDE
+SQL
+assert_password_prompts_rejected "invalid ACCEPT identifier"
+
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+ACCEPT visible_password PROMPT "Password: "
+SQL
+assert_password_prompts_rejected "must end with HIDE"

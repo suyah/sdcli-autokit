@@ -100,7 +100,7 @@ PATH="$fakebin:$PATH"
 DRY_RUN=false
 RUN_LOG_FILE="$tmpdir/run.log"
 touch "$RUN_LOG_FILE"
-run_sqlplus_file "$AUTOKIT_DIR/deploy" "role_setup.sql" "adb.example/high" "admin" "AdminPass1" "" 0 "" "$output_dir"
+run_sqlplus_file "$AUTOKIT_DIR/deploy" "role_setup.sql" "adb.example/high" "admin" "AdminPass1" "" 0 "" false "$output_dir"
 [[ "$(cat "$SQLPLUS_CWD_FILE")" == "$output_dir" ]]
 assert_contains "$(cat "$SQLPLUS_WRAPPER_FILE")" "@\"$AUTOKIT_DIR/deploy/role_setup.sql\""
 

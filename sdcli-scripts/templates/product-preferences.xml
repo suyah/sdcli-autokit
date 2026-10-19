@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ide:preferences xmlns:ide="http://xmlns.oracle.com/ide/hash">
+   <!-- sdcli-autokit FileOutputOption v1 begin -->
+   <hash n="oracle.dbtools.migration.workbench.core.preferences.MigrationWorkbenchOptions">
+      <value n="FileOutputOption" v="__SQLDEVELOPER_FILE_OUTPUT_OPTION__"/>
+   </hash>
+   <!-- sdcli-autokit FileOutputOption v1 end -->
+</ide:preferences>

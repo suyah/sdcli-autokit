@@ -204,87 +204,20 @@ install_vendor_packages() {
 ensure_sqldeveloper_preferences() {
   container_engine exec \
     --env "HOME_DIR=$HOME_DIR" \
+    --env "MIGRATE_SCRIPT=$SDCLI_SCRIPTS_DEST/migrate.sh" \
     --env "SQLDEVELOPER_FILE_OUTPUT_OPTION=$SQLDEVELOPER_FILE_OUTPUT_OPTION" \
     "$CONTAINER_NAME" \
     bash -lc '
       set -euo pipefail
 
       : "$HOME_DIR"
+      : "$MIGRATE_SCRIPT"
       : "$SQLDEVELOPER_FILE_OUTPUT_OPTION"
 
-      prefs_root="$HOME_DIR/.sqldeveloper"
-      if [[ ! -d "$prefs_root" ]]; then
-        echo "Warning: SQL Developer preferences directory not found: $prefs_root"
-        exit 0
-      fi
-
-      preference_file="$(find "$prefs_root" -type f -path "*/o.sqldeveloper/product-preferences.xml" | sort | head -n 1 || true)"
-      if [[ -z "$preference_file" ]]; then
-        echo "Warning: SQL Developer product-preferences.xml not found under: $prefs_root"
-        exit 0
-      fi
-
-      tmp_file="$(mktemp "$preference_file.XXXXXX")"
-      if ! awk -v output_option="$SQLDEVELOPER_FILE_OUTPUT_OPTION" '\''
-        BEGIN {
-          in_options = 0
-          inserted = 0
-        }
-        $0 ~ /<hash n="oracle\.dbtools\.migration\.workbench\.core\.preferences\.MigrationWorkbenchOptions">/ {
-          in_options = 1
-        }
-        in_options && $0 ~ /<value n="FileOutputOption"/ {
-          if (!inserted) {
-            match($0, /^[[:space:]]*/)
-            indent = substr($0, RSTART, RLENGTH)
-            print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-            inserted = 1
-          }
-          next
-        }
-        in_options && $0 ~ /<value n="DefaultRepository"/ && !inserted {
-          print
-          match($0, /^[[:space:]]*/)
-          indent = substr($0, RSTART, RLENGTH)
-          print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-          inserted = 1
-          next
-        }
-        in_options && $0 ~ /<list n="MigrationRepositories">/ && !inserted {
-          match($0, /^[[:space:]]*/)
-          indent = substr($0, RSTART, RLENGTH)
-          print indent "<value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-          inserted = 1
-        }
-        $0 ~ /<\/ide:preferences>/ && !in_options && !inserted {
-          print "   <hash n=\"oracle.dbtools.migration.workbench.core.preferences.MigrationWorkbenchOptions\">"
-          print "      <value n=\"FileOutputOption\" v=\"" output_option "\"/>"
-          print "   </hash>"
-          inserted = 1
-        }
-        {
-          print
-        }
-        END {
-          if (!inserted) {
-            exit 2
-          }
-        }
-      '\'' "$preference_file" > "$tmp_file"; then
-        rm -f "$tmp_file"
-        echo "Warning: SQL Developer MigrationWorkbenchOptions block not found in: $preference_file"
-        exit 0
-      fi
-
-      if cmp -s "$tmp_file" "$preference_file"; then
-        rm -f "$tmp_file"
-        echo "SQL Developer FileOutputOption already configured: $preference_file"
-        exit 0
-      fi
-
-      cat "$tmp_file" > "$preference_file"
-      rm -f "$tmp_file"
-      echo "Configured SQL Developer FileOutputOption=$SQLDEVELOPER_FILE_OUTPUT_OPTION: $preference_file"
+      export HOME="$HOME_DIR"
+      export MIGRATE_SH_SOURCE_ONLY=true
+      source "$MIGRATE_SCRIPT"
+      configure_sqldeveloper_file_output_option
     '
 }
 
@@ -301,7 +234,12 @@ initialize_sqldeveloper_preferences() {
 sync_sdcli_scripts() {
   [[ -d "$SDCLI_SCRIPTS_SRC" ]] || fail "sdcli-scripts directory not found: $SDCLI_SCRIPTS_SRC"
 
-  if container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' && test -f '$SDCLI_SCRIPTS_DEST/config.yaml'"; then
+  if container_engine exec "$CONTAINER_NAME" bash -lc \
+      "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' \
+       && test -f '$SDCLI_SCRIPTS_DEST/config.yaml' \
+       && test -f '$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py' \
+       && test -f '$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh' \
+       && test -f '$SDCLI_SCRIPTS_DEST/templates/product-preferences.xml'"; then
     return
   fi
 
@@ -311,7 +249,7 @@ sync_sdcli_scripts() {
 
 check_tools() {
   local tool
-  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq; do
+  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq python3; do
     container_engine exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
       echo "Error: $tool is missing after installation" >&2
       return 1
@@ -324,6 +262,9 @@ check_tools() {
   container_engine exec "$CONTAINER_NAME" bash -lc "sdcli --help >/dev/null 2>&1" || { echo "Error: sdcli did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh'" || { echo "Error: migration scripts are missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh'" || { echo "Error: SQL*Plus deploy helper library is missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/templates/product-preferences.xml'" || { echo "Error: SQL Developer preferences template is missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py'" || { echo "Error: validation report program is missing" >&2; return 1; }
 }
 
 if [[ "${RUN_SH_SOURCE_ONLY:-false}" == "true" ]]; then

@@ -1,0 +1,2 @@
+0	APP.CUSTOMER	control/customer.ctl	data/sales/customer.dat	2	0	0	log/customer.log
+0	APP.ORDERS	control/orders.ctl	data/sales/orders.dat	1	0	0	log/orders.log

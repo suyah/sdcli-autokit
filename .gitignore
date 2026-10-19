@@ -22,14 +22,22 @@
 # Track sdcli-scripts folder
 !sdcli-scripts/
 !sdcli-scripts/**
+sdcli-scripts/**/__pycache__/
+sdcli-scripts/**/*.pyc
 
 # Track this feature's design and implementation documents
 !docs/
 !docs/superpowers/
 !docs/superpowers/specs/
 !docs/superpowers/specs/2026-10-09-offline-container-distribution-design.md
+!docs/superpowers/specs/2026-10-16-automatic-migration-validation-report-design.md
+!docs/superpowers/specs/2026-10-17-actionable-validation-evidence-design.md
+!docs/superpowers/specs/2026-10-19-parser-risk-remediation-design.md
 !docs/superpowers/plans/
 !docs/superpowers/plans/2026-10-09-offline-container-distribution.md
+!docs/superpowers/plans/2026-10-16-automatic-migration-validation-report.md
+!docs/superpowers/plans/2026-10-19-parser-risk-remediation.md
+!docs/tech-debt-multi-source-adapters.md
 
 # Track the migration reliability review and mandatory-change design.
 !docs/migration-reliability-priorities.md
@@ -41,6 +49,7 @@
 !tests/sdcli_success_marker_test.sh
 !tests/sdcli_success_marker_error_test.sh
 !tests/sdcli_conversion_diagnostic_test.sh
+!tests/sdcli_output_redaction_test.sh
 !tests/offload_bcp_failure_test.sh
 !tests/deploy_orchestration_test.sh
 !tests/generated_deploy_fallback_test.sh
@@ -59,6 +68,16 @@
 !tests/target_row_count_test.sh
 !tests/offload_multiple_scripts_test.sh
 !tests/target_object_validation_test.sh
+!tests/config_database_type_test.sh
+!tests/validation_report_test.sh
+!tests/test_validation_report.py
+!tests/validation_metadata_collection_test.sh
+!tests/datatype_mapping_command_test.sh
+!tests/sdcli_action_postcondition_test.sh
+!tests/migrate_preferences_test.sh
+!tests/fixtures/
+!tests/fixtures/validation/
+!tests/fixtures/validation/**
 
 # Never track backup files
 *.bak

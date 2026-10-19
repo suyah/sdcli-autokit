@@ -55,6 +55,7 @@ tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/VERSION' >/dev/nu
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/run.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/install-vendor.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/migrate.sh' >/dev/null
+tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/lib/generate_validation_report.py' >/dev/null
 [[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/VERSION)" == "1.2.3" ]]
 
 expected_hash="$(awk '{print $1}' "$checksum")"
@@ -83,5 +84,6 @@ fi
 ! grep -q 'oracle-instantclient-release' "$REPO_ROOT/deployment/Dockerfile"
 ! grep -q 'msodbcsql18' "$REPO_ROOT/deployment/Dockerfile"
 ! grep -q 'mssql-tools18' "$REPO_ROOT/deployment/Dockerfile"
+grep -Eq '^[[:space:]]+python3([[:space:]\\]|$)' "$REPO_ROOT/deployment/Dockerfile"
 
 echo "offline bundle test passed"

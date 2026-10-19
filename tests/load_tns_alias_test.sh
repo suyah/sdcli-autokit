@@ -202,3 +202,44 @@ assert_contains "$tns_text" "(HOST = adb.ap-hyderabad-1.oraclecloud.com)"
 assert_contains "$tns_text" "(PORT = 1521)"
 assert_contains "$tns_text" "(SERVICE_NAME = g207e55d6197742_test23atp_high.adb.oraclecloud.com)"
 assert_contains "$tns_text" "(SSL_SERVER_DN_MATCH = YES)"
+
+assert_control_rejected() {
+  local expected="$1"
+  local output rc
+  : > "$RUN_LOG_FILE"
+  set +e
+  output="$(run_load 0 "$output_dir" 2>&1)"
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || {
+    echo "Expected ambiguous SQL*Loader control file to fail" >&2
+    exit 1
+  }
+  assert_contains "$output" "$expected"
+}
+
+cat > "$datamove_dir/tpcc/control/tpcc.customer.ctl" <<'CTL'
+load data
+infile 'data/tpcc.customer.dat'
+infile 'data/tpcc.customer-part2.dat'
+into table TPCC.CUSTOMER
+(ID)
+CTL
+assert_control_rejected "exactly one INFILE record"
+
+cat > "$datamove_dir/tpcc/control/tpcc.customer.ctl" <<'CTL'
+load data
+infile 'data/tpcc.customer.dat'
+into table TPCC.CUSTOMER
+into table TPCC.CUSTOMER_ARCHIVE
+(ID)
+CTL
+assert_control_rejected "exactly one INTO TABLE record"
+
+cat > "$datamove_dir/tpcc/control/tpcc.customer.ctl" <<'CTL'
+load data
+infile 'data/tpcc.customer.dat'
+into table TPCC.CUSTOMER;DROP
+(ID)
+CTL
+assert_control_rejected "unsupported INTO TABLE identifier"

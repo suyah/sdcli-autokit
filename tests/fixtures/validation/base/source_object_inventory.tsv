@@ -1,0 +1,9 @@
+schema	category	object_name	parent_schema	parent_name	subtype	ordinal	attribute_name	attribute_value	status	detail	origin
+sales	TABLES	customer			TABLE				VALID		fixture
+sales	TABLES	orders			TABLE				VALID		fixture
+sales	VIEWS	active customers			VIEW				VALID		fixture
+sales	ROUTINES	GetCustomer			PROCEDURE				VALID		fixture
+sales	IDENTITY_COLUMNS	ID	sales	customer	IDENTITY				VALID		fixture
+sales	PRIMARY_KEYS	PK_customer	sales	customer	PRIMARY_KEY	1	column	ID	VALID		fixture
+sales	INDEXES	IX_customer_name	sales	customer	UNIQUE	0	unique	true	VALID		fixture
+sales	INDEXES	IX_customer_name	sales	customer	UNIQUE	1	column	NAME	VALID		fixture

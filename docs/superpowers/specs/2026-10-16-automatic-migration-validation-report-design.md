@@ -30,8 +30,10 @@ truthful exit code.
 ## 2. Design decisions
 
 1. No new user configuration or report-specific command is required.
-2. Generated BCP and SQL\*Loader artifacts are the authoritative table and
-   schema mapping source.
+2. The existing BCP and SQL\*Loader status artifacts are the authoritative
+   table and schema mapping source. They already record the exact source
+   object, target object, and generated data-file path used by the run, so the
+   report does not reparse executable shell commands.
 3. Generated DDL is the authoritative expected-target inventory. This permits
    the report to distinguish a conversion omission from a deployment omission.
 4. Tableless schemas are mapped from unique source-to-generated object identity
@@ -51,11 +53,16 @@ truthful exit code.
 10. The report is generated on both validation success and validation failure.
 11. Existing TSV evidence remains available; the HTML report is a view over
     evidence, not the only record of the result.
+12. This release supports exactly one migration pair: `sqlserver` as the
+    source and `oracle` as the target. Configuration preflight rejects every
+    other pair before SDCLI, BCP, SQL\*Loader, or database connectivity work.
 
 ## 3. Non-goals
 
 - Supporting source platforms other than SQL Server or targets other than
-  Oracle.
+  Oracle in this release. Additional RDBMS sources are planned future work and
+  require source-specific connection, capture, extraction, row-evidence, and
+  metadata adapters.
 - Building a generic schema-comparison product.
 - Adding a web service, dashboard server, report database, or cloud upload.
 - Adding project-specific schema names, object names, endpoints, or exclusion
@@ -77,6 +84,34 @@ truthful exit code.
 
 ## 4. Operator contract
 
+### 4.0 Supported migration pair
+
+`sdcli-autokit` currently orchestrates SQL Server-to-Oracle migrations only.
+Although `config.yaml` contains `defaults.source.type` and
+`defaults.target.type`, those fields select the supported contract; they do
+not activate interchangeable database adapters.
+
+The required values are:
+
+```yaml
+defaults:
+  source:
+    type: sqlserver
+  target:
+    type: oracle
+```
+
+Startup configuration preflight normalizes the values to lowercase and then
+requires the exact pair `sqlserver -> oracle`. A missing or unsupported value
+stops the command before any SDCLI invocation, database connection attempt, or
+migration artifact change. The error reports the configured pair and the one
+supported pair without printing credentials.
+
+Future source support is intentionally not represented by accepting additional
+type names early. A new RDBMS source is supported only after it has an explicit
+adapter for connection details, source capture, data offload, row evidence,
+metadata extraction, artifact mapping, and validation, with end-to-end tests.
+
 ### 4.1 Normal workflow
 
 The workflow remains:
@@ -89,7 +124,7 @@ capture -> convert -> generate -> datamove -> offload -> deploy -> load
 The operator runs validation exactly as before:
 
 ```bash
-./migrate.sh proda --phase validate --run "$RUN"
+./migrate.sh sales --phase validate --run "$RUN"
 ```
 
 No report flag, schema list, mapping file, or manual extraction step is needed.
@@ -109,6 +144,7 @@ directory:
 | `target_object_inventory.tsv` | Read-only Oracle object inventory and validity. |
 | `object_comparison.tsv` | Per-object conversion/deployment status and reason. |
 | `reconciliation.tsv` | Existing table-level exported/loaded/final row evidence. |
+| `validation_checks.tsv` | Normalized shell validation findings included in report status and evidence health. |
 | `validation_summary.txt` | Existing machine-readable final result, extended with report counters. |
 | `migration_report.html` | Self-contained human-readable validation report. |
 
@@ -156,9 +192,9 @@ be handled as customer migration evidence and must not contain passwords.
 ## 5. Data flow
 
 ```text
-Generated BCP scripts -----------+
+bcp_status.tsv ------------------+
                                  +--> mapping collector --> schema_mapping.tsv
-Generated SQL*Loader controls ---+
+sqlldr_status.tsv ---------------+
 
 Generated Oracle DDL ----------------------------> generated_target_inventory.tsv
 
@@ -186,27 +222,28 @@ sorting, and report layout are testable without shell quoting complexity.
 
 ### 6.1 Exact table mapping
 
-The primary mapping is derived from files produced by SQL Developer's
-`datamove` action:
+The primary mapping is derived from the existing status files written while
+the SQL Developer `datamove` artifacts are executed:
 
-1. Parse every generated `MicrosoftSQLServer_data.sh` command.
-2. Record the source database, source schema, source table, and normalized data
-   file path.
-3. Parse every generated SQL\*Loader control file.
-4. Record the Oracle owner, target table, and normalized data file path.
-5. Join the records by normalized generated data-file path.
-6. Require each data file to map exactly one source object to exactly one target
+1. Read source object and normalized generated data-file path from every
+   successful `bcp_status.tsv` record.
+2. Read Oracle owner, target table, and normalized generated data-file path
+   from every successful `sqlldr_status.tsv` record.
+3. Join the records by normalized generated data-file path.
+4. Require each data file to map exactly one source object to exactly one target
    object.
-7. Aggregate table mappings into source-schema to target-owner mappings.
+5. Aggregate table mappings into source-schema to target-owner mappings.
 
 A schema mapping is `MAPPED` by method `DATA_FILE` only when all of its table
 pairs agree. One source schema mapping to multiple target owners, one target
 owner mapping to multiple source schemas, a duplicate data file, or an
 unpaired table is an error.
 
-The parser uses generated script structure only. It does not use filename
-basenames as globally unique identifiers and does not infer a mapping from a
-project-specific naming convention.
+The mapper uses the full normalized data-file paths recorded during execution.
+It does not use filename basenames as globally unique identifiers and does not
+infer a mapping from a project-specific naming convention. Missing or failed
+status records are already validation failures and cannot silently contribute
+a mapping.
 
 ### 6.2 Tableless schema mapping
 
@@ -248,8 +285,8 @@ The derived mapping artifact records:
 
 ```text
 source_schema  target_schema  method           evidence_count  status      reason
-dbo            PRODA          DATA_FILE         3               MAPPED
-api            API_PRODA      OBJECT_IDENTITY   4               MAPPED
+sales          SALES_APP      DATA_FILE         3               MAPPED
+api            API_APP        OBJECT_IDENTITY   4               MAPPED
                EMULATION      CONVERSION_ONLY   1               CONTEXT
 ```
 
@@ -262,6 +299,12 @@ The attached standalone SQL Server and Oracle extraction scripts are reference
 material, not files to execute unchanged. Their useful catalog coverage is
 retained, while hardcoded schema lists and manual export assumptions are
 removed.
+
+The attached SQL Server row-count generator is not required by the normal
+workflow. BCP, SQL\*Loader, and final Oracle counts already describe the exact
+dataset exported and loaded by this run. The metadata extraction SQL remains
+useful as a catalog-coverage reference, but the implementation issues its own
+automated, parameterized, read-only queries.
 
 ### 7.1 SQL Server
 
@@ -383,6 +426,8 @@ not erase evidence already collected.
 
 Validation fails for:
 
+- an unsupported `defaults.source.type` and `defaults.target.type` pair during
+  configuration preflight, before validation or any earlier migration phase;
 - missing or duplicate mapping records;
 - unresolved or conflicting schema mappings;
 - missing source or target inventory evidence;
@@ -442,7 +487,8 @@ new runtime program:
   - aggregate report issues into validation status; and
   - log the final report path.
 - `sdcli-scripts/lib/generate_validation_report.py`
-  - derive source-to-target table mappings from BCP and control files;
+  - derive source-to-target table mappings from BCP and SQL\*Loader status
+    evidence;
   - parse the supported generated DDL inventory;
   - normalize inventories;
   - resolve tableless mappings;
@@ -498,7 +544,7 @@ credentials.
 
 ### 15.1 Mapping tests
 
-- one source/target table pair produces one `DATA_FILE` mapping;
+- one source/target status pair produces one `DATA_FILE` mapping;
 - multiple tables in one schema agree on one owner;
 - duplicate, unpaired, and conflicting data files fail;
 - multiple source schemas map independently;
@@ -542,6 +588,9 @@ that must fail rather than disappear.
 
 ### 15.5 Workflow and container tests
 
+- configuration preflight accepts `sqlserver -> oracle` case-insensitively and
+  rejects missing or unsupported source/target types before invoking external
+  tools;
 - `validate` writes all evidence and returns zero for a complete passing
   fixture;
 - every failure class returns nonzero while still producing the report;
@@ -554,28 +603,32 @@ that must fail rather than disappear.
 
 The feature is complete when:
 
-1. A normal full migration automatically creates `migration_report.html`.
-2. The operator provides no schema mapping, schema list, manual export, or
+1. Configuration preflight clearly accepts only SQL Server-to-Oracle and
+   rejects unsupported migration pairs before external work.
+2. A normal full migration automatically creates `migration_report.html`.
+3. The operator provides no schema mapping, schema list, manual export, or
    additional report command.
-3. Every migrated table has one source-to-target mapping derived from generated
+4. Every migrated table has one source-to-target mapping derived from generated
    artifacts.
-4. Tableless schemas are either uniquely mapped or clearly fail as unresolved.
-5. The report distinguishes objects omitted during conversion from objects
+5. Tableless schemas are either uniquely mapped or clearly fail as unresolved.
+6. The report distinguishes objects omitted during conversion from objects
    generated but absent after deployment.
-6. Row reconciliation, user-object comparison, target validity, and compiler
+7. Row reconciliation, user-object comparison, target validity, and compiler
    errors appear in one report.
-7. Generic conversion/platform artifacts remain visible without producing
+8. Generic conversion/platform artifacts remain visible without producing
    false user-object failures.
-8. A validation failure still leaves a readable report and returns nonzero.
-9. A PASS report agrees with `validation_summary.txt` and every row of
+9. A validation failure still leaves a readable report and returns nonzero.
+10. A PASS report agrees with `validation_summary.txt` and every row of
    `reconciliation.tsv`.
-10. No generated evidence contains configured passwords.
-11. The report works from a customer VM with no Internet access.
-12. All shell, Python, workflow, and offline-bundle tests pass.
+11. No generated evidence contains configured passwords.
+12. The report works from a customer VM with no Internet access.
+13. All shell, Python, workflow, and offline-bundle tests pass.
 
 ## 17. What users need to understand
 
 - The report is generated by `validate`; there is no separate reporting setup.
+- This release supports only `sqlserver -> oracle`; other RDBMS sources are
+  planned but are not currently accepted by configuration preflight.
 - Validation needs both databases reachable for metadata queries.
 - Row counts refer to the actual exported and loaded run, not a later source
   recount.
@@ -592,6 +645,9 @@ troubleshooting sections during implementation.
 ## 18. What maintainers need to understand
 
 - Mapping comes from generated artifacts, never project naming conventions.
+- The `type` fields are a checked support contract, not a generic adapter
+  registry. Do not add a type value until the whole source-specific workflow
+  and its end-to-end tests exist.
 - A heuristic mapping is accepted only when unique and one-to-one; ambiguity is
   a failure.
 - SQL Developer private repository tables are not an integration interface.
