@@ -8,6 +8,43 @@ usage() {
   echo "Usage: build-offline.sh <version>" >&2
 }
 
+print_tree_entries() {
+  local directory="$1"
+  local prefix="$2"
+  local entry connector child_prefix index
+  local -a entries=()
+
+  while IFS= read -r entry; do
+    entries+=("$entry")
+  done < <(find "$directory" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort)
+
+  for ((index = 0; index < ${#entries[@]}; index++)); do
+    entry="${entries[$index]}"
+    if ((index == ${#entries[@]} - 1)); then
+      connector='└── '
+      child_prefix="${prefix}    "
+    else
+      connector='├── '
+      child_prefix="${prefix}│   "
+    fi
+
+    if [[ -d "$entry" ]]; then
+      printf '%s%s%s/\n' "$prefix" "$connector" "${entry##*/}"
+      print_tree_entries "$entry" "$child_prefix"
+    else
+      printf '%s%s%s\n' "$prefix" "$connector" "${entry##*/}"
+    fi
+  done
+}
+
+print_bundle_tree() {
+  local bundle_directory="$1"
+
+  printf 'Bundle contents:\n'
+  printf '%s/\n' "${bundle_directory##*/}"
+  print_tree_entries "$bundle_directory" ""
+}
+
 if [[ $# -ne 1 ]]; then
   usage
   exit 1
@@ -103,5 +140,6 @@ else
   (cd "$DIST_DIR" && shasum -a 256 "$BUNDLE_NAME.tar.gz" > "$BUNDLE_NAME.tar.gz.sha256")
 fi
 
+print_bundle_tree "$bundle_dir"
 echo "Created offline bundle: $BUNDLE_PATH"
 echo "Checksum: $CHECKSUM_PATH"

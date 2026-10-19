@@ -54,8 +54,16 @@ chmod +x "$fakebin/podman"
 
 dist_dir="$tmpdir/dist"
 podman_log="$tmpdir/podman.log"
-PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" DIST_DIR="$dist_dir" \
-  "$REPO_ROOT/release/build-offline.sh" 1.2.3
+build_output="$(
+  PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" DIST_DIR="$dist_dir" \
+    "$REPO_ROOT/release/build-offline.sh" 1.2.3
+)"
+
+grep -Fx 'Bundle contents:' <<< "$build_output" >/dev/null
+grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/' <<< "$build_output" >/dev/null
+grep -Fx '│   ├── run.sh' <<< "$build_output" >/dev/null
+grep -Fx '├── image.tar' <<< "$build_output" >/dev/null
+grep -Fx '└── sdcli-scripts/' <<< "$build_output" >/dev/null
 
 bundle="$dist_dir/sdcli-autokit-1.2.3-linux-amd64.tar.gz"
 checksum="$bundle.sha256"
