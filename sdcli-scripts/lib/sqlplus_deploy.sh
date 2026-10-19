@@ -525,7 +525,7 @@ schema_file_is_covered() {
   local output_dir="$1"
   local schema_dir="$2"
   local rel_path="$3"
-  local schema_rel rest group include_path
+  local schema_rel include_path
   schema_rel="${schema_dir#$output_dir/}"
 
   case "$rel_path" in
@@ -534,26 +534,17 @@ schema_file_is_covered() {
     "$schema_rel/disable.sql"|"$schema_rel/enable.sql"|\
     "$schema_rel/reportallstatus.sql"|"$schema_rel/reportinvalidstatus.sql"|\
     "$schema_rel/foreignkeys.sql") return 0 ;;
-    "$schema_rel/post/"*) [[ -f "$schema_dir/post.sql" ]] && return 0 ;;
   esac
 
   while IFS= read -r include_path; do
     [[ "$rel_path" == "$include_path" ]] && return 0
   done < <(schema_master_includes "$output_dir" "$schema_dir")
-
-  rest="${rel_path#"$schema_rel/"}"
-  if [[ "$rest" == */* ]]; then
-    group="${rest%%/*}"
-    while IFS= read -r include_path; do
-      [[ "$include_path" == "$schema_rel/$group.sql" ]] && return 0
-    done < <(schema_master_includes "$output_dir" "$schema_dir")
-  fi
   return 1
 }
 
 validate_generated_sql_inventory() {
   local output_dir="$1"
-  local found_schema=false schema_dir sql_file rel_path generated_count
+  local found_schema=false schema_dir schema_rel sql_file rel_path schema_child
 
   while IFS= read -r sql_file; do
     case "$(basename "$sql_file")" in
@@ -564,9 +555,13 @@ validate_generated_sql_inventory() {
 
   while IFS= read -r schema_dir; do
     found_schema=true
+    schema_rel="${schema_dir#$output_dir/}"
     schema_master_includes "$output_dir" "$schema_dir" >/dev/null
     while IFS= read -r sql_file; do
       rel_path="${sql_file#$output_dir/}"
+      schema_child="${rel_path#"$schema_rel/"}"
+      [[ "$schema_child" != */* ]] \
+        || fail "Unsupported nested generated SQL file: $sql_file; only flat per-schema SQL Developer output is supported"
       schema_file_is_covered "$output_dir" "$schema_dir" "$rel_path" \
         || fail "Generated SQL file is not accounted for by the schema master plan: $sql_file"
     done < <(find "$schema_dir" -type f -name '*.sql' | LC_ALL=C sort)
@@ -576,9 +571,7 @@ validate_generated_sql_inventory() {
     return 0
   fi
 
-  generated_count="$(generated_sql_files "$output_dir" | awk 'NF {count++} END {print count+0}')"
-  [[ "$generated_count" == "1" ]] \
-    || fail "Expected exactly one generated SQL script when no schema hierarchy exists; found $generated_count under $output_dir/gen"
+  fail "Unsupported generated SQL layout: expected at least one flat <schema>/user.sql and <schema>/master.sql pair; monolithic gen/*.sql deployment is not supported"
 }
 
 record_root_sql_inventory() {
@@ -612,7 +605,6 @@ record_schema_inventory() {
     case "$rel_path" in
       "$schema_rel/user.sql"|"$schema_rel/master.sql") ;;
       "$schema_rel/post.sql") ;;
-      "$schema_rel/post/"*) record_deploy_manifest "plan" "$sql_file" "covered" "executed by post.sql" ;;
       "$schema_rel/dropobjects.sql"|"$schema_rel/dropobjecttypes.sql")
         record_deploy_manifest "plan" "$sql_file" "excluded" "destructive cleanup script"
         ;;
@@ -625,13 +617,7 @@ record_schema_inventory() {
       "$schema_rel/foreignkeys.sql")
         :
         ;;
-      *)
-        # Direct master includes are recorded when executed. Nested generated
-        # files are covered by their master-listed group script.
-        if [[ "$rel_path" == "$schema_rel/"*/* ]]; then
-          record_deploy_manifest "plan" "$sql_file" "covered" "executed by master-listed group script"
-        fi
-        ;;
+      *) : ;;
     esac
   done < <(find "$schema_dir" -type f -name '*.sql' | LC_ALL=C sort)
 }
@@ -662,7 +648,6 @@ run_deploy() {
     log_info "[DRY-RUN] derive and execute setup-only role script from: $output_dir/role.sql"
     log_info "[DRY-RUN] deploy script glob: $output_dir/*/user.sql"
     log_info "[DRY-RUN] deploy pre-data scripts: master-listed types.sql, sequences.sql, and tables.sql"
-    log_info "[DRY-RUN] deploy fallback: exactly one SQL file under $output_dir/gen"
     log_info "[DRY-RUN] deploy manifest: $(deploy_manifest_file)"
     return 0
   fi
@@ -683,9 +668,8 @@ run_deploy() {
     fi
   fi
 
-  local found_any=false schema_dir schema_name rel_user_sql include_path
+  local schema_dir schema_name rel_user_sql include_path generated_sql
   while IFS= read -r schema_dir; do
-    found_any=true
     record_schema_inventory "$output_dir" "$schema_dir"
     rel_user_sql="${schema_dir#$output_dir/}/user.sql"
     if run_sqlplus_file "$output_dir" "$rel_user_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count"; then
@@ -696,36 +680,22 @@ run_deploy() {
     fi
   done < <(schema_dirs "$output_dir")
 
-  local generated_sql rel_generated_sql
-  if $found_any; then
-    while IFS= read -r schema_dir; do
-      schema_name="$(basename "$schema_dir")"
-      while IFS= read -r include_path; do
-        is_predata_sql "$include_path" || continue
-        if run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name"; then
-          record_deploy_manifest "deploy" "$output_dir/$include_path" "executed" "pre-data master include"
-        else
-          record_deploy_manifest "deploy" "$output_dir/$include_path" "failed" "pre-data SQL*Plus failure"
-          fail "Pre-data generated SQL failed: $include_path"
-        fi
-      done < <(schema_master_includes "$output_dir" "$schema_dir")
-    done < <(schema_dirs "$output_dir")
+  while IFS= read -r schema_dir; do
+    schema_name="$(basename "$schema_dir")"
+    while IFS= read -r include_path; do
+      is_predata_sql "$include_path" || continue
+      if run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name"; then
+        record_deploy_manifest "deploy" "$output_dir/$include_path" "executed" "pre-data master include"
+      else
+        record_deploy_manifest "deploy" "$output_dir/$include_path" "failed" "pre-data SQL*Plus failure"
+        fail "Pre-data generated SQL failed: $include_path"
+      fi
+    done < <(schema_master_includes "$output_dir" "$schema_dir")
+  done < <(schema_dirs "$output_dir")
 
-    while IFS= read -r generated_sql; do
-      record_deploy_manifest "plan" "$generated_sql" "excluded" "duplicate monolithic output; schema hierarchy selected"
-    done < <(generated_sql_files "$output_dir")
-  else
-    generated_sql="$(generated_sql_files "$output_dir")"
-
-    log_info "No per-schema user.sql files found; deploying the single generated SQL output"
-    rel_generated_sql="${generated_sql#$output_dir/}"
-    if run_sqlplus_file "$output_dir" "$rel_generated_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count"; then
-      record_deploy_manifest "deploy" "$generated_sql" "executed" "single generated fallback"
-    else
-      record_deploy_manifest "deploy" "$generated_sql" "failed" "single generated fallback SQL*Plus failure"
-      fail "generated SQL failed: $generated_sql"
-    fi
-  fi
+  while IFS= read -r generated_sql; do
+    record_deploy_manifest "plan" "$generated_sql" "excluded" "duplicate monolithic output; schema hierarchy selected"
+  done < <(generated_sql_files "$output_dir")
 
   log_info "Deploy manifest: $(deploy_manifest_file)"
 }

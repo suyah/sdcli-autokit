@@ -37,26 +37,76 @@ get_secret_value() {
   esac
 }
 
-declare -a calls=()
+calls_file="$tmpdir/sqlplus-calls.log"
+: > "$calls_file"
 run_sqlplus_file() {
-  calls+=("$2|${6:-}|${7:-0}|${8:-}")
+  printf '%s\n' "$2|${6:-}|${7:-0}|${8:-}" >> "$calls_file"
 }
 
 DRY_RUN=false
 RUN_LOG_FILE="$tmpdir/run.log"
 touch "$RUN_LOG_FILE"
 
-run_deploy 0 "$output_dir"
-
-[[ "${calls[*]}" == "gen/generated-main.sql|SchemaPass1|1|" ]]
-assert_contains "$(cat "$RUN_LOG_FILE")" "No per-schema user.sql files found; deploying the single generated SQL output"
-assert_contains "$(cat "$AUTOKIT_DIR/deploy_manifest.tsv")" $'deploy\tsdcli/gen/generated-main.sql\texecuted\tsingle generated fallback'
-
-touch "$output_dir/gen/generated-extra.sql"
 set +e
-( validate_generated_sql_inventory "$output_dir" ) >/dev/null 2>&1
-multiple_rc=$?
+fallback_output="$({ run_deploy 0 "$output_dir"; } 2>&1)"
+fallback_rc=$?
 set -e
-[[ $multiple_rc -ne 0 ]]
+[[ $fallback_rc -ne 0 ]] || {
+  echo "Monolithic generated SQL layout unexpectedly deployed" >&2
+  exit 1
+}
+assert_contains "$fallback_output" "Unsupported generated SQL layout"
+[[ ! -s "$calls_file" ]] || {
+  echo "Monolithic layout reached SQL*Plus" >&2
+  cat "$calls_file" >&2
+  exit 1
+}
+
+assert_nested_layout_rejected() {
+  local fixture_name="$1"
+  local nested_kind="$2"
+  local fixture_dir="$tmpdir/$fixture_name"
+  local fixture_output="$fixture_dir/sdcli"
+  local output rc
+
+  RUN_DIR="$fixture_dir"
+  AUTOKIT_DIR="$fixture_dir/autokit"
+  mkdir -p "$AUTOKIT_DIR" "$fixture_output/app"
+  : > "$fixture_output/passworddefinition.sql"
+  touch "$fixture_output/app/user.sql"
+  case "$nested_kind" in
+    post)
+      touch "$fixture_output/app/post.sql"
+      mkdir -p "$fixture_output/app/post"
+      touch "$fixture_output/app/post/compile.sql"
+      : > "$fixture_output/app/master.sql"
+      ;;
+    group)
+      touch "$fixture_output/app/routines.sql"
+      mkdir -p "$fixture_output/app/routines"
+      touch "$fixture_output/app/routines/procedure.sql"
+      printf '%s\n' '@"app/routines.sql"' > "$fixture_output/app/master.sql"
+      ;;
+  esac
+  : > "$calls_file"
+
+  set +e
+  output="$({ run_deploy 0 "$fixture_output"; } 2>&1)"
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || {
+    echo "$fixture_name unexpectedly deployed" >&2
+    exit 1
+  }
+  assert_contains "$output" "nested generated SQL"
+  [[ ! -s "$calls_file" ]] || {
+    echo "$fixture_name reached SQL*Plus" >&2
+    cat "$calls_file" >&2
+    exit 1
+  }
+}
+
+assert_nested_layout_rejected nested-post post
+assert_nested_layout_rejected nested-group group
 
 echo "generated deploy fallback test passed"
