@@ -56,6 +56,9 @@ if [[ ! "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
   exit 1
 fi
 
+"$ROOT_DIR/release/preflight.sh" "$VERSION"
+SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+
 IMAGE_NAME="sdcli-autokit:$VERSION"
 BUNDLE_NAME="sdcli-autokit-$VERSION-linux-amd64"
 BUNDLE_PATH="$DIST_DIR/$BUNDLE_NAME.tar.gz"
@@ -99,6 +102,7 @@ else
   "$CONTAINER_ENGINE" image save --output "$bundle_dir/image.tar" "$IMAGE_NAME"
 fi
 printf '%s\n' "$VERSION" > "$bundle_dir/VERSION"
+printf '%s\n' "$SOURCE_COMMIT" > "$bundle_dir/SOURCE_COMMIT"
 
 cp "$ROOT_DIR/README.md" "$bundle_dir/README.md"
 for deployment_file in .env run.sh start.sh stop.sh install-vendor.sh; do
