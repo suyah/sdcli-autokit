@@ -58,8 +58,19 @@ release_changelog="$tmpdir/CHANGELOG.md"
 printf '%s\n' '# Engineering change log' '' '## 1.2.3 - 2026-10-19' '' '### Added' '- Test release entry.' > "$release_changelog"
 source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
-if RELEASE_CHANGELOG_FILE="$release_changelog" \
-    "$REPO_ROOT/release/preflight.sh" 1.2.3 >"$tmpdir/preflight-dirty.log" 2>&1; then
+preflight_repo="$tmpdir/preflight-repo"
+mkdir -p "$preflight_repo/release" "$preflight_repo/docs"
+cp "$REPO_ROOT/release/preflight.sh" "$preflight_repo/release/preflight.sh"
+cp "$release_changelog" "$preflight_repo/docs/CHANGELOG.md"
+printf '%s\n' 'tracked release input' > "$preflight_repo/tracked.txt"
+git -C "$preflight_repo" init -q
+git -C "$preflight_repo" config user.name 'release test'
+git -C "$preflight_repo" config user.email 'release-test@example.invalid'
+git -C "$preflight_repo" add .
+git -C "$preflight_repo" commit -qm 'initial release test fixture'
+printf '%s\n' 'uncommitted change' >> "$preflight_repo/tracked.txt"
+
+if "$preflight_repo/release/preflight.sh" 1.2.3 >"$tmpdir/preflight-dirty.log" 2>&1; then
   echo "release preflight unexpectedly accepted a dirty worktree" >&2
   exit 1
 fi
