@@ -6,7 +6,8 @@ usage() {
 Usage: install-vendor.sh --vendor-dir /vendor-rpms --accept-microsoft-eula
 
 Installs customer-provided RPMs from a directory already mounted in the
-container. It never enables a repository or downloads a package.
+container. This release supports SQL Developer 26.2 only. It never enables a
+repository or downloads a package.
 USAGE
 }
 

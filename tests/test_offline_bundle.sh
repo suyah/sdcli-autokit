@@ -83,6 +83,7 @@ extracted_bundle="$tmpdir/extracted"
 mkdir -p "$extracted_bundle"
 tar -xzf "$bundle" -C "$extracted_bundle"
 extracted_root="$extracted_bundle/sdcli-autokit-1.2.3-linux-amd64"
+grep -F 'This release supports Oracle SQL Developer 26.2 only.' "$extracted_root/README.md" >/dev/null
 assert_mode "$extracted_root/sdcli-scripts/migrate.sh" 755
 assert_mode "$extracted_root/sdcli-scripts/lib/sqlplus_deploy.sh" 644
 

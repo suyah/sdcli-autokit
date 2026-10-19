@@ -14,6 +14,10 @@ The project assumes:
 - **Migration engine:** Oracle SQL Developer CLI (`sdcli`)
 - **Runtime environment:** Podman container
 
+This release supports Oracle SQL Developer 26.2 only. Other SQL Developer
+versions are not validated because their CLI output and generated SQL layout
+may differ.
+
 > **Supported database pair:** this release supports only SQL Server sources
 > and Oracle targets. Although `config.yaml` contains source and target `type`
 > fields, any other pair is rejected during configuration preflight before the
@@ -63,7 +67,7 @@ Use this directory inside the migration working area/container to configure and 
 | File | Purpose |
 | --- | --- |
 | `config.example.yaml` | Neutral configuration template shipped in source and offline bundles. |
-| `config.yaml` | Customer configuration created from the example on first container setup; it is intentionally not tracked or bundled. |
+| `config.yaml` | Compatibility link to the customer configuration stored on the persistent `/u01/data` volume; it is intentionally not tracked or bundled. |
 | `migrate.sh` | Main migration command. It validates config, initializes the repository, creates connections, runs phases, and writes run logs. |
 | `lib/` | Helper programs used internally for BCP, SQL*Plus, SQL*Loader, and validation-report generation. Bash owns database execution; the existing Python standard-library renderer only converts validation TSV evidence into HTML/text reports. |
 
@@ -84,7 +88,7 @@ The offline bundle does not distribute Oracle SQL Developer, Oracle Instant Clie
 
 | Required software | Customer download source | Files to stage |
 | --- | --- | --- |
-| Oracle SQL Developer | [Oracle SQL Developer downloads](https://www.oracle.com/database/sqldeveloper/technologies/download/) | Linux `noarch` RPM, for example `sqldeveloper-<version>.noarch.rpm`. |
+| Oracle SQL Developer 26.2 | [Oracle SQL Developer downloads](https://www.oracle.com/database/sqldeveloper/technologies/download/) | SQL Developer 26.2 Linux `noarch` RPM. |
 | Oracle Instant Client | [Oracle Instant Client for Linux x86-64 downloads](https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html) | Matching Oracle Linux 9 `x86_64` RPMs: Basic, SQL*Plus, and Tools. |
 | Microsoft ODBC Driver 18 and SQL Server command-line tools | [Microsoft offline installation guidance for `mssql-tools18` and `msodbcsql18`](https://learn.microsoft.com/en-us/sql/linux/install-upgrade/setup-tools?view=fabric#offline-installation) | Matching `x86_64` RPMs for `msodbcsql18` and `mssql-tools18`, plus any documented dependencies. The customer must accept the Microsoft EULA. |
 
@@ -92,7 +96,7 @@ Place these files, plus any RPM dependencies reported by the offline install, in
 
 ```text
 customer-artifacts/
-├── sqldeveloper-<version>.noarch.rpm
+├── sqldeveloper-26.2.<build>.noarch.rpm
 ├── oracle-instantclient<major>-basic-<version>.el9.x86_64.rpm
 ├── oracle-instantclient<major>-sqlplus-<version>.el9.x86_64.rpm
 ├── oracle-instantclient<major>-tools-<version>.el9.x86_64.rpm
@@ -137,18 +141,31 @@ podman load -i image.tar
 The EULA flag records the operator's acknowledgement required for the Microsoft packages; it does not replace the vendor terms. On a system where SELinux labels are not applicable, remove `,Z` from the three `-v` options in `deployment/run.sh`.
 
 Every successful `run.sh` invocation refreshes the bundled program files but
-preserves an existing customer `sdcli-scripts/config.yaml` byte-for-byte. On a
-first install it creates that file from `config.example.yaml`. The installed
-program version is recorded in
+preserves an existing customer configuration byte-for-byte. The durable file
+is `/u01/data/sdcli-autokit/config/config.yaml`; the familiar
+`/home/sduser/sdcli-scripts/config.yaml` path is a symbolic link to it. On a
+first install the durable file is created from `config.example.yaml`. Existing
+configurations from an older container are moved there automatically. The
+installed program version is recorded in
 `/home/sduser/sdcli-scripts/.autokit-script-version`.
+
+SQL Developer user preferences are stored under
+`/u01/data/sdcli-autokit/sqldeveloper`. `/home/sduser/.sqldeveloper` is a
+symbolic link retained for SQL Developer compatibility. Both locations are on
+the existing `/u01/data` persistent volume, so removing and recreating the
+container does not remove customer configuration or SQL Developer preferences.
 
 ## Configure `config.yaml`
 
-The migration runner reads migration settings from:
+The migration runner reads migration settings through the compatibility path:
 
 ```bash
 sdcli-scripts/config.yaml
 ```
+
+The actual persistent file is
+`/u01/data/sdcli-autokit/config/config.yaml`. Editing either path changes the
+same file.
 
 In an offline container, `run.sh` creates this file automatically on the first
 install. In a source checkout, create it yourself before running a migration:
@@ -362,7 +379,16 @@ cd ~/sdcli-scripts
 vi config.yaml
 ```
 
-Exit the shell after saving. Later `run.sh` upgrades preserve this configuration. Keep a copy outside the container as well, because deliberately removing and recreating the container also removes files stored only in its writable layer.
+Exit the shell after saving. Later `run.sh` upgrades preserve this configuration
+and SQL Developer preferences in `/u01/data/sdcli-autokit`, including when the
+container is deliberately removed and recreated. Keep an external backup of the
+configuration as normal migration-operating practice.
+
+When `run.sh` detects that an existing container uses another image, it first
+migrates any legacy home-directory configuration and preferences into
+`/u01/data/sdcli-autokit`, then exits. Remove the old container and rerun the
+same command to create it from the new image; the persistent state is linked
+back into `/home/sduser` automatically.
 
 ### 3. Set password variables
 
