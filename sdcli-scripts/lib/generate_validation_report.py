@@ -480,6 +480,18 @@ def _build_report_data(
         row.status in INCOMPLETE_DEPLOY_STATUSES for row in deployments
     )
     deploy_record_count = sum(row.phase == "deploy" for row in deployments)
+    postdeploy_complete = any(
+        row.phase == "postdeploy"
+        and row.path == "__phase_complete__"
+        and row.status == "executed"
+        for row in deployments
+    )
+    deployment_issue_count = (
+        failed_deployments
+        + incomplete_deployments
+        + int(deploy_record_count == 0)
+        + int(not postdeploy_complete)
+    )
     invalid_keys = {
         (row.owner, row.name, row.object_type)
         for row in invalid_objects
@@ -488,10 +500,15 @@ def _build_report_data(
         record.category == "COMPILER_ERRORS" and record.status == "INVALID"
         for record in target
     )
-    if not deployments or not deploy_record_count or incomplete_deployments:
-        deployment_status = "INCOMPLETE"
-    elif failed_deployments:
+    if failed_deployments:
         deployment_status = "FAIL"
+    elif (
+        not deployments
+        or not deploy_record_count
+        or not postdeploy_complete
+        or incomplete_deployments
+    ):
+        deployment_status = "INCOMPLETE"
     else:
         deployment_status = "PASS"
     invalid_status = (
@@ -508,11 +525,10 @@ def _build_report_data(
             ValidationCheck(
                 "deployment_scripts",
                 deployment_status,
-                1
-                if not deployments or not deploy_record_count
-                else failed_deployments + incomplete_deployments,
+                deployment_issue_count,
                 (
                     f"records={len(deployments)} deploy_records={deploy_record_count} "
+                    f"postdeploy_complete={int(postdeploy_complete)} "
                     f"failed={failed_deployments} "
                     f"not_run={incomplete_deployments}"
                 )

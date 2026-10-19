@@ -154,6 +154,7 @@ assert_line "$manifest" $'plan\tsdcli/gen/generated-1.sql\texcluded\tduplicate m
 
 calls=()
 run_postdeploy 0 "$output_dir"
+verify_deploy_manifest_phase postdeploy "$output_dir"
 
 post_calls="${calls[*]}"
 assert_contains "$post_calls" "Emulation/post.sql||0|Emulation"
@@ -215,6 +216,17 @@ assert_not_contains "$retry_calls" "tpcc/synonyms.sql"
 assert_not_contains "$retry_calls" "tpcc_copy_tpcc/synonyms.sql"
 
 touch "$output_dir/tpcc/unplanned.sql"
+set +e
+( run_postdeploy 0 "$output_dir" ) >/dev/null 2>&1
+failed_rerun_rc=$?
+set -e
+[[ $failed_rerun_rc -ne 0 ]]
+latest_completion_status="$(awk -F '\t' '$1 == "postdeploy" && $2 == "__phase_complete__" { status=$3 } END { print status }' "$manifest")"
+[[ "$latest_completion_status" == "pending" ]] || {
+  echo "Failed postdeploy rerun retained stale completion status: $latest_completion_status" >&2
+  exit 1
+}
+
 set +e
 ( validate_generated_sql_inventory "$output_dir" ) >/dev/null 2>&1
 unknown_rc=$?

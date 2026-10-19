@@ -50,4 +50,22 @@ rc=$?
 set -e
 [[ $rc -ne 0 ]]
 
+mkdir -p "$tmpdir/monolithic/gen"
+touch "$tmpdir/monolithic/gen/generated.sql"
+set +e
+validate_target_objects 0 "$tmpdir/monolithic" >/dev/null 2>&1
+skipped_rc=$?
+set -e
+[[ $skipped_rc -eq 2 ]] || {
+  echo "Skipped target-object validation did not return the incomplete-evidence status" >&2
+  exit 1
+}
+
+checks_file="$tmpdir/validation_checks.tsv"
+write_validation_checks "$checks_file" 0 0 0 0 0 1 0 INCOMPLETE
+grep -F $'target_objects\tINCOMPLETE\t1\t' "$checks_file" >/dev/null || {
+  echo "Skipped target-object validation was not recorded as INCOMPLETE" >&2
+  exit 1
+}
+
 echo "target object validation test passed"

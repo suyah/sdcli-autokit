@@ -2147,7 +2147,7 @@ validate_target_objects() {
 
   if (( schema_count == 0 )); then
     log_warn "Oracle object validation skipped because no generated schema hierarchy was found"
-    return 0
+    return 2
   fi
 
   query_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_object_validation_XXXXXX.sql")" || return 1
@@ -2285,6 +2285,7 @@ write_validation_checks() {
   local reconciliation_issues="$6"
   local object_issues="$7"
   local metadata_issues="$8"
+  local target_object_status="$9"
   local tmp_file
 
   tmp_file="$(mktemp "$(dirname "$output_file")/.validation_checks_XXXXXX")" || return 1
@@ -2295,7 +2296,8 @@ write_validation_checks() {
     printf 'sqlldr_logs\t%s\t%s\t%s\n' "$([[ $sqlldr_log_issues -eq 0 ]] && echo PASS || echo FAIL)" "$sqlldr_log_issues" "SQL*Loader log diagnostics"
     printf 'missing_evidence\t%s\t%s\t%s\n' "$([[ $missing_evidence -eq 0 ]] && echo PASS || echo INCOMPLETE)" "$missing_evidence" "required SQL*Loader log evidence"
     printf 'reconciliation\t%s\t%s\t%s\n' "$([[ $reconciliation_issues -eq 0 ]] && echo PASS || echo FAIL)" "$reconciliation_issues" "table data reconciliation"
-    printf 'target_objects\t%s\t%s\t%s\n' "$([[ $object_issues -eq 0 ]] && echo PASS || echo FAIL)" "$object_issues" "Oracle invalid objects or compiler errors"
+    printf 'target_objects\t%s\t%s\t%s\n' "$target_object_status" "$object_issues" \
+      "$([[ "$target_object_status" == INCOMPLETE ]] && echo 'not evaluated: no generated schema hierarchy' || echo 'Oracle invalid objects or compiler errors')"
     printf 'metadata_collection\t%s\t%s\t%s\n' "$([[ $metadata_issues -eq 0 ]] && echo PASS || echo INCOMPLETE)" "$metadata_issues" "source or target object inventory"
   } > "$tmp_file"
   mv "$tmp_file" "$output_file"
@@ -2347,6 +2349,7 @@ run_validate() {
 
   local run_log="${RUN_LOG_FILE:-$AUTOKIT_DIR/migrate.log}"
   local run_log_issues sdcli_error_entries sqlldr_logs_checked=0 sqlldr_log_issues=0 missing_evidence=0 reconciliation_issues=0 object_issues=0 metadata_issues=0 report_issues=0 total_issues
+  local target_object_status=PASS object_validation_rc=0
 
   validate_run_log "$run_log" "$RUN_LOG_START_LINE"
   run_log_issues=$VALIDATION_LAST_COUNT
@@ -2370,7 +2373,17 @@ run_validate() {
 
   if [[ -n "$idx" ]]; then
     run_data_reconciliation "$idx" || reconciliation_issues=1
-    validate_target_objects "$idx" "$output_dir" || object_issues=1
+    if validate_target_objects "$idx" "$output_dir"; then
+      :
+    else
+      object_validation_rc=$?
+      object_issues=1
+      if (( object_validation_rc == 2 )); then
+        target_object_status=INCOMPLETE
+      else
+        target_object_status=FAIL
+      fi
+    fi
 
     local source_inventory="$AUTOKIT_DIR/source_object_inventory.tsv"
     local target_inventory="$AUTOKIT_DIR/target_object_inventory.tsv"
@@ -2387,7 +2400,8 @@ run_validate() {
     rm -f "$validation_checks"
     if ! write_validation_checks "$validation_checks" \
       "$run_log_issues" "$sdcli_error_entries" "$sqlldr_log_issues" \
-      "$missing_evidence" "$reconciliation_issues" "$object_issues" "$metadata_issues"; then
+      "$missing_evidence" "$reconciliation_issues" "$object_issues" "$metadata_issues" \
+      "$target_object_status"; then
       metadata_issues=$((metadata_issues + 1))
       log_error "Failed to write validation checks evidence: $validation_checks"
     fi
@@ -2903,7 +2917,8 @@ verify_deploy_manifest_phase() {
     NR == 1 { if ($0 != "phase\tpath\tstatus\tnote") invalid=1; next }
     NF != 4 || $1 == "" || $2 == "" { invalid=1; next }
     $3 != "executed" && $3 != "failed" && $3 != "control" &&
-      $3 != "excluded" && $3 != "covered" { invalid=1 }
+      $3 != "excluded" && $3 != "covered" && $3 != "not_run" &&
+      $3 != "pending" && $3 != "planned" { invalid=1 }
     END { if (invalid) exit 1 }
   ' "$manifest"; then
     log_error "${phase^} postcondition failed: deploy manifest is malformed: $manifest"

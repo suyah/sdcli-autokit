@@ -41,7 +41,8 @@ class ReportEvidenceTests(unittest.TestCase):
             "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n"
             "deploy\tsdcli/APP/user.sql\texecuted\t\n"
             "deploy\tsdcli/APP/tables.sql\texecuted\tpre-data master include\n"
-            "postdeploy\tsdcli/APP/indexes.sql\texecuted\tpost-data master include\n",
+            "postdeploy\tsdcli/APP/indexes.sql\texecuted\tpost-data master include\n"
+            "postdeploy\t__phase_complete__\texecuted\tpostdeploy phase completed\n",
             encoding="utf-8",
         )
 
@@ -61,7 +62,7 @@ class ReportEvidenceTests(unittest.TestCase):
 
         self.assertEqual("PASS", data.status)
         self.assertEqual(2, len(data.reconciliation))
-        self.assertEqual(4, len(data.deployment_records))
+        self.assertEqual(5, len(data.deployment_records))
         metadata = next(row for row in data.summary if row.check == "metadata_coverage")
         self.assertEqual("NOT_EVALUATED", metadata.status)
         self.assertIn("structured source-to-converted object mapping", metadata.detail)
@@ -107,6 +108,22 @@ class ReportEvidenceTests(unittest.TestCase):
 
         self.assertEqual("INCOMPLETE", data.status)
         self.assertEqual("INCOMPLETE", deployment.status)
+
+    def test_deploy_without_completed_postdeploy_is_incomplete(self) -> None:
+        (self.evidence_dir / "deploy_manifest.tsv").write_text(
+            "phase\tpath\tstatus\tnote\n"
+            "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n"
+            "deploy\tsdcli/APP/user.sql\texecuted\t\n"
+            "deploy\tsdcli/APP/tables.sql\texecuted\tpre-data master include\n",
+            encoding="utf-8",
+        )
+
+        data = self.build()
+        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
+
+        self.assertEqual("INCOMPLETE", data.status)
+        self.assertEqual("INCOMPLETE", deployment.status)
+        self.assertIn("postdeploy_complete=0", deployment.detail)
 
     def test_not_run_deployment_is_incomplete(self) -> None:
         manifest = self.evidence_dir / "deploy_manifest.tsv"

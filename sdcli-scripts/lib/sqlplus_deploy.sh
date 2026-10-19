@@ -784,8 +784,9 @@ run_postdeploy() {
     return 0
   fi
 
-  validate_generated_sql_inventory "$output_dir"
   ensure_deploy_manifest
+  record_deploy_manifest "postdeploy" "__phase_complete__" "pending" "postdeploy phase started"
+  validate_generated_sql_inventory "$output_dir"
 
   local schema_dir schema_name rel_script include_path failures=0 attempted=0 skipped=0
   while IFS= read -r schema_dir; do
@@ -827,11 +828,12 @@ run_postdeploy() {
     fi
   done < <(schema_dirs "$output_dir")
 
-  log_info "Deploy manifest: $(deploy_manifest_file)"
   log_info "Postdeploy summary: attempted=$attempted skipped=$skipped failed=$failures"
   if (( failures > 0 )); then
     log_error "Postdeploy completed with $failures failed script(s)"
     return 1
   fi
+  record_deploy_manifest "postdeploy" "__phase_complete__" "executed" "postdeploy phase completed"
+  log_info "Deploy manifest: $(deploy_manifest_file)"
 }
 
