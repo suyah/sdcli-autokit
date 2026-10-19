@@ -676,7 +676,17 @@ sdcli_has_only_benign_diagnostics() {
   [[ -z "$unexpected" ]] || return 1
 
   unexpected="$(grep -Eo 'ORA-[0-9]{5}:' "$output_file" | grep -Ev '^ORA-01920:$' || true)"
-  [[ -z "$unexpected" ]]
+  [[ -z "$unexpected" ]] || return 1
+
+  ! grep -Eqi '(^|[^[:alnum:]_])(PLS|SP2|LRM)-[0-9]{4,5}:' "$output_file"
+}
+
+sdcli_output_has_diagnostics() {
+  local output_file="$1"
+
+  grep -Eqi \
+    '^[[:space:]]*(error|fatal)([[:space:]:]|$)|(^|[^[:alnum:]_])(ORA|PLS|SP2|LRM)-[0-9]{4,5}:' \
+    "$output_file"
 }
 
 run_sdcli() {
@@ -730,10 +740,14 @@ run_sdcli() {
     completed_successfully=true
     SDCLI_LAST_SUCCESS_MARKER=true
   fi
-  if grep -Eqi '^[[:space:]]*(error|fatal)[[:space:]:]' "$output_file"; then
+  if sdcli_output_has_diagnostics "$output_file"; then
     if ! sdcli_has_only_benign_diagnostics "$action" "$completed_successfully" "$output_file"; then
       rc=1
     fi
+  fi
+  if (( rc == 0 )) && [[ -z "$action" || "$completed_successfully" != "true" ]]; then
+    log_error "SDCLI did not report the exact completion marker for action '${action:-unknown}'"
+    rc=1
   fi
   if $is_convert && grep -Eq '\[[[:space:]]*line[[:space:]]+[0-9]+:[0-9]+:' "$output_file"; then
     log_error "SQL Developer reported conversion diagnostics; review the object errors before generating deployment SQL"
