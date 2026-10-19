@@ -54,9 +54,34 @@ chmod +x "$fakebin/podman"
 
 dist_dir="$tmpdir/dist"
 podman_log="$tmpdir/podman.log"
+release_changelog="$tmpdir/CHANGELOG.md"
+printf '%s\n' '# Engineering change log' '' '## 1.2.3 - 2026-10-19' '' '### Added' '- Test release entry.' > "$release_changelog"
+source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+if RELEASE_CHANGELOG_FILE="$release_changelog" \
+    "$REPO_ROOT/release/preflight.sh" 1.2.3 >"$tmpdir/preflight-dirty.log" 2>&1; then
+  echo "release preflight unexpectedly accepted a dirty worktree" >&2
+  exit 1
+fi
+grep -F 'tracked worktree has uncommitted changes' "$tmpdir/preflight-dirty.log" >/dev/null
+
+preflight_output="$(
+  RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
+    "$REPO_ROOT/release/preflight.sh" 1.2.3
+)"
+grep -F 'Release preflight passed' <<< "$preflight_output" >/dev/null
+grep -F "Source commit: $source_commit" <<< "$preflight_output" >/dev/null
+
+if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
+    "$REPO_ROOT/release/preflight.sh" 1.2.4 >/dev/null 2>&1; then
+  echo "release preflight unexpectedly accepted a missing changelog entry" >&2
+  exit 1
+fi
+
 build_output="$(
-  PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" DIST_DIR="$dist_dir" \
-    "$REPO_ROOT/release/build-offline.sh" 1.2.3
+  RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" RELEASE_SKIP_TESTS=true \
+    PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" DIST_DIR="$dist_dir" \
+    "$REPO_ROOT/release/release.sh" 1.2.3
 )"
 
 grep -Fx 'Bundle contents:' <<< "$build_output" >/dev/null
@@ -81,6 +106,7 @@ if tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/
   exit 1
 fi
 [[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/VERSION)" == "1.2.3" ]]
+[[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/SOURCE_COMMIT)" == "$source_commit" ]]
 example_config="$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/config.example.yaml)"
 if grep -Eq '(10\.[0-9]+\.[0-9]+\.[0-9]+|68\.233\.113\.119|adb\.[A-Za-z0-9.-]+oraclecloud\.com)' <<< "$example_config"; then
   echo "project-specific endpoint found in config.example.yaml" >&2

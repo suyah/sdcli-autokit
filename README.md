@@ -117,23 +117,26 @@ The following set was smoke-tested on Oracle Linux 9 x86_64 on 2026-10-09. These
 On a connected Linux/amd64 build host, create a versioned bundle:
 
 ~~~bash
-./release/build-offline.sh 1.0.0
+./release/release.sh 1.1.0
 ~~~
+
+Maintainers should follow the engineering-only [release process](docs/release-process.md)
+before creating a customer bundle.
 
 The scripts prefer Podman when both tools are installed. To build with Rancher Desktop/Docker explicitly, use:
 
 ~~~bash
-CONTAINER_ENGINE=docker ./release/build-offline.sh 1.0.0
+CONTAINER_ENGINE=docker ./release/release.sh 1.1.0
 ~~~
 
 Rancher Desktop must be running with its Docker engine available before starting the build.
 
-Transfer `dist/sdcli-autokit-1.0.0-linux-amd64.tar.gz` and its adjacent `.sha256` file through any approved cloud, on-premises, or physical method. On the customer VM:
+Transfer `dist/sdcli-autokit-1.1.0-linux-amd64.tar.gz` and its adjacent `.sha256` file through any approved cloud, on-premises, or physical method. On the customer VM:
 
 ~~~bash
-sha256sum -c sdcli-autokit-1.0.0-linux-amd64.tar.gz.sha256
-tar -xzf sdcli-autokit-1.0.0-linux-amd64.tar.gz
-cd sdcli-autokit-1.0.0-linux-amd64
+sha256sum -c sdcli-autokit-1.1.0-linux-amd64.tar.gz.sha256
+tar -xzf sdcli-autokit-1.1.0-linux-amd64.tar.gz
+cd sdcli-autokit-1.1.0-linux-amd64
 podman load -i image.tar
 ./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
 ~~~
