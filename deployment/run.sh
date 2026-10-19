@@ -36,7 +36,7 @@ usage() {
   cat <<'USAGE'
 Usage: run.sh --vendor-dir /absolute/path/to/rpms --accept-microsoft-eula
 
-The RPM directory must contain SQL Developer, Oracle Instant Client Basic,
+The RPM directory must contain SQL Developer 26.2, Oracle Instant Client Basic,
 SQL*Plus, and Tools, plus msodbcsql18 and mssql-tools18 RPMs. It may also
 contain their offline dependencies.
 USAGE
@@ -144,11 +144,14 @@ start_or_reuse_container() {
   if container_engine container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
     local existing_image_id
     existing_image_id="$(container_engine container inspect "$CONTAINER_NAME" --format '{{.Image}}')"
-    [[ "$existing_image_id" == "$IMAGE_ID" ]] || fail "container '$CONTAINER_NAME' uses another image; stop and remove it yourself before changing versions"
-
     if ! container_is_running; then
       echo "Starting existing container '$CONTAINER_NAME'..."
       container_engine start "$CONTAINER_NAME" >/dev/null
+    fi
+    if [[ "$existing_image_id" != "$IMAGE_ID" ]]; then
+      echo "Preserving customer configuration before image replacement..."
+      prepare_persistent_user_state
+      fail "container '$CONTAINER_NAME' uses another image; customer state is preserved under $TOOL_DATA, so stop and remove the container before changing versions"
     fi
     return
   fi
@@ -234,6 +237,77 @@ initialize_sqldeveloper_preferences() {
   }
 }
 
+prepare_persistent_user_state() {
+  container_engine exec \
+    --user root \
+    --env "APP_USER=$APP_USER" \
+    --env "APP_GROUP=$APP_GROUP" \
+    --env "HOME_DIR=$HOME_DIR" \
+    --env "SDCLI_SCRIPTS_DEST=$SDCLI_SCRIPTS_DEST" \
+    --env "TOOL_DATA=$TOOL_DATA" \
+    --env "TOOL_LOG=$TOOL_LOG" \
+    "$CONTAINER_NAME" bash -lc '
+      set -euo pipefail
+
+      preferences_link="$HOME_DIR/.sqldeveloper"
+      preferences_dir="${TOOL_DATA%/}/sqldeveloper"
+      config_link="$SDCLI_SCRIPTS_DEST/config.yaml"
+      config_dir="${TOOL_DATA%/}/config"
+      persistent_config="$config_dir/config.yaml"
+      mkdir -p "${TOOL_DATA%/}" "${TOOL_LOG%/}" "$SDCLI_SCRIPTS_DEST"
+      chown "$APP_USER:$APP_GROUP" "${TOOL_DATA%/}" "${TOOL_LOG%/}"
+
+      if [[ -L "$preferences_link" ]]; then
+        [[ "$(readlink "$preferences_link")" == "$preferences_dir" ]] || {
+          echo "Error: $preferences_link points outside the managed data directory" >&2
+          exit 1
+        }
+      elif [[ -e "$preferences_link" ]]; then
+        if [[ -d "$preferences_dir" && -n "$(find "$preferences_dir" -mindepth 1 -print -quit)" ]]; then
+          if [[ -n "$(find "$preferences_link" -mindepth 1 -print -quit)" ]]; then
+            echo "Error: SQL Developer preferences exist in both $preferences_link and $preferences_dir; reconcile them manually" >&2
+            exit 1
+          fi
+          rm -rf -- "$preferences_link"
+        else
+          rm -rf -- "$preferences_dir"
+          mv "$preferences_link" "$preferences_dir"
+        fi
+      fi
+
+      mkdir -p "$preferences_dir"
+      if [[ ! -L "$preferences_link" ]]; then
+        ln -s "$preferences_dir" "$preferences_link"
+      fi
+      chown -R "$APP_USER:$APP_GROUP" "$preferences_dir"
+      chown -h "$APP_USER:$APP_GROUP" "$preferences_link"
+
+      mkdir -p "$config_dir"
+      if [[ -L "$config_link" ]]; then
+        [[ "$(readlink "$config_link")" == "$persistent_config" ]] || {
+          echo "Error: $config_link points outside the managed data directory" >&2
+          exit 1
+        }
+      elif [[ -e "$config_link" ]]; then
+        if [[ -e "$persistent_config" ]]; then
+          cmp -s "$config_link" "$persistent_config" || {
+            echo "Error: config.yaml exists in both $SDCLI_SCRIPTS_DEST and $persistent_config with different content; reconcile them manually" >&2
+            exit 1
+          }
+          rm -f -- "$config_link"
+        else
+          mv "$config_link" "$persistent_config"
+        fi
+      fi
+      if [[ -f "$persistent_config" && ! -L "$config_link" ]]; then
+        ln -s "$persistent_config" "$config_link"
+      fi
+      chown -R "$APP_USER:$APP_GROUP" "$config_dir"
+      [[ ! -L "$config_link" ]] || chown -h "$APP_USER:$APP_GROUP" "$config_link"
+      [[ ! -f "$persistent_config" ]] || chmod 0600 "$persistent_config"
+    '
+}
+
 sync_sdcli_scripts() {
   local required_file stage_dir
   local -a required_files=(
@@ -253,8 +327,14 @@ sync_sdcli_scripts() {
   [[ -d "$SDCLI_SCRIPTS_SRC/lib" ]] || fail "migration library directory not found: $SDCLI_SCRIPTS_SRC/lib"
   [[ -d "$SDCLI_SCRIPTS_SRC/templates" ]] || fail "migration template directory not found: $SDCLI_SCRIPTS_SRC/templates"
 
+  # The vendor installer can create SQL Developer preferences as root. Running
+  # the shared state preparation here keeps migration, conflict detection, and
+  # ownership repair in one place.
+  prepare_persistent_user_state
+
   stage_dir="${SDCLI_SCRIPTS_DEST}.stage.$$"
   container_engine exec \
+    --user root \
     --env "STAGE_DIR=$stage_dir" \
     "$CONTAINER_NAME" bash -lc 'rm -rf -- "$STAGE_DIR" && mkdir -p "$STAGE_DIR/lib" "$STAGE_DIR/templates"'
   container_engine cp "$SDCLI_SCRIPTS_SRC/migrate.sh" "$CONTAINER_NAME:$stage_dir/migrate.sh"
@@ -263,9 +343,13 @@ sync_sdcli_scripts() {
   container_engine cp "$SDCLI_SCRIPTS_SRC/templates/." "$CONTAINER_NAME:$stage_dir/templates"
 
   container_engine exec \
+    --user root \
+    --env "APP_USER=$APP_USER" \
+    --env "APP_GROUP=$APP_GROUP" \
     --env "STAGE_DIR=$stage_dir" \
     --env "DEST_DIR=$SDCLI_SCRIPTS_DEST" \
     --env "SCRIPT_BUNDLE_VERSION=$BUNDLE_VERSION" \
+    --env "TOOL_DATA=$TOOL_DATA" \
     "$CONTAINER_NAME" bash -lc '
       set -euo pipefail
 
@@ -301,12 +385,31 @@ sync_sdcli_scripts() {
       done
       chmod 0644 "$DEST_DIR/config.example.yaml"
 
-      if [[ ! -f "$DEST_DIR/config.yaml" ]]; then
-        install -m 0600 "$DEST_DIR/config.example.yaml" "$DEST_DIR/config.yaml"
+      persistent_config_dir="${TOOL_DATA%/}/config"
+      persistent_config="$persistent_config_dir/config.yaml"
+      mkdir -p "$persistent_config_dir"
+      if [[ -L "$DEST_DIR/config.yaml" ]]; then
+        [[ "$(readlink "$DEST_DIR/config.yaml")" == "$persistent_config" ]] || {
+          echo "Error: $DEST_DIR/config.yaml points outside the managed data directory" >&2
+          exit 1
+        }
+      elif [[ -e "$DEST_DIR/config.yaml" ]]; then
+        echo "Error: $DEST_DIR/config.yaml was not prepared for persistent storage" >&2
+        exit 1
+      fi
+      if [[ ! -f "$persistent_config" ]]; then
+        install -m 0600 "$DEST_DIR/config.example.yaml" "$persistent_config"
+      fi
+      if [[ ! -L "$DEST_DIR/config.yaml" ]]; then
+        ln -s "$persistent_config" "$DEST_DIR/config.yaml"
       fi
 
       printf "%s\n" "$SCRIPT_BUNDLE_VERSION" > "$DEST_DIR/.autokit-script-version.next"
       mv "$DEST_DIR/.autokit-script-version.next" "$DEST_DIR/.autokit-script-version"
+      chown "$APP_USER:$APP_GROUP" "$DEST_DIR/migrate.sh" "$DEST_DIR/config.example.yaml" "$DEST_DIR/.autokit-script-version"
+      chown -R "$APP_USER:$APP_GROUP" "$DEST_DIR/lib" "$DEST_DIR/templates" "$persistent_config_dir"
+      chown -h "$APP_USER:$APP_GROUP" "$DEST_DIR/config.yaml"
+      chmod 0600 "$persistent_config"
       rm -rf -- "$STAGE_DIR"
     '
 }
@@ -346,6 +449,7 @@ validate_vendor_dir
 load_bundle_version
 ensure_image
 start_or_reuse_container
+prepare_persistent_user_state
 install_vendor_packages
 sync_sdcli_scripts
 initialize_sqldeveloper_preferences
