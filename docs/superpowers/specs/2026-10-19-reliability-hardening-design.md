@@ -22,9 +22,10 @@ standard-library Python report renderer remains a TSV-to-report component only.
    The sole exception is `init` with exactly the existing-repository
    `ORA-01920` diagnostic and its exact completion marker.
 2. Do not overwrite the generated run's `passworddefinition.sql`. For a
-   password-prompting deployment, execute SQL from a private temporary overlay
-   that exposes a generated DEFINE-only replacement at the same relative path.
-   Clean the overlay on normal exit, failure, and handled INT/TERM signals.
+   password-prompting deployment, create a private temporary DEFINE file and
+   have the SQL*Plus wrapper source that file before the generated schema SQL.
+   Clean temporary secrets on normal exit, failure, and handled INT/TERM
+   signals.
 3. Support only the tested per-schema SQL Developer layout: a schema directory
    containing `user.sql` and `master.sql`. Reject monolithic `gen/*.sql` output
    when no such hierarchy exists. Reject nested generated SQL files rather than
@@ -64,26 +65,27 @@ generate, and datamove. The completion marker is not an exception to error
 handling. This removes the current false-success path in which `mkconn` may
 return zero after an Oracle diagnostic with no leading `Error:` line.
 
-### Deployment password overlay
+### Deployment password handling
 
 Generated SQL is never rewritten. When generated `passworddefinition.sql`
 contains supported hidden `ACCEPT` prompts:
 
-1. Create a `0700` temporary execution directory.
-2. Symlink every top-level generated-output entry into that directory except
-   `passworddefinition.sql`.
-3. Create a `0600` replacement `passworddefinition.sql` containing only the
-   verified DEFINE values for that invocation.
-4. Execute the generated SQL from the temporary directory using its original
-   relative path, so all generated `@passworddefinition.sql` references resolve
-   to the private replacement.
-5. Remove the overlay immediately after SQL*Plus and from the process exit and
-   signal cleanup paths.
+1. Create a private `0700` runtime directory outside the durable migration run.
+2. Create a `0600` DEFINE-only file in that directory containing the verified
+   values for the current SQL*Plus invocation.
+3. Create the existing SQL*Plus wrapper in the same private directory. The
+   wrapper sources the temporary DEFINE file by absolute path, then executes the
+   generated schema script from its original directory.
+4. Remove the private directory immediately after SQL*Plus and from the process
+   exit and handled INT/TERM signal cleanup paths.
 
-The private directory is used only while SQL*Plus runs. If a host is killed
-without a catchable signal, any residual file is protected by the private
-directory permissions and is outside the durable run evidence; the next normal
-execution cleanup removes registered overlays.
+The supported per-schema SQL Developer output relies on the wrapper to define
+these password variables; it does not need a copied or symlinked output tree.
+If the process is killed with an uncatchable signal or the host fails, the
+operating system may leave the runtime directory behind. Any residual secret is
+still outside the durable run evidence and protected by `0700`/`0600`
+permissions; the design does not claim cleanup after events no process can
+handle.
 
 ### Generated SQL execution contract
 
@@ -132,7 +134,7 @@ alone as proof that current code is installed.
 | --- | --- |
 | SDCLI exits zero without exact marker | command and workflow fail |
 | SDCLI emits an Oracle/fatal diagnostic | command and workflow fail, except exact idempotent init case |
-| SQL*Plus is interrupted during password deployment | original run files remain unchanged; temporary overlay is removed on handled exit |
+| SQL*Plus is interrupted during password deployment | original run files remain unchanged; temporary secrets are removed on handled exit |
 | Nested or monolithic generated SQL layout | deploy fails before any generated schema SQL executes |
 | Existing customer config during release update | configuration is preserved |
 | New program release over existing container | program files refresh and version marker changes |
@@ -143,8 +145,8 @@ alone as proof that current code is installed.
   diagnostic or a missing completion marker; both must fail. Preserve the
   exact `init`/`ORA-01920` idempotent case.
 - Add deployment helper tests showing generated `passworddefinition.sql` is
-  unchanged while SQL*Plus sees the private DEFINE file, including a handled
-  interruption cleanup assertion.
+  unchanged while the SQL*Plus wrapper sees the private DEFINE file, including
+  a handled interruption cleanup assertion.
 - Replace the existing monolithic-fallback success test with rejection tests;
   add a nested SQL file to a schema fixture and assert deploy fails before
   SQL*Plus is called.
