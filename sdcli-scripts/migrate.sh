@@ -39,12 +39,14 @@ RERUN_COMPLETED=false
 
 declare -a SDCLI_COMMANDS=()
 declare -a SENSITIVE_VALUES=()
+declare -a DATATYPE_MAPPING_TEMP_DIRS=()
 
 # --- CLI and logging helpers -------------------------------------------------
 usage() {
   cat <<'USAGE'
 Usage:
   ./migrate.sh --init [options]
+  ./migrate.sh [<migration_name>] --show-datatype-mapping
   ./migrate.sh <migration_name> [options]
 
 Modes:
@@ -54,6 +56,8 @@ Modes:
   --deploy               Shorthand for --phase deploy (setup only; never runs cleanup)
   --cleanup              Run the separated generated role cleanup for an existing run
   --migrate              Run all phases: capture->convert->generate->datamove->offload->deploy->load->postdeploy->validate
+  --show-datatype-mapping
+                         Show persisted SQL Developer repository datatype mappings as TSV
 
 Options:
   --model <name>         Optional model for non-capture --phase mode only
@@ -67,6 +71,8 @@ Options:
 
 Examples:
   ./migrate.sh --init
+  ./migrate.sh --show-datatype-mapping
+  ./migrate.sh tpcc --show-datatype-mapping
   ./migrate.sh tpcc
   ./migrate.sh tpcc --conn-setup
   ./migrate.sh tpcc --phase capture
@@ -115,7 +121,7 @@ fail() {
 set_mode() {
   local new_mode="$1"
   if $MODE_EXPLICIT; then
-    fail "Choose only one mode: --init, --conn-setup, --phase, or --migrate"
+    fail "Choose only one mode: --init, --conn-setup, --phase, --migrate, or --show-datatype-mapping"
   fi
   MODE="$new_mode"
   MODE_EXPLICIT=true
@@ -160,6 +166,7 @@ on_exit() {
     record_phase_status "$ACTIVE_PHASE" "failed" "$rc" "process exited before phase completion" "${ACTIVE_PHASE_ATTEMPT:-1}" || true
     ACTIVE_PHASE=""
   fi
+  cleanup_datatype_mapping_temp_dirs || true
   release_repository_lock || true
 
   if [[ $rc -ne 0 ]]; then
@@ -175,6 +182,18 @@ on_exit() {
     echo "===== SDCLI COMMAND SUMMARY ====="
     cat "$SDCLI_SUMMARY_FILE"
   fi
+}
+
+register_datatype_mapping_temp_dir() {
+  DATATYPE_MAPPING_TEMP_DIRS+=("$1")
+}
+
+cleanup_datatype_mapping_temp_dirs() {
+  local temp_dir
+  for temp_dir in "${DATATYPE_MAPPING_TEMP_DIRS[@]+"${DATATYPE_MAPPING_TEMP_DIRS[@]}"}"; do
+    [[ -n "$temp_dir" && -d "$temp_dir" ]] && rm -rf -- "$temp_dir"
+  done
+  DATATYPE_MAPPING_TEMP_DIRS=()
 }
 
 on_signal() {
@@ -903,6 +922,181 @@ validate_config() {
   for ((i = 0; i < migration_count; i++)); do
     validate_migration_config "$i"
   done
+}
+
+validate_datatype_mapping_config() {
+  get_required_value '.migration_repository.conn' 'migration_repository.conn' >/dev/null
+  get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user' >/dev/null
+  validate_secret_placeholder '.migration_repository.repo_user.password' 'migration_repository.repo_user.password'
+}
+
+run_repository_sql_capture() {
+  local sql_file="$1"
+  local output_file="$2"
+  local repo_conn repo_user repo_password connect_password rc producer_rc
+  local errexit_enabled=false
+  local -a pipeline_status=()
+
+  repo_conn="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
+  repo_user="$(get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user')"
+  repo_password="$(get_secret_value '.migration_repository.repo_user.password' 'migration_repository.repo_user.password')"
+  register_sqlplus_secret "migration_repository.repo_user.password" "$repo_password"
+  connect_password="${repo_password//\"/\"\"}"
+
+  [[ "$-" == *e* ]] && errexit_enabled=true
+  set +e
+  {
+    printf 'connect %s/"%s"@%s\n' "$repo_user" "$connect_password" "$repo_conn"
+    cat "$sql_file"
+  } | sqlplus -S -L /nolog > "$output_file" 2>&1
+  pipeline_status=("${PIPESTATUS[@]}")
+  producer_rc=${pipeline_status[0]}
+  rc=${pipeline_status[1]}
+  $errexit_enabled && set -e
+
+  if [[ $producer_rc -ne 0 || $rc -ne 0 ]]; then
+    redact_sdcli_output < "$output_file" >&2
+    [[ $producer_rc -eq 0 ]] || return "$producer_rc"
+    return "$rc"
+  fi
+  return 0
+}
+
+datatype_mapping_preflight() {
+  local temp_dir="$1"
+  local query_file="$temp_dir/preflight.sql"
+  local raw_file="$temp_dir/preflight.out"
+  local missing_count
+
+  cat > "$query_file" <<'SQL'
+WHENEVER OSERROR EXIT FAILURE;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 VERIFY OFF ECHO OFF TERMOUT ON TRIMSPOOL ON;
+SET DEFINE OFF
+WITH required_columns (table_name, column_name) AS (
+  SELECT 'MD_PROJECTS', 'ID' FROM dual UNION ALL
+  SELECT 'MD_PROJECTS', 'PROJECT_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_MAP', 'ID' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_MAP', 'PROJECT_ID_FK' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_MAP', 'MAP_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'ID' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'MAP_ID_FK' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'SOURCE_DATA_TYPE_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'SOURCE_PRECISION' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'SOURCE_SCALE' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'TARGET_DATA_TYPE_NAME' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'TARGET_PRECISION' FROM dual UNION ALL
+  SELECT 'MIGR_DATATYPE_TRANSFORM_RULE', 'TARGET_SCALE' FROM dual
+)
+SELECT 'SDCLI_DATATYPE_PRECHECK' || CHR(9) || COUNT(*)
+FROM required_columns required
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM user_tab_columns actual
+  WHERE actual.table_name = required.table_name
+    AND actual.column_name = required.column_name
+);
+EXIT;
+SQL
+
+  if ! run_repository_sql_capture "$query_file" "$raw_file"; then
+    cleanup_datatype_mapping_temp_dirs
+    fail "Failed to inspect the SQL Developer repository datatype mapping schema"
+  fi
+
+  if ! missing_count="$(awk -F '\t' '
+    /^[[:space:]]*$/ { next }
+    $1 != "SDCLI_DATATYPE_PRECHECK" || NF != 2 || $2 !~ /^[0-9]+$/ { invalid=1; next }
+    { rows++; value=$2 }
+    END {
+      if (invalid || rows != 1) exit 1
+      print value
+    }
+  ' "$raw_file")"; then
+    redact_sdcli_output < "$raw_file" >&2
+    cleanup_datatype_mapping_temp_dirs
+    fail "Unsupported SQL Developer repository schema: datatype mapping preflight returned malformed evidence"
+  fi
+
+  if (( missing_count != 0 )); then
+    cleanup_datatype_mapping_temp_dirs
+    fail "Unsupported SQL Developer repository schema: $missing_count required datatype mapping table/column definition(s) are missing"
+  fi
+}
+
+show_datatype_mapping() {
+  local project_name="${1:-}"
+  local project_filter="WHERE 1 = 1" escaped_project=""
+  local temp_dir query_file raw_file rows_file
+
+  if [[ "$project_name" == *$'\n'* || "$project_name" == *$'\r'* ]]; then
+    fail "Migration project name contains an unsupported line-break character"
+  fi
+
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/sdcli_datatype_mapping_XXXXXX")" || return 1
+  register_datatype_mapping_temp_dir "$temp_dir"
+  query_file="$temp_dir/query.sql"
+  raw_file="$temp_dir/query.out"
+  rows_file="$temp_dir/rows.tsv"
+
+  datatype_mapping_preflight "$temp_dir"
+
+  if [[ -n "$project_name" ]]; then
+    escaped_project="${project_name//\'/\'\'}"
+    project_filter="WHERE p.project_name = '${escaped_project}'"
+  fi
+
+  cat > "$query_file" <<SQL
+WHENEVER OSERROR EXIT FAILURE;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 VERIFY OFF ECHO OFF TERMOUT ON TRIMSPOOL ON;
+SET DEFINE OFF
+SELECT 'SDCLI_DATATYPE_MAPPING' || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(p.project_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(m.map_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(r.source_data_type_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       NVL(TO_CHAR(r.source_precision), '') || CHR(9) ||
+       NVL(TO_CHAR(r.source_scale), '') || CHR(9) ||
+       REPLACE(REPLACE(REPLACE(r.target_data_type_name, CHR(9), ' '), CHR(13), ' '), CHR(10), ' ') || CHR(9) ||
+       NVL(TO_CHAR(r.target_precision), '') || CHR(9) ||
+       NVL(TO_CHAR(r.target_scale), '')
+FROM md_projects p
+JOIN migr_datatype_transform_map m ON m.project_id_fk = p.id
+JOIN migr_datatype_transform_rule r ON r.map_id_fk = m.id
+${project_filter}
+ORDER BY p.project_name, m.map_name, r.source_data_type_name,
+         r.source_precision NULLS FIRST, r.source_scale NULLS FIRST,
+         r.target_data_type_name, r.target_precision NULLS FIRST,
+         r.target_scale NULLS FIRST, r.id;
+SELECT 'SDCLI_DATATYPE_COMPLETE' FROM dual;
+EXIT;
+SQL
+
+  if ! run_repository_sql_capture "$query_file" "$raw_file"; then
+    cleanup_datatype_mapping_temp_dirs
+    fail "Failed to query SQL Developer repository datatype mappings"
+  fi
+
+  if ! awk -F '\t' -v OFS='\t' '
+    /^[[:space:]]*$/ { next }
+    $1 == "SDCLI_DATATYPE_COMPLETE" && NF == 1 { completed++; next }
+    $1 != "SDCLI_DATATYPE_MAPPING" || NF != 9 { invalid=1; next }
+    $2 == "" || $3 == "" || $4 == "" || $7 == "" { invalid=1; next }
+    {
+      for (i=2; i<=9; i++) printf "%s%s", $i, (i == 9 ? ORS : OFS)
+    }
+    END { if (invalid || completed != 1) exit 1 }
+  ' "$raw_file" > "$rows_file"; then
+    redact_sdcli_output < "$raw_file" >&2
+    cleanup_datatype_mapping_temp_dirs
+    fail "SQL Developer repository datatype mapping query returned malformed evidence"
+  fi
+
+  printf 'project\tmap_name\tsource_type\tsource_precision\tsource_scale\ttarget_type\ttarget_precision\ttarget_scale\n'
+  if [[ -s "$rows_file" ]]; then
+    LC_ALL=C sort -t $'\t' -k1,1 -k2,2 -k3,3 -k4,4 -k5,5 -k6,6 -k7,7 -k8,8 "$rows_file"
+  fi
+  cleanup_datatype_mapping_temp_dirs
 }
 
 setup_repository() {
@@ -3360,6 +3554,10 @@ parse_args() {
         set_mode "migrate"
         shift
         ;;
+      --show-datatype-mapping)
+        set_mode "show-datatype-mapping"
+        shift
+        ;;
       --model)
         shift
         [[ $# -gt 0 ]] || fail "--model requires a value"
@@ -3404,6 +3602,8 @@ parse_args() {
 
   if [[ "$MODE" == "init" ]]; then
     [[ -z "$MIGRATION_NAME" ]] || fail "Migration name is not allowed with --init"
+  elif [[ "$MODE" == "show-datatype-mapping" ]]; then
+    : # Migration project name is an optional repository filter.
   else
     [[ -n "$MIGRATION_NAME" ]] || fail "Migration name is required (example: ./migrate.sh tpcc)"
   fi
@@ -3433,6 +3633,10 @@ parse_args() {
 
   if $RERUN_COMPLETED && [[ ! ( "$MODE" == "phase" && -n "$RUN_NAME_INPUT" ) ]]; then
     fail "--rerun-completed requires --phase and --run"
+  fi
+
+  if [[ "$MODE" == "show-datatype-mapping" && "$DRY_RUN" == "true" ]]; then
+    fail "--dry-run is not supported with --show-datatype-mapping"
   fi
 }
 
@@ -3486,6 +3690,14 @@ main() {
 
   [[ -f "$CONFIG_FILE" ]] || fail "Config file not found: $CONFIG_FILE"
   require_command yq
+
+  if [[ "$MODE" == "show-datatype-mapping" ]]; then
+    validate_datatype_mapping_config
+    configure_oracle_wallet >&2
+    require_command sqlplus
+    show_datatype_mapping "$MIGRATION_NAME"
+    return 0
+  fi
 
   if [[ "$MODE" == "init" ]]; then
     validate_config "false"

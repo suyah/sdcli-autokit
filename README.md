@@ -553,6 +553,38 @@ This flag does not clean or truncate the Oracle target. Before repeating
 for that operation. `validate` is read-only and may be repeated without the
 flag.
 
+### Inspect datatype mappings
+
+Datatype mappings are operator reference data and are not part of migration
+validation. Display the mappings persisted in the SQL Developer migration
+repository with:
+
+```bash
+./migrate.sh --show-datatype-mapping
+./migrate.sh proda --show-datatype-mapping
+```
+
+Without a migration name, the command lists every persisted project mapping in
+the repository. With a migration name, it filters on the exact
+`MD_PROJECTS.PROJECT_NAME`. The installed repository schema stores mapping rows
+per project; it does not expose a separate global-default mapping table. An
+unknown project or a project with no persisted rules returns the TSV header and
+no data rows.
+
+The read-only output columns are project, map name, source datatype,
+source precision/scale, target datatype, and target precision/scale. To align
+them in a terminal:
+
+```bash
+./migrate.sh proda --show-datatype-mapping | column -t -s $'\t'
+```
+
+Before querying rules, the command checks that the installed SQL Developer
+repository contains the supported tables and columns. An incompatible
+repository version fails with an explicit unsupported-schema error; the tool
+does not guess table layouts or parse generated DDL. Repository credentials
+are passed to SQL*Plus through stdin and are not included in the TSV output.
+
 ### Automatic validation report
 
 The full workflow runs validation automatically. To repeat it for an existing
@@ -697,6 +729,8 @@ Run migration commands from `sdcli-scripts/`:
 
 ```bash
 ./migrate.sh --init
+./migrate.sh --show-datatype-mapping
+./migrate.sh <migration_name> --show-datatype-mapping
 ./migrate.sh <migration_name> --conn-setup
 ./migrate.sh <migration_name> --migrate
 ./migrate.sh <migration_name>

@@ -72,6 +72,7 @@ sdcli-scripts/**/*.pyc
 !tests/validation_report_test.sh
 !tests/test_validation_report.py
 !tests/validation_metadata_collection_test.sh
+!tests/datatype_mapping_command_test.sh
 !tests/fixtures/
 !tests/fixtures/validation/
 !tests/fixtures/validation/**
