@@ -74,6 +74,7 @@ sdcli-scripts/**/*.pyc
 !tests/validation_metadata_collection_test.sh
 !tests/datatype_mapping_command_test.sh
 !tests/sdcli_action_postcondition_test.sh
+!tests/migrate_preferences_test.sh
 !tests/fixtures/
 !tests/fixtures/validation/
 !tests/fixtures/validation/**

@@ -322,6 +322,13 @@ For an offline customer VM, use the bundle workflow above instead. After loading
 
 `run.sh` creates the separate data/log volumes, mounts the RPM directory read-only, and prepares the SQL Developer CLI environment without network downloads.
 
+The runner installs an sdcli-autokit-managed SQL Developer preference template
+when `product-preferences.xml` is absent. Its default `FileOutputOption=1`
+keeps generated SQL separated by object type. If an existing preferences file
+was not created by this tool, it is left unchanged; set the option manually or
+back up and remove that file before rerunning `run.sh` if you want the managed
+template installed.
+
 For normal daily use after the container already exists:
 
 ```bash
