@@ -59,6 +59,8 @@ assert_contains "$missing_source_output" "Missing required config: defaults.sour
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
+CONFIG_FILE="$tmpdir/config.yaml"
+touch "$CONFIG_FILE"
 bootstrap_marker="$tmpdir/bootstrap-called"
 external_marker="$tmpdir/external-called"
 
