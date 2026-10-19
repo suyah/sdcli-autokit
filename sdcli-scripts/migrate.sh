@@ -36,6 +36,9 @@ ACTIVE_PHASE_ATTEMPT=""
 REPOSITORY_LOCK_DIR=""
 REPOSITORY_LOCK_HELD=false
 RERUN_COMPLETED=false
+SDCLI_LAST_ACTION=""
+SDCLI_LAST_SUCCESS_MARKER=false
+SDCLI_CAPTURE_OUTPUT_FILE=""
 
 declare -a SDCLI_COMMANDS=()
 declare -a SENSITIVE_VALUES=()
@@ -649,6 +652,8 @@ run_sdcli() {
       [[ "$action" == "convert" ]] && is_convert=true
     fi
   done
+  SDCLI_LAST_ACTION="$action"
+  SDCLI_LAST_SUCCESS_MARKER=false
   register_environment_secrets
   printable="$(mask_sensitive "${cmd[@]}")"
 
@@ -687,6 +692,7 @@ run_sdcli() {
   # returning zero. Only an exact, understood init diagnostic is benign.
   if [[ -n "$action" ]] && grep -Eqi "^[[:space:]]*${action}[[:space:]]+completed successfully[[:space:]]*$" "$output_file"; then
     completed_successfully=true
+    SDCLI_LAST_SUCCESS_MARKER=true
   fi
   if grep -Eqi '^[[:space:]]*(error|fatal)[[:space:]:]' "$output_file"; then
     if ! sdcli_has_only_benign_diagnostics "$action" "$completed_successfully" "$output_file"; then
@@ -696,6 +702,9 @@ run_sdcli() {
   if $is_convert && grep -Eq '\[[[:space:]]*line[[:space:]]+[0-9]+:[0-9]+:' "$output_file"; then
     log_error "SQL Developer reported conversion diagnostics; review the object errors before generating deployment SQL"
     rc=1
+  fi
+  if [[ -n "${SDCLI_CAPTURE_OUTPUT_FILE:-}" ]]; then
+    cp "$output_file" "$SDCLI_CAPTURE_OUTPUT_FILE" || rc=1
   fi
   rm -f "$output_file"
   $errexit_enabled && set -e
@@ -2186,8 +2195,12 @@ run_deploy() {
   record_root_sql_inventory "$output_dir"
 
   if [[ -f "$output_dir/role.sql" ]]; then
-    run_sqlplus_file "$(role_setup_dir)" "role_setup.sql" "$target_conn" "$target_user" "$target_password" "" 0 "" false "$output_dir" || fail "Generated role setup failed"
-    record_deploy_manifest "deploy" "$(role_setup_dir)/role_setup.sql" "executed" "derived from sdcli/role.sql; DROP ROLE is available through --cleanup"
+    if run_sqlplus_file "$(role_setup_dir)" "role_setup.sql" "$target_conn" "$target_user" "$target_password" "" 0 "" false "$output_dir"; then
+      record_deploy_manifest "deploy" "$(role_setup_dir)/role_setup.sql" "executed" "derived from sdcli/role.sql; DROP ROLE is available through --cleanup"
+    else
+      record_deploy_manifest "deploy" "$(role_setup_dir)/role_setup.sql" "failed" "SQL*Plus failure"
+      fail "Generated role setup failed"
+    fi
   fi
 
   local found_any=false schema_dir schema_name rel_user_sql include_path
@@ -2195,8 +2208,12 @@ run_deploy() {
     found_any=true
     record_schema_inventory "$output_dir" "$schema_dir"
     rel_user_sql="${schema_dir#$output_dir/}/user.sql"
-    run_sqlplus_file "$output_dir" "$rel_user_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count" || fail "user.sql failed in $schema_dir"
-    record_deploy_manifest "deploy" "$schema_dir/user.sql" "executed"
+    if run_sqlplus_file "$output_dir" "$rel_user_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count"; then
+      record_deploy_manifest "deploy" "$schema_dir/user.sql" "executed"
+    else
+      record_deploy_manifest "deploy" "$schema_dir/user.sql" "failed" "SQL*Plus failure"
+      fail "user.sql failed in $schema_dir"
+    fi
   done < <(schema_dirs "$output_dir")
 
   local generated_sql rel_generated_sql
@@ -2205,8 +2222,12 @@ run_deploy() {
       schema_name="$(basename "$schema_dir")"
       while IFS= read -r include_path; do
         is_predata_sql "$include_path" || continue
-        run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name" || fail "Pre-data generated SQL failed: $include_path"
-        record_deploy_manifest "deploy" "$output_dir/$include_path" "executed" "pre-data master include"
+        if run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name"; then
+          record_deploy_manifest "deploy" "$output_dir/$include_path" "executed" "pre-data master include"
+        else
+          record_deploy_manifest "deploy" "$output_dir/$include_path" "failed" "pre-data SQL*Plus failure"
+          fail "Pre-data generated SQL failed: $include_path"
+        fi
       done < <(schema_master_includes "$output_dir" "$schema_dir")
     done < <(schema_dirs "$output_dir")
 
@@ -2218,8 +2239,12 @@ run_deploy() {
 
     log_info "No per-schema user.sql files found; deploying the single generated SQL output"
     rel_generated_sql="${generated_sql#$output_dir/}"
-    run_sqlplus_file "$output_dir" "$rel_generated_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count" || fail "generated SQL failed: $generated_sql"
-    record_deploy_manifest "deploy" "$generated_sql" "executed" "single generated fallback"
+    if run_sqlplus_file "$output_dir" "$rel_generated_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count"; then
+      record_deploy_manifest "deploy" "$generated_sql" "executed" "single generated fallback"
+    else
+      record_deploy_manifest "deploy" "$generated_sql" "failed" "single generated fallback SQL*Plus failure"
+      fail "generated SQL failed: $generated_sql"
+    fi
   fi
 
   log_info "Deploy manifest: $(deploy_manifest_file)"
@@ -2253,9 +2278,12 @@ run_cleanup() {
   fi
 
   ensure_deploy_manifest
-  run_sqlplus_file "$cleanup_dir" "role_cleanup.sql" "$target_conn" "$target_user" "$target_password" \
-    || fail "Generated role cleanup failed"
-  record_deploy_manifest "cleanup" "$cleanup_file" "executed" "explicit role cleanup"
+  if run_sqlplus_file "$cleanup_dir" "role_cleanup.sql" "$target_conn" "$target_user" "$target_password"; then
+    record_deploy_manifest "cleanup" "$cleanup_file" "executed" "explicit role cleanup"
+  else
+    record_deploy_manifest "cleanup" "$cleanup_file" "failed" "SQL*Plus failure"
+    fail "Generated role cleanup failed"
+  fi
   log_info "Role cleanup manifest: $(deploy_manifest_file)"
 }
 
@@ -3429,6 +3457,353 @@ run_offload() {
   return "$rc"
 }
 
+# --- Phase postconditions ---------------------------------------------------
+expected_run_model_name() {
+  local project_name="$1"
+  local run_id="${RUN_NAME#run_}"
+  [[ -n "$project_name" && -n "$run_id" ]] || return 1
+  printf '%s_%s\n' "$project_name" "$run_id"
+}
+
+sdcli_model_exists() {
+  local phase="$1"
+  local expected_model="$2"
+  local list_action output_file rc=0 saved_action saved_marker
+
+  case "$phase" in
+    capture) list_action="lscaptured" ;;
+    convert) list_action="lsconverted" ;;
+    *)
+      log_error "No SQL Developer model lookup is defined for phase '$phase'"
+      return 1
+      ;;
+  esac
+
+  output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_model_lookup_XXXXXX")" || return 1
+  saved_action="$SDCLI_LAST_ACTION"
+  saved_marker="$SDCLI_LAST_SUCCESS_MARKER"
+  SDCLI_CAPTURE_OUTPUT_FILE="$output_file"
+  if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action"; then
+    rc=1
+  elif ! LC_ALL=C awk -v expected="$expected_model" '
+    {
+      line=$0
+      gsub(/\r/, "", line)
+      marker=") --> Model Name : "
+      marker_pos=index(line, marker)
+      if (marker_pos > 1) {
+        model_index=substr(line, 1, marker_pos - 1)
+        model_name=substr(line, marker_pos + length(marker))
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_index)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_name)
+        if (model_index ~ /^[0-9]+$/ && model_name == expected) found=1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$output_file"; then
+    log_error "SQL Developer $phase model lookup did not return the expected model '$expected_model'"
+    rc=1
+  fi
+  SDCLI_CAPTURE_OUTPUT_FILE=""
+  SDCLI_LAST_ACTION="$saved_action"
+  SDCLI_LAST_SUCCESS_MARKER="$saved_marker"
+  rm -f "$output_file"
+  return "$rc"
+}
+
+verify_datamove_artifacts() {
+  local output_dir="$1"
+  local datamove_dir="$output_dir/datamove"
+  local bcp_script control_file bcp_script_count=0 control_file_count=0
+
+  [[ -d "$datamove_dir" ]] || {
+    log_error "Datamove postcondition failed: directory not found: $datamove_dir"
+    return 1
+  }
+  while IFS= read -r bcp_script; do
+    [[ -n "$bcp_script" ]] || continue
+    if [[ -z "$(extract_bcp_table_names "$bcp_script" | head -n 1)" ]]; then
+      log_error "Datamove postcondition failed: generated BCP script has no supported export command: $bcp_script"
+      return 1
+    fi
+    bcp_script_count=$((bcp_script_count + 1))
+  done < <(find "$datamove_dir" -type f -name 'MicrosoftSQLServer_data.sh' 2>/dev/null | LC_ALL=C sort)
+
+  while IFS= read -r control_file; do
+    [[ -n "$control_file" ]] || continue
+    control_file_count=$((control_file_count + 1))
+  done < <(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | LC_ALL=C sort)
+
+  (( bcp_script_count > 0 )) || {
+    log_error "Datamove postcondition failed: no generated BCP command script was found under $datamove_dir"
+    return 1
+  }
+  (( control_file_count > 0 )) || {
+    log_error "Datamove postcondition failed: no SQL*Loader control file was found under $datamove_dir"
+    return 1
+  }
+}
+
+verify_offload_evidence() {
+  local output_dir="$1"
+  local datamove_dir="$output_dir/datamove"
+  local status_file="$AUTOKIT_DIR/bcp_status.tsv"
+  local expected_file actual_file path rc=0
+
+  [[ -s "$status_file" ]] || {
+    log_error "Offload postcondition failed: BCP status evidence is missing or empty: $status_file"
+    return 1
+  }
+  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_expected_XXXXXX")" || return 1
+  actual_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_actual_XXXXXX")" || {
+    rm -f "$expected_file"
+    return 1
+  }
+  extract_bcp_table_names_from_dir "$datamove_dir" | LC_ALL=C sort > "$expected_file"
+  if [[ ! -s "$expected_file" ]]; then
+    log_error "Offload postcondition failed: no expected BCP invocation could be derived from $datamove_dir"
+    rc=1
+  elif ! LC_ALL=C awk -F '\t' '
+    NF != 4 || $1 != "0" || $2 == "" || $3 == "" || $3 == "-" || $4 !~ /^[0-9]+$/ { invalid=1; next }
+    { print $2 }
+    END { if (invalid) exit 1 }
+  ' "$status_file" | LC_ALL=C sort > "$actual_file"; then
+    log_error "Offload postcondition failed: BCP status evidence is malformed or contains a failed invocation"
+    rc=1
+  elif ! cmp -s "$expected_file" "$actual_file"; then
+    log_error "Offload postcondition failed: BCP status records do not match the expected invocations"
+    rc=1
+  fi
+
+  if (( rc == 0 )); then
+    while IFS=$'\t' read -r _ _ path _; do
+      [[ -f "$path" ]] || {
+        log_error "Offload postcondition failed: exported data file is missing: $path"
+        rc=1
+      }
+    done < "$status_file"
+  fi
+  rm -f "$expected_file" "$actual_file"
+  return "$rc"
+}
+
+verify_load_evidence() {
+  local output_dir="$1"
+  local datamove_dir="$output_dir/datamove"
+  local status_file="$AUTOKIT_DIR/sqlldr_status.tsv"
+  local expected_file actual_file control_file data_file rc=0
+
+  [[ -s "$status_file" ]] || {
+    log_error "Load postcondition failed: SQL*Loader status evidence is missing or empty: $status_file"
+    return 1
+  }
+  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlldr_expected_XXXXXX")" || return 1
+  actual_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlldr_actual_XXXXXX")" || {
+    rm -f "$expected_file"
+    return 1
+  }
+  find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | LC_ALL=C sort > "$expected_file"
+  if [[ ! -s "$expected_file" ]]; then
+    log_error "Load postcondition failed: no expected SQL*Loader control file was found under $datamove_dir"
+    rc=1
+  elif ! LC_ALL=C awk -F '\t' '
+    NF != 8 || $1 != "0" || $2 == "" || $3 == "" || $4 == "" ||
+      $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || $8 == "" { invalid=1; next }
+    { print $3 }
+    END { if (invalid) exit 1 }
+  ' "$status_file" | LC_ALL=C sort > "$actual_file"; then
+    log_error "Load postcondition failed: SQL*Loader status evidence is malformed or contains a failed invocation"
+    rc=1
+  elif ! cmp -s "$expected_file" "$actual_file"; then
+    log_error "Load postcondition failed: SQL*Loader status records do not match the expected control files"
+    rc=1
+  fi
+
+  if (( rc == 0 )); then
+    while IFS=$'\t' read -r _ _ control_file data_file _; do
+      [[ -f "$control_file" ]] || {
+        log_error "Load postcondition failed: control file is missing: $control_file"
+        rc=1
+      }
+      [[ -f "$data_file" ]] || {
+        log_error "Load postcondition failed: input data file is missing: $data_file"
+        rc=1
+      }
+    done < "$status_file"
+  fi
+  rm -f "$expected_file" "$actual_file"
+  return "$rc"
+}
+
+manifest_relative_path() {
+  local path="$1"
+  [[ -z "${RUN_DIR:-}" || "$path" != "$RUN_DIR/"* ]] || path="${path#$RUN_DIR/}"
+  printf '%s\n' "$path"
+}
+
+expected_manifest_paths() {
+  local phase="$1"
+  local output_dir="$2"
+  local schema_dir include_path generated_sql cleanup_file
+
+  case "$phase" in
+    deploy)
+      if [[ -f "$output_dir/role.sql" && -f "$(role_setup_dir)/role_setup.sql" ]]; then
+        manifest_relative_path "$(role_setup_dir)/role_setup.sql"
+      fi
+      while IFS= read -r schema_dir; do
+        manifest_relative_path "$schema_dir/user.sql"
+        while IFS= read -r include_path; do
+          is_predata_sql "$include_path" || continue
+          manifest_relative_path "$output_dir/$include_path"
+        done < <(schema_master_includes "$output_dir" "$schema_dir")
+      done < <(schema_dirs "$output_dir")
+      if [[ -z "$(schema_dirs "$output_dir")" ]]; then
+        generated_sql="$(generated_sql_files "$output_dir")"
+        [[ -n "$generated_sql" ]] && manifest_relative_path "$generated_sql"
+      fi
+      ;;
+    postdeploy)
+      while IFS= read -r schema_dir; do
+        while IFS= read -r include_path; do
+          manifest_relative_path "$output_dir/$include_path"
+        done < <(schema_post_files "$output_dir" "$schema_dir")
+        [[ ! -f "$schema_dir/post.sql" ]] || manifest_relative_path "$schema_dir/post.sql"
+      done < <(schema_dirs "$output_dir")
+      ;;
+    cleanup)
+      cleanup_file="$(role_cleanup_dir)/role_cleanup.sql"
+      [[ ! -f "$cleanup_file" ]] || manifest_relative_path "$cleanup_file"
+      ;;
+  esac
+}
+
+verify_deploy_manifest_phase() {
+  local phase="$1"
+  local output_dir="$2"
+  local manifest expected_file path status
+  manifest="$(deploy_manifest_file)"
+  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_manifest_expected_XXXXXX")" || return 1
+  if ! expected_manifest_paths "$phase" "$output_dir" > "$expected_file"; then
+    rm -f "$expected_file"
+    return 1
+  fi
+  [[ -f "$manifest" ]] || {
+    if [[ ! -s "$expected_file" ]]; then
+      rm -f "$expected_file"
+      return 0
+    fi
+    log_error "${phase^} postcondition failed: deploy manifest is missing: $manifest"
+    rm -f "$expected_file"
+    return 1
+  }
+  if ! LC_ALL=C awk -F '\t' '
+    NR == 1 { if ($0 != "phase\tpath\tstatus\tnote") invalid=1; next }
+    NF != 4 || $1 == "" || $2 == "" { invalid=1; next }
+    $3 != "executed" && $3 != "failed" && $3 != "control" &&
+      $3 != "excluded" && $3 != "covered" { invalid=1 }
+    END { if (invalid) exit 1 }
+  ' "$manifest"; then
+    log_error "${phase^} postcondition failed: deploy manifest is malformed: $manifest"
+    rm -f "$expected_file"
+    return 1
+  fi
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    status="$(awk -F '\t' -v phase="$phase" -v path="$path" '$1 == phase && $2 == path { status=$3 } END { print status }' "$manifest")"
+    if [[ "$status" != "executed" ]]; then
+      log_error "${phase^} postcondition failed: manifest has no successful result for $path"
+      rm -f "$expected_file"
+      return 1
+    fi
+  done < "$expected_file"
+  rm -f "$expected_file"
+}
+
+verify_validation_evidence() {
+  local checks_file="$AUTOKIT_DIR/validation_checks.tsv"
+  local summary_file="$AUTOKIT_DIR/validation_summary.txt"
+  local required_check
+
+  [[ -f "$checks_file" ]] || {
+    log_error "Validate postcondition failed: validation checks are missing: $checks_file"
+    return 1
+  }
+  if ! LC_ALL=C awk -F '\t' '
+    NR == 1 { if ($0 != "check\tstatus\tissues\tdetail") invalid=1; next }
+    NF != 4 || $1 == "" || $3 !~ /^[0-9]+$/ || $4 == "" { invalid=1; next }
+    $2 != "PASS" && $2 != "FAIL" && $2 != "INCOMPLETE" && $2 != "NOT_EVALUATED" { invalid=1 }
+    seen[$1]++
+    END {
+      required[1]="run_log"; required[2]="sdcli_error_log"; required[3]="sqlldr_logs"
+      required[4]="missing_evidence"; required[5]="reconciliation"; required[6]="target_objects"
+      required[7]="metadata_collection"
+      for (i=1; i<=7; i++) if (seen[required[i]] != 1) invalid=1
+      if (invalid) exit 1
+    }
+  ' "$checks_file"; then
+    log_error "Validate postcondition failed: validation checks are incomplete or malformed: $checks_file"
+    return 1
+  fi
+  [[ -f "$summary_file" ]] && grep -Fx 'status=PASS' "$summary_file" >/dev/null 2>&1 || {
+    log_error "Validate postcondition failed: validation summary does not report PASS: $summary_file"
+    return 1
+  }
+  for required_check in migration_report.html migration_report.txt; do
+    [[ -f "$AUTOKIT_DIR/$required_check" ]] || {
+      log_error "Validate postcondition failed: report is missing: $AUTOKIT_DIR/$required_check"
+      return 1
+    }
+  done
+}
+
+verify_phase_postcondition() {
+  local phase="$1"
+  local model_name="$2"
+  local project_name="$3"
+  local output_dir="$4"
+  local expected_model
+
+  $DRY_RUN && return 0
+  case "$phase" in
+    capture|convert)
+      if [[ "$SDCLI_LAST_ACTION" != "$phase" || "$SDCLI_LAST_SUCCESS_MARKER" != "true" ]]; then
+        log_error "${phase^} postcondition failed: exact '$phase completed successfully' marker was not observed"
+        return 1
+      fi
+      if [[ "$phase" == "capture" ]]; then
+        expected_model="$model_name"
+      else
+        expected_model="$(expected_run_model_name "$project_name")" || return 1
+      fi
+      sdcli_model_exists "$phase" "$expected_model"
+      ;;
+    generate)
+      ( validate_generated_sql_inventory "$output_dir" ) || {
+        log_error "Generate postcondition failed: generated execution-plan inventory is missing or unsupported"
+        return 1
+      }
+      ;;
+    datamove) verify_datamove_artifacts "$output_dir" ;;
+    offload) verify_offload_evidence "$output_dir" ;;
+    deploy|postdeploy)
+      ( validate_generated_sql_inventory "$output_dir" ) || {
+        log_error "${phase^} postcondition failed: generated execution-plan inventory is missing or unsupported"
+        return 1
+      }
+      verify_deploy_manifest_phase "$phase" "$output_dir"
+      ;;
+    cleanup) verify_deploy_manifest_phase "$phase" "$output_dir" ;;
+    load) verify_load_evidence "$output_dir" ;;
+    validate) verify_validation_evidence ;;
+    *)
+      log_error "No postcondition is defined for phase '$phase'"
+      return 1
+      ;;
+  esac
+}
+
 # --- Phase orchestration -----------------------------------------------------
 run_phase() {
   local phase_name="$1"
@@ -3486,6 +3861,9 @@ run_phase() {
       fail "Unsupported phase: $phase_name"
       ;;
   esac
+
+  verify_phase_postcondition "$phase_name" "$model_name" "$project_name" "$output_dir" \
+    || fail "Postcondition failed for migration '$project_name' phase '$phase_name'"
 
   complete_phase_status "$phase_name"
 }
