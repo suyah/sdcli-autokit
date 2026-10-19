@@ -294,6 +294,13 @@ sync_sdcli_scripts() {
       mv "$DEST_DIR/migrate.sh.next" "$DEST_DIR/migrate.sh"
       mv "$DEST_DIR/config.example.yaml.next" "$DEST_DIR/config.example.yaml"
 
+      chmod 0755 "$DEST_DIR/migrate.sh"
+      find "$DEST_DIR/lib" "$DEST_DIR/templates" -type f -exec chmod 0644 {} +
+      for executable in bcp load_wrappers.sh sqlldr sqlplus; do
+        [[ ! -f "$DEST_DIR/lib/$executable" ]] || chmod 0755 "$DEST_DIR/lib/$executable"
+      done
+      chmod 0644 "$DEST_DIR/config.example.yaml"
+
       if [[ ! -f "$DEST_DIR/config.yaml" ]]; then
         install -m 0600 "$DEST_DIR/config.example.yaml" "$DEST_DIR/config.yaml"
       fi

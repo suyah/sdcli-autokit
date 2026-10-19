@@ -89,6 +89,8 @@ for script_file in "${script_files[@]}"; do
   mkdir -p "$bundle_dir/sdcli-scripts/$(dirname "$relative_path")"
   cp "$ROOT_DIR/$script_file" "$bundle_dir/sdcli-scripts/$relative_path"
 done
+find "$bundle_dir/sdcli-scripts/lib" "$bundle_dir/sdcli-scripts/templates" -type f -exec chmod 0644 {} +
+chmod 0644 "$bundle_dir/sdcli-scripts/config.example.yaml"
 chmod 0755 "$bundle_dir/sdcli-scripts/migrate.sh" "$bundle_dir/sdcli-scripts/lib/bcp" "$bundle_dir/sdcli-scripts/lib/load_wrappers.sh" "$bundle_dir/sdcli-scripts/lib/sqlldr" "$bundle_dir/sdcli-scripts/lib/sqlplus"
 
 # macOS attaches Finder/provenance extended attributes to copied files. Excluding

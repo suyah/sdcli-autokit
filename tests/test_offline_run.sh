@@ -7,6 +7,17 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 RUN_SH_SOURCE_ONLY=true source "$REPO_ROOT/deployment/run.sh"
 
+assert_mode() {
+  local path="$1"
+  local expected="$2"
+  local actual
+  actual="$(stat -f '%Lp' "$path" 2>/dev/null || stat -c '%a' "$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "unexpected mode for $path: expected $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
 vendor_dir="$tmpdir/vendor-rpms"
 mkdir -p "$vendor_dir"
 touch \
@@ -53,6 +64,8 @@ printf '%s\n' 'new deploy library' > "$source_dir/lib/sqlplus_deploy.sh"
 printf '%s\n' 'new wrapper' > "$source_dir/lib/sqlplus"
 printf '%s\n' 'new template' > "$source_dir/templates/product-preferences.xml"
 printf '%s\n' 'defaults:' '  driver_file: /u01/app/jtds-1.3.1.jar' > "$source_dir/config.example.yaml"
+chmod 0700 "$source_dir/migrate.sh"
+chmod 0600 "$source_dir/lib/sqlplus_deploy.sh"
 
 SDCLI_SCRIPTS_SRC="$source_dir"
 SDCLI_SCRIPTS_DEST="$container_root/home/sduser/sdcli-scripts"
@@ -95,6 +108,8 @@ sync_sdcli_scripts
 
 grep -F 'new-program' "$SDCLI_SCRIPTS_DEST/migrate.sh" >/dev/null
 [[ ! -e "$SDCLI_SCRIPTS_DEST/lib/stale.sh" ]]
+assert_mode "$SDCLI_SCRIPTS_DEST/migrate.sh" 755
+assert_mode "$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh" 644
 [[ "$(cksum "$SDCLI_SCRIPTS_DEST/config.yaml")" == "$customer_config_checksum" ]]
 [[ "$(cat "$SDCLI_SCRIPTS_DEST/.autokit-script-version")" == "1.2.3" ]]
 
