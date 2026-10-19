@@ -43,6 +43,7 @@ SDCLI_CAPTURE_OUTPUT_FILE=""
 declare -a SDCLI_COMMANDS=()
 declare -a SENSITIVE_VALUES=()
 declare -a DATATYPE_MAPPING_TEMP_DIRS=()
+declare -a SQLPLUS_RUNTIME_TEMP_DIRS=()
 
 # --- CLI and logging helpers -------------------------------------------------
 usage() {
@@ -169,6 +170,7 @@ on_exit() {
     record_phase_status "$ACTIVE_PHASE" "failed" "$rc" "process exited before phase completion" "${ACTIVE_PHASE_ATTEMPT:-1}" || true
     ACTIVE_PHASE=""
   fi
+  cleanup_sqlplus_runtime_temp_dirs || true
   cleanup_datatype_mapping_temp_dirs || true
   release_repository_lock || true
 
@@ -197,6 +199,32 @@ cleanup_datatype_mapping_temp_dirs() {
     [[ -n "$temp_dir" && -d "$temp_dir" ]] && rm -rf -- "$temp_dir"
   done
   DATATYPE_MAPPING_TEMP_DIRS=()
+}
+
+register_sqlplus_runtime_dir() {
+  SQLPLUS_RUNTIME_TEMP_DIRS+=("$1")
+}
+
+remove_sqlplus_runtime_dir() {
+  local target="$1"
+  local temp_dir
+  local -a remaining=()
+
+  if [[ -n "$target" && -d "$target" ]]; then
+    rm -rf -- "$target"
+  fi
+  for temp_dir in "${SQLPLUS_RUNTIME_TEMP_DIRS[@]+"${SQLPLUS_RUNTIME_TEMP_DIRS[@]}"}"; do
+    [[ "$temp_dir" == "$target" ]] || remaining+=("$temp_dir")
+  done
+  SQLPLUS_RUNTIME_TEMP_DIRS=("${remaining[@]+"${remaining[@]}"}")
+}
+
+cleanup_sqlplus_runtime_temp_dirs() {
+  local temp_dir
+  for temp_dir in "${SQLPLUS_RUNTIME_TEMP_DIRS[@]+"${SQLPLUS_RUNTIME_TEMP_DIRS[@]}"}"; do
+    [[ -n "$temp_dir" && -d "$temp_dir" ]] && rm -rf -- "$temp_dir"
+  done
+  SQLPLUS_RUNTIME_TEMP_DIRS=()
 }
 
 on_signal() {
@@ -676,7 +704,17 @@ sdcli_has_only_benign_diagnostics() {
   [[ -z "$unexpected" ]] || return 1
 
   unexpected="$(grep -Eo 'ORA-[0-9]{5}:' "$output_file" | grep -Ev '^ORA-01920:$' || true)"
-  [[ -z "$unexpected" ]]
+  [[ -z "$unexpected" ]] || return 1
+
+  ! grep -Eqi '(^|[^[:alnum:]_])(PLS|SP2|LRM)-[0-9]{4,5}:' "$output_file"
+}
+
+sdcli_output_has_diagnostics() {
+  local output_file="$1"
+
+  grep -Eqi \
+    '^[[:space:]]*(error|fatal)([[:space:]:]|$)|(^|[^[:alnum:]_])(ORA|PLS|SP2|LRM)-[0-9]{4,5}:' \
+    "$output_file"
 }
 
 run_sdcli() {
@@ -730,10 +768,14 @@ run_sdcli() {
     completed_successfully=true
     SDCLI_LAST_SUCCESS_MARKER=true
   fi
-  if grep -Eqi '^[[:space:]]*(error|fatal)[[:space:]:]' "$output_file"; then
+  if sdcli_output_has_diagnostics "$output_file"; then
     if ! sdcli_has_only_benign_diagnostics "$action" "$completed_successfully" "$output_file"; then
       rc=1
     fi
+  fi
+  if (( rc == 0 )) && [[ -z "$action" || "$completed_successfully" != "true" ]]; then
+    log_error "SDCLI did not report the exact completion marker for action '${action:-unknown}'"
+    rc=1
   fi
   if $is_convert && grep -Eq '\[[[:space:]]*line[[:space:]]+[0-9]+:[0-9]+:' "$output_file"; then
     log_error "SQL Developer reported conversion diagnostics; review the object errors before generating deployment SQL"

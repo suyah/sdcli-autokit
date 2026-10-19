@@ -7,6 +7,17 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 RUN_SH_SOURCE_ONLY=true source "$REPO_ROOT/deployment/run.sh"
 
+assert_mode() {
+  local path="$1"
+  local expected="$2"
+  local actual
+  actual="$(stat -f '%Lp' "$path" 2>/dev/null || stat -c '%a' "$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "unexpected mode for $path: expected $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
 vendor_dir="$tmpdir/vendor-rpms"
 mkdir -p "$vendor_dir"
 touch \
@@ -43,5 +54,76 @@ grep -F -- "test -f '\$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py'" "$
 ! grep -q 'podman pull' "$REPO_ROOT/deployment/run.sh"
 ! grep -q 'podman build' "$REPO_ROOT/deployment/run.sh"
 ! grep -q ':/u01:Z' "$REPO_ROOT/deployment/run.sh"
+
+source_dir="$tmpdir/source-scripts"
+container_root="$tmpdir/container"
+mkdir -p "$source_dir/lib" "$source_dir/templates" "$container_root/home/sduser/sdcli-scripts/lib"
+printf '%s\n' '#!/usr/bin/env bash' 'echo new-program' > "$source_dir/migrate.sh"
+printf '%s\n' 'new report renderer' > "$source_dir/lib/generate_validation_report.py"
+printf '%s\n' 'new deploy library' > "$source_dir/lib/sqlplus_deploy.sh"
+printf '%s\n' 'new wrapper' > "$source_dir/lib/sqlplus"
+printf '%s\n' 'new template' > "$source_dir/templates/product-preferences.xml"
+printf '%s\n' 'defaults:' '  driver_file: /u01/app/jtds-1.3.1.jar' > "$source_dir/config.example.yaml"
+chmod 0700 "$source_dir/migrate.sh"
+chmod 0600 "$source_dir/lib/sqlplus_deploy.sh"
+
+SDCLI_SCRIPTS_SRC="$source_dir"
+SDCLI_SCRIPTS_DEST="$container_root/home/sduser/sdcli-scripts"
+CONTAINER_NAME=test-container
+BUNDLE_VERSION=1.2.3
+
+container_engine() {
+  local operation="$1"
+  shift
+  case "$operation" in
+    cp)
+      local source_path="$1"
+      local destination="${2#*:}"
+      cp -R "$source_path" "$destination"
+      ;;
+    exec)
+      local -a environment=()
+      while [[ "${1:-}" == "--env" ]]; do
+        environment+=("$2")
+        shift 2
+      done
+      shift
+      [[ "$1" == "bash" && "$2" == "-lc" ]]
+      shift 2
+      env ${environment[@]+"${environment[@]}"} bash -lc "$1"
+      ;;
+    *)
+      echo "unexpected fake container operation: $operation" >&2
+      return 1
+      ;;
+  esac
+}
+
+printf '%s\n' 'old-program' > "$SDCLI_SCRIPTS_DEST/migrate.sh"
+printf '%s\n' 'stale-library' > "$SDCLI_SCRIPTS_DEST/lib/stale.sh"
+printf '%s\n' 'customer: keep-this-byte-for-byte' > "$SDCLI_SCRIPTS_DEST/config.yaml"
+customer_config_checksum="$(cksum "$SDCLI_SCRIPTS_DEST/config.yaml")"
+
+sync_sdcli_scripts
+
+grep -F 'new-program' "$SDCLI_SCRIPTS_DEST/migrate.sh" >/dev/null
+[[ ! -e "$SDCLI_SCRIPTS_DEST/lib/stale.sh" ]]
+assert_mode "$SDCLI_SCRIPTS_DEST/migrate.sh" 755
+assert_mode "$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh" 644
+[[ "$(cksum "$SDCLI_SCRIPTS_DEST/config.yaml")" == "$customer_config_checksum" ]]
+[[ "$(cat "$SDCLI_SCRIPTS_DEST/.autokit-script-version")" == "1.2.3" ]]
+
+second_destination="$container_root/home/sduser/second-scripts"
+SDCLI_SCRIPTS_DEST="$second_destination"
+sync_sdcli_scripts
+cmp "$source_dir/config.example.yaml" "$second_destination/config.yaml"
+
+printf '%s\n' 'previous-version' > "$second_destination/.autokit-script-version"
+rm "$source_dir/lib/sqlplus_deploy.sh"
+if ( sync_sdcli_scripts ) >/dev/null 2>&1; then
+  echo "incomplete program source unexpectedly synchronized" >&2
+  exit 1
+fi
+[[ "$(cat "$second_destination/.autokit-script-version")" == "previous-version" ]]
 
 echo "offline run test passed"

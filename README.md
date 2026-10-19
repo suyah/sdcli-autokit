@@ -33,7 +33,7 @@ deployment/
 └── stop.sh
 
 sdcli-scripts/
-├── config.yaml
+├── config.example.yaml
 ├── lib/
 │   ├── bcp
 │   ├── generate_validation_report.py
@@ -62,9 +62,10 @@ Use this directory inside the migration working area/container to configure and 
 
 | File | Purpose |
 | --- | --- |
-| `config.yaml` | Main configuration file for repository, source database, target database, and migration definitions. |
+| `config.example.yaml` | Neutral configuration template shipped in source and offline bundles. |
+| `config.yaml` | Customer configuration created from the example on first container setup; it is intentionally not tracked or bundled. |
 | `migrate.sh` | Main migration command. It validates config, initializes the repository, creates connections, runs phases, and writes run logs. |
-| `lib/` | Helper programs used internally for BCP, SQL*Plus, SQL*Loader, and validation-report generation. Most users do not need to edit these files. |
+| `lib/` | Helper programs used internally for BCP, SQL*Plus, SQL*Loader, and validation-report generation. Bash owns database execution; the existing Python standard-library renderer only converts validation TSV evidence into HTML/text reports. |
 
 ## Prerequisites
 
@@ -135,12 +136,25 @@ podman load -i image.tar
 
 The EULA flag records the operator's acknowledgement required for the Microsoft packages; it does not replace the vendor terms. On a system where SELinux labels are not applicable, remove `,Z` from the three `-v` options in `deployment/run.sh`.
 
+Every successful `run.sh` invocation refreshes the bundled program files but
+preserves an existing customer `sdcli-scripts/config.yaml` byte-for-byte. On a
+first install it creates that file from `config.example.yaml`. The installed
+program version is recorded in
+`/home/sduser/sdcli-scripts/.autokit-script-version`.
+
 ## Configure `config.yaml`
 
 The migration runner reads migration settings from:
 
 ```bash
 sdcli-scripts/config.yaml
+```
+
+In an offline container, `run.sh` creates this file automatically on the first
+install. In a source checkout, create it yourself before running a migration:
+
+```bash
+cp sdcli-scripts/config.example.yaml sdcli-scripts/config.yaml
 ```
 
 The main sections are:
@@ -189,7 +203,7 @@ migration_repository:
 migrations:
   - name: tpcc
     source:
-      conn: 10.0.1.165:1433:tpcc
+      conn: sqlserver.example.internal:1433:tpcc
       user: sa
       password: "${SOURCE_PASSWORD}"
     target:
@@ -253,7 +267,7 @@ Example:
 
 ```yaml
 source:
-  conn: 10.0.1.165:1433:tpcc
+  conn: sqlserver.example.internal:1433:tpcc
 ```
 
 ### Autonomous Database mTLS wallet
@@ -338,9 +352,9 @@ For normal daily use after the container already exists:
 
 ### 2. Review migration configuration
 
-In `sdcli-scripts/`, update `config.yaml` for your repository connection, source database, target database, migration name, password placeholder names, and optional load/offload preferences.
+In `sdcli-scripts/`, update the generated `config.yaml` for your repository connection, source database, target database, migration name, password placeholder names, and optional load/offload preferences. Keep `config.example.yaml` unchanged so it remains a clean reference for later releases.
 
-For an offline bundle, `run.sh` starts the container and copies this directory into the container on its first run. You can then configure it interactively inside the running container:
+For an offline bundle, `run.sh` starts the container, synchronizes the program files on every invocation, and initializes `config.yaml` only when it is absent. You can then configure it interactively inside the running container:
 
 ```bash
 podman exec -it --user sduser sdcli-autokit bash
@@ -348,7 +362,7 @@ cd ~/sdcli-scripts
 vi config.yaml
 ```
 
-Exit the shell after saving. The configuration remains in the existing container; keep a copy of the edited `config.yaml` outside the container as well, so it can be reused if the container is deliberately recreated for an image upgrade.
+Exit the shell after saving. Later `run.sh` upgrades preserve this configuration. Keep a copy outside the container as well, because deliberately removing and recreating the container also removes files stored only in its writable layer.
 
 ### 3. Set password variables
 
@@ -509,6 +523,13 @@ one-statement-per-line `role.sql` format and understands SQL line and block
 comments. The autokit does not claim to parse arbitrary SQL or PL/SQL to detect
 every possible destructive statement; review generated migration DDL before
 running it in a target environment.
+
+Automated deploy supports only SQL Developer's tested flat per-schema layout:
+each schema directory must contain `user.sql` and `master.sql`, and executable
+schema files must be directly accounted for by that master plan. A monolithic
+`gen/*.sql`-only output or nested generated SQL directory is rejected before
+SQL*Plus runs; review or execute an unsupported layout manually instead of
+asking the autokit to guess its semantics.
 
 ### SQL Developer Emulation schema
 
@@ -755,6 +776,10 @@ Run migration commands from `sdcli-scripts/`:
   and the HTML report is `PASS`; every row in `reconciliation.tsv` must also be
   `PASS`.
 - Check `sdcli/log/error.txt` when SDCLI phases fail.
+- SDCLI success requires both exit code zero and the exact action completion
+  marker, with no Oracle/SQL*Plus fatal diagnostic. The sole accepted diagnostic
+  exception is repository `init` reporting existing-user `ORA-01920` together
+  with its exact completion marker.
 - Use `--dry-run` to confirm config and command construction before a real run.
 - Run `--conn-setup` again if source or target connection details changed.
 - Use `--run <run_id>` when rerunning a later phase against files from an existing run.
@@ -765,7 +790,7 @@ Run migration commands from `sdcli-scripts/`:
 For day-to-day migration work, most users only need to understand:
 
 1. `deployment/` scripts for container lifecycle
-2. `sdcli-scripts/config.yaml` for migration settings
+2. `sdcli-scripts/config.example.yaml` as the shipped template and the local, untracked `config.yaml` for migration settings
 3. password environment variables
 4. `sdcli-scripts/migrate.sh` commands
 5. each run's `autokit/` and `sdcli/` output directories

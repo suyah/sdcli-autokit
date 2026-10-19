@@ -30,6 +30,7 @@ JTDS_TARGET_FILE="/u01/app/jtds-1.3.1.jar"
 SDCLI_SCRIPTS_SRC="$ROOT_DIR/../sdcli-scripts"
 SDCLI_SCRIPTS_DEST="${HOME_DIR%/}/sdcli-scripts"
 INSTALLER_SRC="$ROOT_DIR/install-vendor.sh"
+BUNDLE_VERSION=""
 
 usage() {
   cat <<'USAGE'
@@ -114,6 +115,7 @@ load_bundle_version() {
   if [[ -n "${IMAGE_TAG_OVERRIDE:-}" ]]; then
     [[ "$IMAGE_TAG_OVERRIDE" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || fail "invalid IMAGE_TAG_OVERRIDE"
     IMAGE_NAME="$IMAGE_TAG_OVERRIDE"
+    BUNDLE_VERSION="$IMAGE_TAG_OVERRIDE"
     return
   fi
 
@@ -121,6 +123,7 @@ load_bundle_version() {
   version="$(<"$version_file")"
   [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "invalid bundle version in $version_file"
   IMAGE_NAME="$IMAGE_REPOSITORY:$version"
+  BUNDLE_VERSION="$version"
 }
 
 ensure_image() {
@@ -232,19 +235,80 @@ initialize_sqldeveloper_preferences() {
 }
 
 sync_sdcli_scripts() {
+  local required_file stage_dir
+  local -a required_files=(
+    migrate.sh
+    config.example.yaml
+    lib/generate_validation_report.py
+    lib/sqlplus_deploy.sh
+    templates/product-preferences.xml
+  )
+
   [[ -d "$SDCLI_SCRIPTS_SRC" ]] || fail "sdcli-scripts directory not found: $SDCLI_SCRIPTS_SRC"
+  [[ -n "$BUNDLE_VERSION" ]] || fail "bundle version is not loaded"
+  for required_file in "${required_files[@]}"; do
+    [[ -f "$SDCLI_SCRIPTS_SRC/$required_file" ]] \
+      || fail "required migration program file not found: $SDCLI_SCRIPTS_SRC/$required_file"
+  done
+  [[ -d "$SDCLI_SCRIPTS_SRC/lib" ]] || fail "migration library directory not found: $SDCLI_SCRIPTS_SRC/lib"
+  [[ -d "$SDCLI_SCRIPTS_SRC/templates" ]] || fail "migration template directory not found: $SDCLI_SCRIPTS_SRC/templates"
 
-  if container_engine exec "$CONTAINER_NAME" bash -lc \
-      "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh' \
-       && test -f '$SDCLI_SCRIPTS_DEST/config.yaml' \
-       && test -f '$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py' \
-       && test -f '$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh' \
-       && test -f '$SDCLI_SCRIPTS_DEST/templates/product-preferences.xml'"; then
-    return
-  fi
+  stage_dir="${SDCLI_SCRIPTS_DEST}.stage.$$"
+  container_engine exec \
+    --env "STAGE_DIR=$stage_dir" \
+    "$CONTAINER_NAME" bash -lc 'rm -rf -- "$STAGE_DIR" && mkdir -p "$STAGE_DIR/lib" "$STAGE_DIR/templates"'
+  container_engine cp "$SDCLI_SCRIPTS_SRC/migrate.sh" "$CONTAINER_NAME:$stage_dir/migrate.sh"
+  container_engine cp "$SDCLI_SCRIPTS_SRC/config.example.yaml" "$CONTAINER_NAME:$stage_dir/config.example.yaml"
+  container_engine cp "$SDCLI_SCRIPTS_SRC/lib/." "$CONTAINER_NAME:$stage_dir/lib"
+  container_engine cp "$SDCLI_SCRIPTS_SRC/templates/." "$CONTAINER_NAME:$stage_dir/templates"
 
-  container_engine exec "$CONTAINER_NAME" bash -lc "mkdir -p '$SDCLI_SCRIPTS_DEST'"
-  container_engine cp "$SDCLI_SCRIPTS_SRC/." "$CONTAINER_NAME:$SDCLI_SCRIPTS_DEST"
+  container_engine exec \
+    --env "STAGE_DIR=$stage_dir" \
+    --env "DEST_DIR=$SDCLI_SCRIPTS_DEST" \
+    --env "SCRIPT_BUNDLE_VERSION=$BUNDLE_VERSION" \
+    "$CONTAINER_NAME" bash -lc '
+      set -euo pipefail
+
+      for required_file in \
+        migrate.sh \
+        config.example.yaml \
+        lib/generate_validation_report.py \
+        lib/sqlplus_deploy.sh \
+        templates/product-preferences.xml; do
+        test -f "$STAGE_DIR/$required_file" || {
+          echo "Error: staged migration program file is missing: $required_file" >&2
+          exit 1
+        }
+      done
+
+      mkdir -p "$DEST_DIR"
+      rm -rf -- "$DEST_DIR/lib.next" "$DEST_DIR/templates.next"
+      mv "$STAGE_DIR/lib" "$DEST_DIR/lib.next"
+      mv "$STAGE_DIR/templates" "$DEST_DIR/templates.next"
+      install -m 0755 "$STAGE_DIR/migrate.sh" "$DEST_DIR/migrate.sh.next"
+      install -m 0644 "$STAGE_DIR/config.example.yaml" "$DEST_DIR/config.example.yaml.next"
+
+      rm -rf -- "$DEST_DIR/lib" "$DEST_DIR/templates"
+      mv "$DEST_DIR/lib.next" "$DEST_DIR/lib"
+      mv "$DEST_DIR/templates.next" "$DEST_DIR/templates"
+      mv "$DEST_DIR/migrate.sh.next" "$DEST_DIR/migrate.sh"
+      mv "$DEST_DIR/config.example.yaml.next" "$DEST_DIR/config.example.yaml"
+
+      chmod 0755 "$DEST_DIR/migrate.sh"
+      find "$DEST_DIR/lib" "$DEST_DIR/templates" -type f -exec chmod 0644 {} +
+      for executable in bcp load_wrappers.sh sqlldr sqlplus; do
+        [[ ! -f "$DEST_DIR/lib/$executable" ]] || chmod 0755 "$DEST_DIR/lib/$executable"
+      done
+      chmod 0644 "$DEST_DIR/config.example.yaml"
+
+      if [[ ! -f "$DEST_DIR/config.yaml" ]]; then
+        install -m 0600 "$DEST_DIR/config.example.yaml" "$DEST_DIR/config.yaml"
+      fi
+
+      printf "%s\n" "$SCRIPT_BUNDLE_VERSION" > "$DEST_DIR/.autokit-script-version.next"
+      mv "$DEST_DIR/.autokit-script-version.next" "$DEST_DIR/.autokit-script-version"
+      rm -rf -- "$STAGE_DIR"
+    '
 }
 
 check_tools() {

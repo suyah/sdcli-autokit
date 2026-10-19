@@ -5,6 +5,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
+assert_mode() {
+  local path="$1"
+  local expected="$2"
+  local actual
+  actual="$(stat -f '%Lp' "$path" 2>/dev/null || stat -c '%a' "$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "unexpected mode for $path: expected $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
 fakebin="$tmpdir/bin"
 mkdir -p "$fakebin"
 cat > "$fakebin/podman" <<'SH'
@@ -56,7 +67,24 @@ tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/run.sh
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/install-vendor.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/migrate.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/lib/generate_validation_report.py' >/dev/null
+tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/config.example.yaml' >/dev/null
+if tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/config.yaml' >/dev/null; then
+  echo "customer config.yaml was packaged" >&2
+  exit 1
+fi
 [[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/VERSION)" == "1.2.3" ]]
+example_config="$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/config.example.yaml)"
+if grep -Eq '(10\.[0-9]+\.[0-9]+\.[0-9]+|68\.233\.113\.119|adb\.[A-Za-z0-9.-]+oraclecloud\.com)' <<< "$example_config"; then
+  echo "project-specific endpoint found in config.example.yaml" >&2
+  exit 1
+fi
+
+extracted_bundle="$tmpdir/extracted"
+mkdir -p "$extracted_bundle"
+tar -xzf "$bundle" -C "$extracted_bundle"
+extracted_root="$extracted_bundle/sdcli-autokit-1.2.3-linux-amd64"
+assert_mode "$extracted_root/sdcli-scripts/migrate.sh" 755
+assert_mode "$extracted_root/sdcli-scripts/lib/sqlplus_deploy.sh" 644
 
 expected_hash="$(awk '{print $1}' "$checksum")"
 if command -v sha256sum >/dev/null 2>&1; then

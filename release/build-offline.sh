@@ -69,11 +69,28 @@ for deployment_file in .env run.sh start.sh stop.sh install-vendor.sh; do
 done
 chmod 0755 "$bundle_dir/deployment/"*.sh
 
-while IFS= read -r script_file; do
+script_files=(
+  sdcli-scripts/migrate.sh
+  sdcli-scripts/config.example.yaml
+  sdcli-scripts/lib/bcp
+  sdcli-scripts/lib/generate_validation_report.py
+  sdcli-scripts/lib/load_wrappers.sh
+  sdcli-scripts/lib/sqlldr
+  sdcli-scripts/lib/sqlplus
+  sdcli-scripts/lib/sqlplus_deploy.sh
+  sdcli-scripts/templates/product-preferences.xml
+)
+for script_file in "${script_files[@]}"; do
+  [[ -f "$ROOT_DIR/$script_file" ]] || {
+    echo "Error: required release file not found: $ROOT_DIR/$script_file" >&2
+    exit 1
+  }
   relative_path="${script_file#sdcli-scripts/}"
   mkdir -p "$bundle_dir/sdcli-scripts/$(dirname "$relative_path")"
   cp "$ROOT_DIR/$script_file" "$bundle_dir/sdcli-scripts/$relative_path"
-done < <(cd "$ROOT_DIR" && git ls-files 'sdcli-scripts/**')
+done
+find "$bundle_dir/sdcli-scripts/lib" "$bundle_dir/sdcli-scripts/templates" -type f -exec chmod 0644 {} +
+chmod 0644 "$bundle_dir/sdcli-scripts/config.example.yaml"
 chmod 0755 "$bundle_dir/sdcli-scripts/migrate.sh" "$bundle_dir/sdcli-scripts/lib/bcp" "$bundle_dir/sdcli-scripts/lib/load_wrappers.sh" "$bundle_dir/sdcli-scripts/lib/sqlldr" "$bundle_dir/sdcli-scripts/lib/sqlplus"
 
 # macOS attaches Finder/provenance extended attributes to copied files. Excluding
