@@ -71,10 +71,13 @@ The default package-only command requires local image
 - `org.opencontainers.image.created=<UTC build time>`
 - `org.opencontainers.image.platform=linux/amd64`
 
-If the image is absent, labels are missing, or version/commit/platform does
-not match, the package command stops before image export and tells the
-maintainer to rebuild. This prevents a routine package command from silently
-using an arbitrary locally tagged image.
+If the image is absent, labels are missing, the actual OS/CPU is not
+Linux/amd64, or version/commit/platform does not match, the package command
+stops before image export and tells the maintainer to rebuild. It also checks
+the tag's image ID again immediately after export and rejects the bundle if
+the tag changed during the operation. This prevents a routine package command
+from silently using an arbitrary locally tagged image while preserving the
+customer-required `sdcli-autokit:<version>` tag inside the archive.
 
 `build-offline.sh` is retained for compatibility and means “build an offline
 delivery bundle,” not “build an image without internet.” It also requires the

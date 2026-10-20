@@ -96,17 +96,24 @@ bundle_dir="$stage_dir/$BUNDLE_NAME"
 mkdir -p "$bundle_dir/deployment" "$bundle_dir/sdcli-scripts"
 
 if ! image_metadata="$("$CONTAINER_ENGINE" image inspect \
-  --format '{{.Id}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.version"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.revision"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.created"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.platform"}}' \
+  --format '{{.Id}}{{"\\t"}}{{.Os}}{{"\\t"}}{{.Architecture}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.version"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.revision"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.created"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.platform"}}' \
   "$IMAGE_NAME")"; then
   echo "Error: release image is unavailable: $IMAGE_NAME" >&2
   echo "Run ./release/build-image.sh $VERSION or ./release/release.sh $VERSION --rebuild." >&2
   exit 1
 fi
 
-IFS=$'\t' read -r image_id image_version image_commit image_created image_platform <<< "$image_metadata"
-if [[ -z "$image_id" || -z "$image_version" || -z "$image_commit" || -z "$image_created" || -z "$image_platform" ]]; then
+IFS=$'\t' read -r image_id image_os image_architecture image_version image_commit image_created image_platform <<< "$image_metadata"
+if [[ -z "$image_id" || -z "$image_os" || -z "$image_architecture" || -z "$image_version" || -z "$image_commit" || -z "$image_created" || -z "$image_platform" ]]; then
   echo "Error: image provenance mismatch for $IMAGE_NAME: one or more required labels are missing" >&2
   echo "Run ./release/build-image.sh $VERSION or ./release/release.sh $VERSION --rebuild." >&2
+  exit 1
+fi
+
+if [[ "$image_os" != "linux" || "$image_architecture" != "amd64" ]]; then
+  echo "Error: image platform mismatch for $IMAGE_NAME" >&2
+  printf 'Expected image platform: linux/amd64\n' >&2
+  printf 'Observed image platform: %s/%s\n' "$image_os" "$image_architecture" >&2
   exit 1
 fi
 
@@ -128,6 +135,19 @@ if [[ "$CONTAINER_ENGINE" == "podman" ]]; then
 else
   "$CONTAINER_ENGINE" image save --output "$bundle_dir/image.tar" "$IMAGE_NAME"
 fi
+
+if ! exported_image_id="$("$CONTAINER_ENGINE" image inspect --format '{{.Id}}' "$IMAGE_NAME")"; then
+  echo "Error: could not verify image tag after export: $IMAGE_NAME" >&2
+  exit 1
+fi
+if [[ "$exported_image_id" != "$image_id" ]]; then
+  echo "Error: image tag changed while exporting $IMAGE_NAME" >&2
+  printf 'Expected image ID: %s\n' "$image_id" >&2
+  printf 'Observed image ID: %s\n' "$exported_image_id" >&2
+  exit 1
+fi
+
+printf 'Verified exported image ID: %s\n' "$image_id"
 printf '%s\n' "$VERSION" > "$bundle_dir/VERSION"
 printf '%s\n' "$SOURCE_COMMIT" > "$bundle_dir/SOURCE_COMMIT"
 printf '%s\n' "$image_id" > "$bundle_dir/IMAGE_ID"
