@@ -30,6 +30,17 @@ case "$1" in
     printf '%s\n' 'amd64'
     exit 0
     ;;
+  image)
+    if [[ "${2:-}" == inspect ]]; then
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "${PODMAN_IMAGE_ID:-sha256:fake-image-id}" \
+        "${PODMAN_IMAGE_VERSION:-1.2.3}" \
+        "${PODMAN_IMAGE_REVISION:-unknown}" \
+        "${PODMAN_IMAGE_CREATED:-2026-10-20T00:00:00Z}" \
+        "${PODMAN_IMAGE_PLATFORM:-linux/amd64}"
+      exit 0
+    fi
+    ;;
   build)
     exit 0
     ;;
@@ -88,6 +99,17 @@ if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
   echo "release preflight unexpectedly accepted a missing changelog entry" >&2
   exit 1
 fi
+
+online_build_output="$(
+  RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
+    PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" \
+    "$REPO_ROOT/release/build-image.sh" 1.2.3
+)"
+grep -F 'Build mode: online' <<< "$online_build_output" >/dev/null
+grep -F 'Image ID: sha256:fake-image-id' <<< "$online_build_output" >/dev/null
+grep -F -- '--build-arg RELEASE_VERSION=1.2.3' "$podman_log" >/dev/null
+grep -F -- '--build-arg RELEASE_SOURCE_COMMIT=' "$podman_log" >/dev/null
+grep -F -- '--build-arg RELEASE_CREATED_AT=' "$podman_log" >/dev/null
 
 build_output="$(
   RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" RELEASE_SKIP_TESTS=true \

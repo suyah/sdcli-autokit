@@ -72,6 +72,37 @@ build_args=(
   -f "$DEPLOYMENT_DIR/Dockerfile"
 )
 
+if [[ -n "${RELEASE_VERSION:-}${RELEASE_SOURCE_COMMIT:-}${RELEASE_CREATED_AT:-}${RELEASE_PLATFORM:-}" ]]; then
+  : "${RELEASE_VERSION:?RELEASE_VERSION must be set when building a release image}"
+  : "${RELEASE_SOURCE_COMMIT:?RELEASE_SOURCE_COMMIT must be set when building a release image}"
+  : "${RELEASE_CREATED_AT:?RELEASE_CREATED_AT must be set when building a release image}"
+  : "${RELEASE_PLATFORM:?RELEASE_PLATFORM must be set when building a release image}"
+
+  [[ "$RELEASE_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+    echo "Error: invalid RELEASE_VERSION: $RELEASE_VERSION" >&2
+    exit 1
+  }
+  [[ "$RELEASE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Error: RELEASE_SOURCE_COMMIT must be a 40-character lowercase Git SHA" >&2
+    exit 1
+  }
+  [[ "$RELEASE_CREATED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+    echo "Error: RELEASE_CREATED_AT must be a UTC RFC-3339 timestamp" >&2
+    exit 1
+  }
+  [[ "$RELEASE_PLATFORM" == "linux/amd64" ]] || {
+    echo "Error: RELEASE_PLATFORM must be linux/amd64" >&2
+    exit 1
+  }
+
+  build_args+=(
+    --build-arg "RELEASE_VERSION=$RELEASE_VERSION"
+    --build-arg "RELEASE_SOURCE_COMMIT=$RELEASE_SOURCE_COMMIT"
+    --build-arg "RELEASE_CREATED_AT=$RELEASE_CREATED_AT"
+    --build-arg "RELEASE_PLATFORM=$RELEASE_PLATFORM"
+  )
+fi
+
 if [[ "$CONTAINER_ENGINE" == "podman" ]]; then
   "$CONTAINER_ENGINE" build --arch amd64 --format docker "${build_args[@]}" "$ROOT_DIR"
 else

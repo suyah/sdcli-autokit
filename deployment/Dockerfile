@@ -11,6 +11,15 @@ ARG APP_HOME
 ARG SD_HOME
 ARG TOOL_DATA
 ARG TOOL_LOG
+ARG RELEASE_VERSION
+ARG RELEASE_SOURCE_COMMIT
+ARG RELEASE_CREATED_AT
+ARG RELEASE_PLATFORM
+
+LABEL org.opencontainers.image.version="${RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${RELEASE_SOURCE_COMMIT}" \
+      org.opencontainers.image.created="${RELEASE_CREATED_AT}" \
+      org.opencontainers.image.platform="${RELEASE_PLATFORM}"
 
 ENV APP_USER="${APP_USER}" \
     APP_GROUP="${APP_GROUP}" \
