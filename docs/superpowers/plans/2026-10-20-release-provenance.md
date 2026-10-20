@@ -223,4 +223,3 @@ one release test fixture, operational documents, spec, and plan.
 
 Push `feature/release-provenance`, open a PR to `main`, and report the PR URL.
 Do not merge until the release owner approves the PR.
-
