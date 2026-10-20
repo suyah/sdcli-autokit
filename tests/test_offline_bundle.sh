@@ -170,6 +170,51 @@ if grep -Fq 'build ' "$podman_log"; then
   echo "default release unexpectedly rebuilt the image" >&2
   exit 1
 fi
+if grep -Fq 'Release test suite skipped by RELEASE_SKIP_TESTS=true' <<< "$build_output"; then
+  echo "default release unexpectedly considered the test-suite skip setting" >&2
+  exit 1
+fi
+
+: > "$podman_log"
+rebuild_dist="$tmpdir/rebuild-dist"
+rebuild_output="$(
+  RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
+    PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" PODMAN_IMAGE_REVISION="$source_commit" DIST_DIR="$rebuild_dist" \
+    "$REPO_ROOT/release/release.sh" 1.2.3 --rebuild
+)"
+grep -F 'Build mode: online' <<< "$rebuild_output" >/dev/null
+rebuild_bundle="$rebuild_dist/sdcli-autokit-1.2.3-linux-amd64.tar.gz"
+[[ -f "$rebuild_bundle" ]]
+build_line="$(grep -n 'build ' "$podman_log" | head -1 | cut -d: -f1)"
+inspect_line="$(grep -n 'image inspect' "$podman_log" | head -1 | cut -d: -f1)"
+((build_line < inspect_line)) || {
+  echo "release rebuild did not build before inspecting the image" >&2
+  exit 1
+}
+
+verify_dist="$tmpdir/verify-dist"
+verify_output="$(
+  RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" RELEASE_SKIP_TESTS=true \
+    PATH="$fakebin:$PATH" PODMAN_LOG="$tmpdir/verify.log" PODMAN_IMAGE_REVISION="$source_commit" DIST_DIR="$verify_dist" \
+    "$REPO_ROOT/release/release.sh" 1.2.3 --verify
+)"
+grep -F 'Release test suite skipped by RELEASE_SKIP_TESTS=true' <<< "$verify_output" >/dev/null
+[[ -f "$verify_dist/sdcli-autokit-1.2.3-linux-amd64.tar.gz" ]]
+
+for invalid_option in '--unknown' '--rebuild --rebuild'; do
+  invalid_log="$tmpdir/invalid-option-$(tr -cd '[:alnum:]' <<< "$invalid_option").log"
+  invalid_dist="$tmpdir/invalid-option-$(tr -cd '[:alnum:]' <<< "$invalid_option")"
+  if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
+      PATH="$fakebin:$PATH" PODMAN_LOG="$invalid_log" PODMAN_IMAGE_REVISION="$source_commit" DIST_DIR="$invalid_dist" \
+      "$REPO_ROOT/release/release.sh" 1.2.3 $invalid_option >"$tmpdir/invalid-option.out" 2>&1; then
+    echo "release unexpectedly accepted invalid options: $invalid_option" >&2
+    exit 1
+  fi
+  [[ ! -e "$invalid_log" && ! -e "$invalid_dist" ]] || {
+    echo "release options had side effects before validation: $invalid_option" >&2
+    exit 1
+  }
+done
 
 missing_provenance_log="$tmpdir/missing-provenance.log"
 if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
