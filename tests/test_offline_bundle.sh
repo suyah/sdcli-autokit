@@ -34,10 +34,10 @@ case "$1" in
     if [[ "${2:-}" == inspect ]]; then
       printf '%s\t%s\t%s\t%s\t%s\n' \
         "${PODMAN_IMAGE_ID:-sha256:fake-image-id}" \
-        "${PODMAN_IMAGE_VERSION:-1.2.3}" \
-        "${PODMAN_IMAGE_REVISION:-unknown}" \
-        "${PODMAN_IMAGE_CREATED:-2026-10-20T00:00:00Z}" \
-        "${PODMAN_IMAGE_PLATFORM:-linux/amd64}"
+        "${PODMAN_IMAGE_VERSION-1.2.3}" \
+        "${PODMAN_IMAGE_REVISION-unknown}" \
+        "${PODMAN_IMAGE_CREATED-2026-10-20T00:00:00Z}" \
+        "${PODMAN_IMAGE_PLATFORM-linux/amd64}"
       exit 0
     fi
     ;;
@@ -111,9 +111,10 @@ grep -F -- '--build-arg RELEASE_VERSION=1.2.3' "$podman_log" >/dev/null
 grep -F -- '--build-arg RELEASE_SOURCE_COMMIT=' "$podman_log" >/dev/null
 grep -F -- '--build-arg RELEASE_CREATED_AT=' "$podman_log" >/dev/null
 
+: > "$podman_log"
 build_output="$(
   RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" RELEASE_SKIP_TESTS=true \
-    PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" DIST_DIR="$dist_dir" \
+    PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" PODMAN_IMAGE_REVISION="$source_commit" DIST_DIR="$dist_dir" \
     "$REPO_ROOT/release/release.sh" 1.2.3
 )"
 
@@ -129,6 +130,7 @@ checksum="$bundle.sha256"
 
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/image.tar' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/VERSION' >/dev/null
+tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/IMAGE_ID' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/run.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/install-vendor.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/migrate.sh' >/dev/null
@@ -140,6 +142,7 @@ if tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/
 fi
 [[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/VERSION)" == "1.2.3" ]]
 [[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/SOURCE_COMMIT)" == "$source_commit" ]]
+[[ "$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/IMAGE_ID)" == 'sha256:fake-image-id' ]]
 example_config="$(tar -xOzf "$bundle" sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/config.example.yaml)"
 if grep -Eq '(10\.[0-9]+\.[0-9]+\.[0-9]+|68\.233\.113\.119|adb\.[A-Za-z0-9.-]+oraclecloud\.com)' <<< "$example_config"; then
   echo "project-specific endpoint found in config.example.yaml" >&2
@@ -161,8 +164,38 @@ else
   actual_hash="$(shasum -a 256 "$bundle" | awk '{print $1}')"
 fi
 [[ "$expected_hash" == "$actual_hash" ]]
-grep -F -- '-t sdcli-autokit:1.2.3 ' "$podman_log" >/dev/null
-grep -F -- '--arch amd64' "$podman_log" >/dev/null
+grep -F 'image inspect' "$podman_log" >/dev/null
+grep -F 'save ' "$podman_log" >/dev/null
+if grep -Fq 'build ' "$podman_log"; then
+  echo "default release unexpectedly rebuilt the image" >&2
+  exit 1
+fi
+
+missing_provenance_log="$tmpdir/missing-provenance.log"
+if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
+    PATH="$fakebin:$PATH" PODMAN_LOG="$missing_provenance_log" PODMAN_IMAGE_REVISION='' DIST_DIR="$tmpdir/missing-provenance" \
+    "$REPO_ROOT/release/build-offline.sh" 1.2.3 >"$tmpdir/missing-provenance.out" 2>&1; then
+  echo "bundle build unexpectedly accepted an image without provenance" >&2
+  exit 1
+fi
+grep -F 'image provenance mismatch' "$tmpdir/missing-provenance.out" >/dev/null
+if grep -Fq 'save ' "$missing_provenance_log"; then
+  echo "bundle build exported an image without provenance" >&2
+  exit 1
+fi
+
+mismatched_provenance_log="$tmpdir/mismatched-provenance.log"
+if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
+    PATH="$fakebin:$PATH" PODMAN_LOG="$mismatched_provenance_log" PODMAN_IMAGE_REVISION='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' DIST_DIR="$tmpdir/mismatched-provenance" \
+    "$REPO_ROOT/release/build-offline.sh" 1.2.3 >"$tmpdir/mismatched-provenance.out" 2>&1; then
+  echo "bundle build unexpectedly accepted a mismatched image revision" >&2
+  exit 1
+fi
+grep -F 'image provenance mismatch' "$tmpdir/mismatched-provenance.out" >/dev/null
+if grep -Fq 'save ' "$mismatched_provenance_log"; then
+  echo "bundle build exported an image with a mismatched revision" >&2
+  exit 1
+fi
 
 if PATH="$fakebin:$PATH" PODMAN_LOG="$podman_log" DIST_DIR="$tmpdir/invalid" \
     "$REPO_ROOT/release/build-offline.sh" 'bad/version' >/dev/null 2>&1; then
