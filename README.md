@@ -166,6 +166,66 @@ symbolic link retained for SQL Developer compatibility. Both locations are on
 the existing `/u01/data` persistent volume, so removing and recreating the
 container does not remove customer configuration or SQL Developer preferences.
 
+### Upgrade an existing offline installation
+
+Use this procedure when replacing a running release such as `1.0.0` with a
+newer offline bundle such as `1.1.0`. Schedule a maintenance window: do not
+upgrade while a migration command is running. The procedure preserves the
+named Podman volumes that contain `/u01/data` and `/u01/log`; therefore it
+keeps the customer configuration, wallet, SQL Developer preferences, and
+existing project/run artifacts.
+
+Download the new bundle and its adjacent checksum file to a new directory; do
+not overwrite the directory that held the old bundle. Then verify, extract,
+and load the new image:
+
+```bash
+sha256sum -c sdcli-autokit-1.1.0-linux-amd64.tar.gz.sha256
+tar -xzf sdcli-autokit-1.1.0-linux-amd64.tar.gz
+cd sdcli-autokit-1.1.0-linux-amd64
+podman load -i image.tar
+```
+
+Run the **new bundle's** `run.sh` once, using the same customer artifact
+directory as the existing installation:
+
+```bash
+./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+```
+
+When an old `sdcli-autokit` container exists, this first invocation deliberately
+exits after printing an image-version mismatch. Before it exits, it moves any
+legacy home-directory configuration and preferences into the persistent
+`/u01/data/sdcli-autokit` location. This message is the expected upgrade
+checkpoint, not an installation failure.
+
+Remove only the old container, then run the same command again from the new
+bundle directory:
+
+```bash
+podman stop sdcli-autokit
+podman rm sdcli-autokit
+
+./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+```
+
+Do **not** remove Podman volumes and do not run a broad pruning command such
+as `podman system prune` as part of this procedure. Verify the result:
+
+```bash
+podman ps --filter name=sdcli-autokit
+podman exec --user sduser sdcli-autokit cat /home/sduser/sdcli-scripts/.autokit-script-version
+podman exec --user sduser sdcli-autokit readlink /home/sduser/sdcli-scripts/config.yaml
+```
+
+The script version should be the new release version, and the configuration
+link should resolve to `/u01/data/sdcli-autokit/config/config.yaml`. Do not
+rerun `--init`, recapture, or recreate SDCLI connections solely because the
+container image changed. Resume an existing run with its original `--run` id,
+or create a new migration as described below. If you manually changed program
+files under `~/sdcli-scripts` in the old container, save those changes first:
+an upgrade replaces bundled program files, while preserving customer data.
+
 ## Configure `config.yaml`
 
 The migration runner reads migration settings through the compatibility path:
@@ -417,15 +477,38 @@ This registers the SQL Server driver and initializes the Oracle migration reposi
 
 ## Typical migration workflow
 
-From `sdcli-scripts/`, after `config.yaml` is reviewed and password variables are exported:
+### Migrate a new database
+
+For a new source/target database pair, first add a new named entry under
+`migrations:` in `config.yaml`, set its source and target connection details,
+and export the password variables used by that entry. For Autonomous Database
+mTLS, also make the wallet available and set `TNS_ADMIN` and
+`JAVA_TOOL_OPTIONS` as described in [Autonomous Database mTLS](#autonomous-database-mtls-wallet).
+
+From `sdcli-scripts/`, use the following normal sequence. Replace `tpcc` with
+the new migration name in `config.yaml`:
 
 ```bash
+# Run only when this migration repository has not been initialized before.
 ./migrate.sh --init
-./migrate.sh tpcc --conn-setup
+
+# Recommended: it refreshes this migration's SDCLI connections, then runs
+# capture through validation under one repository lock.
 ./migrate.sh tpcc --migrate
 ```
 
-Replace `tpcc` with your migration name from `config.yaml`.
+`--migrate` runs `capture -> convert -> generate -> datamove -> offload ->
+deploy -> load -> postdeploy -> validate`. It is the preferred command for a
+new migration because it keeps the model selection and repository lock
+consistent. Use the [single-phase sequence](#run-a-single-phase) only for
+recovery, inspection, or controlled manual execution after a failure.
+
+To create or refresh the source and target SDCLI connections without starting
+the migration, use the optional connection-only command:
+
+```bash
+./migrate.sh tpcc --conn-setup
+```
 
 ## Run a migration
 
