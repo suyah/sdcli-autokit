@@ -220,11 +220,13 @@ podman exec --user sduser sdcli-autokit readlink /home/sduser/sdcli-scripts/conf
 
 The script version should be the new release version, and the configuration
 link should resolve to `/u01/data/sdcli-autokit/config/config.yaml`. Do not
-rerun `--init`, recapture, or recreate SDCLI connections solely because the
-container image changed. Resume an existing run with its original `--run` id,
-or create a new migration as described below. If you manually changed program
-files under `~/sdcli-scripts` in the old container, save those changes first:
-an upgrade replaces bundled program files, while preserving customer data.
+recapture or recreate connections solely because the container image changed.
+If upgrading from a release that used the old unsuffixed repository aliases,
+run the named `--init` command once per existing target to register the new
+aliases, then resume an existing run with its original `--run` id. If you
+manually changed program files under `~/sdcli-scripts` in the old container,
+save those changes first: an upgrade replaces bundled program files, while
+preserving customer data.
 
 ## Configure `config.yaml`
 
@@ -250,7 +252,7 @@ The main sections are:
 | Section | Purpose |
 | --- | --- |
 | `defaults` | Shared settings such as driver path, output project root, source/target type, and load/offload preferences. |
-| `migration_repository` | Oracle migration repository connection used by SQL Developer migration. |
+| `migration_repository` | Shared repository credential template and repository connection-name prefixes. |
 | `migrations` | One or more named source-to-target migration definitions. |
 
 Example:
@@ -278,12 +280,16 @@ defaults:
 migration_repository:
   type: oracle
   name: repo
+  # Used only by the no-name --show-datatype-mapping command. Named migration
+  # commands use the selected migration's target.conn instead.
   conn: tcps://your-repo-host:1522/your_repo_service?ssl_server_dn_match=yes
   repo_user:
+    # Prefix: tpcc uses migration_repo_tpcc.
     connection_name: migration_repo
     user: migrep
     password: "${MIGRATION_REPO_PASSWORD}"
   super_user:
+    # Prefix: tpcc uses super_migration_tpcc.
     connection_name: super_migration
     user: admin
     password: "${MIGRATION_SUPER_PASSWORD}"
@@ -296,14 +302,17 @@ migrations:
       password: "${SOURCE_PASSWORD}"
     target:
       conn: tcps://your-target-host:1522/your_target_service?ssl_server_dn_match=yes
+      # Optional target-specific mTLS wallet; otherwise defaults.target.wallet_dir.
+      # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_tpcc
       user: admin
       password: "${TARGET_PASSWORD}"
       default_schema_password: "${MIGRATED_SCHEMA_PASSWORD}"
 ```
 
 For an Autonomous Database wallet, set `defaults.target.wallet_dir` to the
-unpacked wallet directory and use the full `tcps://host:port/service?...` URL
-in both Oracle `conn` fields. SQLcl can resolve a wallet TNS alias such as
+unpacked wallet directory, or set `migrations[].target.wallet_dir` when a
+target needs a different wallet. Use the full `tcps://host:port/service?...`
+URL in each named migration's `target.conn`. SQLcl can resolve a wallet TNS alias such as
 `myadb_high`, but SQL Developer 26.2's `sdcli migration -actions=mkconn`
 does not resolve that alias inside `-connDetails`; using it produces
 `ORA-17870` even when the wallet is valid.
@@ -339,7 +348,18 @@ is run with:
 ./migrate.sh tpcc --migrate
 ```
 
-The migration name is used to select the matching config entry, create connection names such as `src_tpcc` and `tgt_tpcc`, create the run directory, and create a run-specific capture model such as `tpcc_20260427_014117`.
+The migration name is used to select the matching config entry, create source
+and target connection names such as `src_tpcc` and `tgt_tpcc`, derive
+repository names `migration_repo_tpcc` and `super_migration_tpcc`, create the
+run directory, and create a run-specific capture model such as
+`tpcc_20260427_014117`. Its `target.conn` is also the endpoint used for that
+migration's SQL Developer repository.
+
+The values under `migration_repository.repo_user` and `.super_user` are shared
+credentials and name prefixes. `migration_repository.conn` is retained only
+for the repository-wide `./migrate.sh --show-datatype-mapping` command with no
+migration name; changing it does not change a named migration's target or
+repository endpoint.
 
 For a large migration program, define one migration entry per source/target database pair. For example, 50 source databases usually means 50 migration entries with 50 unique migration names.
 
@@ -372,7 +392,13 @@ podman cp /tmp/Wallet_myadb sdcli-autokit:/u01/data/sdcli-autokit/wallets/Wallet
 podman exec --user root sdcli-autokit chown -R sduser:sduser /u01/data/sdcli-autokit/wallets/Wallet_myadb
 ```
 
-Set `defaults.target.wallet_dir` to that directory. Keep `migration_repository.conn` and each `migrations[].target.conn` in the existing `tcps://host:port/service?ssl_server_dn_match=yes` form, using the host, port, and service name from the wallet's `tnsnames.ora` file. The migration launcher sets both `TNS_ADMIN` for SQL*Plus/SQL*Loader and `oracle.net.tns_admin` for SDCLI's JDBC connections.
+Set `defaults.target.wallet_dir` to that directory, or set the optional
+`migrations[].target.wallet_dir` when a particular target needs its own
+wallet. Keep every `migrations[].target.conn` in
+`tcps://host:port/service?ssl_server_dn_match=yes` form, using the host, port,
+and service name from the wallet's `tnsnames.ora` file. The migration launcher
+sets both `TNS_ADMIN` for SQL*Plus/SQL*Loader and `oracle.net.tns_admin` for
+SDCLI's JDBC connections.
 
 Do not use a bare TNS alias in these fields: SQL Developer's SDCLI `-connDetails` parser rejects it. The wallet supplies the mTLS credentials; the TCPS URL supplies the database endpoint.
 
@@ -467,13 +493,22 @@ Export the password variables described in [Password variables](#password-variab
 
 ### 4. Initialize the migration repository
 
-Run once per migration repository from `sdcli-scripts/`:
+Run once for each named migration target from `sdcli-scripts/`:
 
 ```bash
-./migrate.sh --init
+./migrate.sh tpcc --init
 ```
 
-This registers the SQL Server driver and initializes the Oracle migration repository used by SDCLI.
+This registers the SQL Server driver and initializes (or registers an existing)
+repository using `tpcc`'s `target.conn`. It creates the saved SQL Developer
+aliases `super_migration_tpcc` and `migration_repo_tpcc`. With exactly one
+migration in `config.yaml`, `./migrate.sh --init` remains supported and logs
+the inferred name. With two or more migrations, a name is required.
+
+The runner never edits, renames, or removes existing entries in SQL Developer
+`connections.json`. When upgrading an older configuration that used unsuffixed
+aliases, run the named init once for each existing target to register the new
+aliases; this does not delete repository schemas, models, or run artifacts.
 
 ## Typical migration workflow
 
@@ -482,15 +517,17 @@ This registers the SQL Server driver and initializes the Oracle migration reposi
 For a new source/target database pair, first add a new named entry under
 `migrations:` in `config.yaml`, set its source and target connection details,
 and export the password variables used by that entry. For Autonomous Database
-mTLS, also make the wallet available and set `TNS_ADMIN` and
-`JAVA_TOOL_OPTIONS` as described in [Autonomous Database mTLS](#autonomous-database-mtls-wallet).
+mTLS, also make the wallet available and configure either the default or that
+entry's `target.wallet_dir` as described in [Autonomous Database mTLS](#autonomous-database-mtls-wallet).
+The runner sets `TNS_ADMIN` and `JAVA_TOOL_OPTIONS` for the selected wallet.
 
 From `sdcli-scripts/`, use the following normal sequence. Replace `tpcc` with
 the new migration name in `config.yaml`:
 
 ```bash
-# Run only when this migration repository has not been initialized before.
-./migrate.sh --init
+# Run only when this migration target's repository has not been initialized
+# or registered under its derived aliases before.
+./migrate.sh tpcc --init
 
 # Recommended: it refreshes this migration's SDCLI connections, then runs
 # capture through validation under one repository lock.
@@ -509,6 +546,10 @@ the migration, use the optional connection-only command:
 ```bash
 ./migrate.sh tpcc --conn-setup
 ```
+
+`--conn-setup` saves or refreshes only `src_tpcc` and `tgt_tpcc`. It performs a
+TCP reachability preflight for the SQL Server host, but does not authenticate
+either database or initialize a repository.
 
 ## Run a migration
 
@@ -570,12 +611,12 @@ not accept the captured model name (for example, `tpcc_20260427_014117`) as
 export RUN=20260427_014117
 
 # Find the integer index for tpcc_<run id>, then use that index.
-sdcli migration -actions=lscaptured
+sdcli migration -actions=lscaptured -repository=migration_repo_tpcc
 export CAPTURE_MODEL=<captured_model_index>
 ./migrate.sh tpcc --phase convert --run "$RUN" --model "$CAPTURE_MODEL"
 
 # Find the integer index for the converted model created above.
-sdcli migration -actions=lsconverted
+sdcli migration -actions=lsconverted -repository=migration_repo_tpcc
 export CONVERTED_MODEL=<converted_model_index>
 ./migrate.sh tpcc --phase generate --run "$RUN" --model "$CONVERTED_MODEL"
 ./migrate.sh tpcc --phase datamove --run "$RUN" --model "$CONVERTED_MODEL"
@@ -713,8 +754,9 @@ repository with:
 ```
 
 Without a migration name, the command lists every persisted project mapping in
-the repository. With a migration name, it filters on the exact
-`MD_PROJECTS.PROJECT_NAME`. The installed repository schema stores mapping rows
+the repository at `migration_repository.conn`. With a migration name, it uses
+that migration's `target.conn` and derived repository connection, then filters
+on the exact `MD_PROJECTS.PROJECT_NAME`. The installed repository schema stores mapping rows
 per project; it does not expose a separate global-default mapping table. An
 unknown project or a project with no persisted rules returns the TSV header and
 no data rows.
@@ -876,7 +918,7 @@ Run deployment commands from `deployment/`:
 Run migration commands from `sdcli-scripts/`:
 
 ```bash
-./migrate.sh --init
+./migrate.sh <migration_name> --init
 ./migrate.sh --show-datatype-mapping
 ./migrate.sh <migration_name> --show-datatype-mapping
 ./migrate.sh <migration_name> --conn-setup

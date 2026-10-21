@@ -81,6 +81,8 @@ sdcli-scripts/**/*.pyc
 !tests/datatype_mapping_command_test.sh
 !tests/sdcli_action_postcondition_test.sh
 !tests/migrate_preferences_test.sh
+!tests/per_migration_repository_context_test.sh
+!tests/per_migration_repository_init_test.sh
 !tests/fixtures/
 !tests/fixtures/validation/
 !tests/fixtures/validation/**

@@ -42,10 +42,13 @@ RUN_LOG_FILE="$AUTOKIT_DIR/migrate.log"
 SDCLI_COMMAND_LOG="$AUTOKIT_DIR/sdcli_commands.log"
 touch "$RUN_LOG_FILE" "$SDCLI_COMMAND_LOG"
 DRY_RUN=false
+ACTIVE_REPOSITORY_NAME='migration_repo_demo'
+ACTIVE_REPOSITORY_CONN='tcps://demo.example:1522/demo_high'
 
 cat > "$tmpdir/bin/sdcli" <<'SCRIPT'
 #!/usr/bin/env bash
 action=""
+printf '%s\n' "$@" > "$SDCLI_ARGS_FILE"
 for arg in "$@"; do
   [[ "$arg" == -actions=* ]] && action="${arg#-actions=}"
 done
@@ -56,6 +59,7 @@ printf '%s completed successfully\n' "$action"
 SCRIPT
 chmod +x "$tmpdir/bin/sdcli"
 PATH="$tmpdir/bin:$PATH"
+export SDCLI_ARGS_FILE="$tmpdir/sdcli.args"
 
 cat > "$output_dir/role.sql" <<'SQL'
 CREATE ROLE ROLE_APP;
@@ -183,8 +187,12 @@ mv "$AUTOKIT_DIR/validation_checks.tsv.missing" "$AUTOKIT_DIR/validation_checks.
 
 set_sdcli_postcondition_state capture
 verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+grep -Fx -- '-repository=migration_repo_demo' "$SDCLI_ARGS_FILE" >/dev/null \
+  || fail_test "capture model lookup did not use the active repository"
 set_sdcli_postcondition_state convert
 verify_phase_postcondition convert latest "$project_name" "$output_dir"
+grep -Fx -- '-repository=migration_repo_demo' "$SDCLI_ARGS_FILE" >/dev/null \
+  || fail_test "converted model lookup did not use the active repository"
 for phase in generate datamove offload deploy load postdeploy validate cleanup; do
   verify_phase_postcondition "$phase" latest "$project_name" "$output_dir"
 done

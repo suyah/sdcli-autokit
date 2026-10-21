@@ -22,13 +22,14 @@ RUN_ID="20260427_001939"
 MODE="phase"
 PHASE_NAME="capture"
 MIGRATION_NAME="tpcc"
+ACTIVE_REPOSITORY_NAME="migration_repo_tpcc"
+ACTIVE_REPOSITORY_CONN='tcps://adb.example/tpcc'
 
 get_required_value() {
   case "$1" in
     ".defaults.paths.project_root") echo "$tmpdir/projects" ;;
     ".migrations[0].name") echo "tpcc" ;;
     ".migrations[0].source.conn") echo "10.0.1.165:1433:tpcc" ;;
-    ".migration_repository.repo_user.connection_name") echo "migration_repo" ;;
     *) echo "unexpected config path: $1" >&2; return 1 ;;
   esac
 }
@@ -68,3 +69,16 @@ assert_eq "$PROJECT_DIR" "$tmpdir/projects/tpcc"
 assert_eq "$RUN_DIR" "$tmpdir/projects/tpcc/run_20260427_014117"
 assert_eq "$AUTOKIT_DIR" "$tmpdir/projects/tpcc/run_20260427_014117/autokit"
 assert_eq "$SDCLI_OUTPUT_DIR" "$tmpdir/projects/tpcc/run_20260427_014117/sdcli"
+
+MODE="init"
+MIGRATION_NAME="tpcc"
+RUN_NAME_INPUT=""
+RUN_NAME=""
+PROJECT_DIR=""
+RUN_DIR=""
+AUTOKIT_DIR=""
+SDCLI_OUTPUT_DIR=""
+bootstrap_logging
+
+assert_eq "$PROJECT_DIR" "$tmpdir/projects/_init/tpcc"
+assert_eq "$RUN_DIR" "$tmpdir/projects/_init/tpcc/run_20260427_001939"

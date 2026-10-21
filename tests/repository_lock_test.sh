@@ -10,14 +10,12 @@ trap 'rm -rf "$tmpdir"' EXIT
 PROJECT_ROOT="$tmpdir/projects"
 RUN_ID="20261012_100000"
 MIGRATION_NAME="demo"
+ACTIVE_MIGRATION_NAME="demo"
+ACTIVE_REPOSITORY_NAME="migration_repo_demo"
+ACTIVE_REPOSITORY_CONN='tcps://adb.example/service'
 RUN_LOG_FILE="$tmpdir/run.log"
 mkdir -p "$PROJECT_ROOT"
 touch "$RUN_LOG_FILE"
-
-get_repository_connection_name() { echo migration_repo; }
-get_required_value() {
-  [[ "$1" == ".migration_repository.conn" ]] && echo 'tcps://adb.example/service'
-}
 
 acquire_repository_lock
 [[ -d "$REPOSITORY_LOCK_DIR" ]]
@@ -40,7 +38,13 @@ set -e
 
 release_repository_lock
 [[ ! -e "$lock_dir" ]]
+
+ACTIVE_REPOSITORY_CONN='tcps://other-adb.example/service'
 acquire_repository_lock
+[[ "$REPOSITORY_LOCK_DIR" != "$lock_dir" ]] || {
+  echo "Different migration repository endpoint reused the same lock" >&2
+  exit 1
+}
 release_repository_lock
 
 echo "repository lock test passed"

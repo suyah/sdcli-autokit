@@ -26,14 +26,20 @@ defaults:
 migration_repository:
   type: oracle
   name: repo
+  # Used only by ./migrate.sh --show-datatype-mapping with no migration name.
+  # Named init and migration commands use the selected migration's target.conn.
   conn: tcps://oracle-repository.example.internal:1522/example_repo_service?ssl_server_dn_match=yes
 
   repo_user:
+    # Prefix: a migration named example_migration uses
+    # migration_repo_example_migration.
     connection_name: migration_repo
     user: migrep
     password: "${MIGRATION_REPO_PASSWORD}"
 
   super_user:
+    # Prefix: a migration named example_migration uses
+    # super_migration_example_migration.
     connection_name: super_migration
     user: admin
     password: "${MIGRATION_SUPER_PASSWORD}"
@@ -46,6 +52,9 @@ migrations:
       password: "${SOURCE_PASSWORD}"
     target:
       conn: tcps://oracle-target.example.internal:1522/example_target_service?ssl_server_dn_match=yes
+      # Optional mTLS wallet override for this target. If omitted, the default
+      # defaults.target.wallet_dir is used.
+      # wallet_dir: /u01/data/sdcli-autokit/wallets/Wallet_example_migration
       user: admin
       password: "${TARGET_PASSWORD}"
       default_schema_password: "${MIGRATED_SCHEMA_PASSWORD}"
