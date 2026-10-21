@@ -96,7 +96,7 @@ bundle_dir="$stage_dir/$BUNDLE_NAME"
 mkdir -p "$bundle_dir/deployment" "$bundle_dir/sdcli-scripts"
 
 if ! image_metadata="$("$CONTAINER_ENGINE" image inspect \
-  --format '{{.Id}}{{printf "\\t"}}{{.Os}}{{printf "\\t"}}{{.Architecture}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.version"}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.revision"}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.created"}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.platform"}}' \
+  --format '{{printf "%s\t%s\t%s\t%s\t%s\t%s\t%s" .Id .Os .Architecture (index .Config.Labels "org.opencontainers.image.version") (index .Config.Labels "org.opencontainers.image.revision") (index .Config.Labels "org.opencontainers.image.created") (index .Config.Labels "org.opencontainers.image.platform")}}' \
   "$IMAGE_NAME")"; then
   echo "Error: release image is unavailable: $IMAGE_NAME" >&2
   echo "Run ./release/build-image.sh $VERSION or ./release/release.sh $VERSION --rebuild." >&2

@@ -76,7 +76,7 @@ case "$1" in
 
       if [[ "$inspect_format" == '{{.Id}}' ]]; then
         printf '%s\n' "$image_id"
-      elif [[ "$inspect_format" == *'{{.Os}}'* ]]; then
+      elif [[ "$inspect_format" == *'.Os'* ]]; then
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
           "$image_id" \
           "${PODMAN_IMAGE_OS-linux}" \
