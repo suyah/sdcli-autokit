@@ -36,6 +36,7 @@ ACTIVE_REPOSITORY_CONN=""
 ACTIVE_REPOSITORY_NAME=""
 ACTIVE_SUPER_CONNECTION_NAME=""
 ACTIVE_WALLET_DIR=""
+ACTIVE_WALLET_CONFIG_PATH=""
 PHASE_STATUS_FILE=""
 ACTIVE_PHASE=""
 ACTIVE_PHASE_ATTEMPT=""
@@ -277,23 +278,31 @@ get_optional_value() {
   fi
 }
 
-configure_oracle_wallet() {
-  local wallet_dir
-  wallet_dir="$(get_optional_value '.defaults.target.wallet_dir')"
+configure_oracle_wallet_dir() {
+  local wallet_dir="$1"
+  local wallet_config_path="$2"
   [[ -n "$wallet_dir" ]] || return 0
 
-  [[ "$wallet_dir" == /* ]] || fail "defaults.target.wallet_dir must be an absolute path"
-  [[ "$wallet_dir" != *[[:space:]]* ]] || fail "defaults.target.wallet_dir must not contain whitespace"
-  [[ -d "$wallet_dir" ]] || fail "Oracle wallet directory does not exist: $wallet_dir"
-  [[ -f "$wallet_dir/tnsnames.ora" ]] || fail "Oracle wallet is missing tnsnames.ora: $wallet_dir"
-  [[ -f "$wallet_dir/sqlnet.ora" ]] || fail "Oracle wallet is missing sqlnet.ora: $wallet_dir"
+  [[ "$wallet_dir" == /* ]] || fail "$wallet_config_path must be an absolute path"
+  [[ "$wallet_dir" != *[[:space:]]* ]] || fail "$wallet_config_path must not contain whitespace"
+  [[ -d "$wallet_dir" ]] || fail "$wallet_config_path: Oracle wallet directory does not exist: $wallet_dir"
+  [[ -f "$wallet_dir/tnsnames.ora" ]] || fail "$wallet_config_path: Oracle wallet is missing tnsnames.ora: $wallet_dir"
+  [[ -f "$wallet_dir/sqlnet.ora" ]] || fail "$wallet_config_path: Oracle wallet is missing sqlnet.ora: $wallet_dir"
   [[ -f "$wallet_dir/cwallet.sso" || -f "$wallet_dir/ewallet.sso" || -f "$wallet_dir/ewallet.p12" ]] \
-    || fail "Oracle wallet is missing a wallet file (cwallet.sso, ewallet.sso, or ewallet.p12): $wallet_dir"
+    || fail "$wallet_config_path: Oracle wallet is missing a wallet file (cwallet.sso, ewallet.sso, or ewallet.p12): $wallet_dir"
 
   ORACLE_WALLET_DIR="$wallet_dir"
   export TNS_ADMIN="$ORACLE_WALLET_DIR"
   export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+${JAVA_TOOL_OPTIONS} }-Doracle.net.tns_admin=$ORACLE_WALLET_DIR"
   log_info "Oracle mTLS wallet directory: $ORACLE_WALLET_DIR"
+}
+
+configure_oracle_wallet() {
+  configure_oracle_wallet_dir "$(get_optional_value '.defaults.target.wallet_dir')" '.defaults.target.wallet_dir'
+}
+
+configure_active_oracle_wallet() {
+  configure_oracle_wallet_dir "$ACTIVE_WALLET_DIR" "$ACTIVE_WALLET_CONFIG_PATH"
 }
 
 configure_sqldeveloper_file_output_option() {
@@ -566,10 +575,14 @@ validate_migration_secret_placeholder() {
   validate_secret_placeholder "$path" "${path#.}"
 }
 
-require_active_repository_context() {
-  [[ -n "$ACTIVE_MIGRATION_NAME" ]] || fail "No active migration repository context was resolved"
+require_active_repository_identity() {
   [[ -n "$ACTIVE_REPOSITORY_CONN" ]] || fail "Active migration '$ACTIVE_MIGRATION_NAME' has no repository endpoint"
   [[ -n "$ACTIVE_REPOSITORY_NAME" ]] || fail "Active migration '$ACTIVE_MIGRATION_NAME' has no repository connection name"
+}
+
+require_active_repository_context() {
+  [[ -n "$ACTIVE_MIGRATION_NAME" ]] || fail "No active migration repository context was resolved"
+  require_active_repository_identity
   [[ -n "$ACTIVE_SUPER_CONNECTION_NAME" ]] || fail "Active migration '$ACTIVE_MIGRATION_NAME' has no super-user connection name"
 }
 
@@ -598,7 +611,13 @@ resolve_migration_context() {
   ACTIVE_REPOSITORY_CONN="$repository_conn"
   ACTIVE_REPOSITORY_NAME="$(derive_migration_connection_name "$repository_prefix" "$migration_name")"
   ACTIVE_SUPER_CONNECTION_NAME="$(derive_migration_connection_name "$super_prefix" "$migration_name")"
-  ACTIVE_WALLET_DIR="${migration_wallet:-$default_wallet}"
+  if [[ -n "$migration_wallet" ]]; then
+    ACTIVE_WALLET_DIR="$migration_wallet"
+    ACTIVE_WALLET_CONFIG_PATH=".migrations[$index].target.wallet_dir"
+  else
+    ACTIVE_WALLET_DIR="$default_wallet"
+    ACTIVE_WALLET_CONFIG_PATH='.defaults.target.wallet_dir'
+  fi
 }
 
 resolve_global_repository_context() {
@@ -608,6 +627,7 @@ resolve_global_repository_context() {
   ACTIVE_REPOSITORY_NAME="$(get_required_value '.migration_repository.repo_user.connection_name' 'migration_repository.repo_user.connection_name')"
   ACTIVE_SUPER_CONNECTION_NAME="$(get_required_value '.migration_repository.super_user.connection_name' 'migration_repository.super_user.connection_name')"
   ACTIVE_WALLET_DIR="$(get_optional_value '.defaults.target.wallet_dir')"
+  ACTIVE_WALLET_CONFIG_PATH='.defaults.target.wallet_dir'
 }
 
 get_repository_connection_name() {
@@ -935,8 +955,9 @@ repository_lock_key() {
 
 acquire_repository_lock() {
   local repo_name repo_conn lock_key lock_root owner_file owner=""
-  repo_name="$(get_repository_connection_name)"
-  repo_conn="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
+  require_active_repository_identity
+  repo_name="$ACTIVE_REPOSITORY_NAME"
+  repo_conn="$ACTIVE_REPOSITORY_CONN"
   lock_key="$(repository_lock_key "${repo_name}|${repo_conn}")"
   lock_root="$PROJECT_ROOT/.locks"
   REPOSITORY_LOCK_DIR="$lock_root/repository_${lock_key}.lock"
@@ -3446,7 +3467,7 @@ bootstrap_logging() {
   mkdir -p "$PROJECT_ROOT"
 
   if [[ "$MODE" == "init" ]]; then
-    PROJECT_DIR="$PROJECT_ROOT/_init"
+    PROJECT_DIR="$PROJECT_ROOT/_init/$MIGRATION_NAME"
     RUN_NAME="run_$RUN_ID"
   else
     PROJECT_DIR="$PROJECT_ROOT/$MIGRATION_NAME"
@@ -3500,18 +3521,25 @@ main() {
     MIGRATION_NAME="$(migration_required_value "$migration_idx" name)"
     validate_config "true" "$migration_idx"
     resolve_migration_context "$migration_idx"
+  elif [[ "$MODE" == "show-datatype-mapping" ]]; then
+    validate_datatype_mapping_config
+    if [[ -n "$MIGRATION_NAME" ]]; then
+      migration_idx="$(get_migration_index "$MIGRATION_NAME")"
+      resolve_migration_context "$migration_idx"
+    else
+      resolve_global_repository_context
+    fi
+  else
+    migration_idx="$(get_migration_index "$MIGRATION_NAME")"
+    validate_config "true" "$migration_idx"
+    resolve_migration_context "$migration_idx"
   fi
 
   if [[ "$MODE" == "show-datatype-mapping" ]]; then
-    validate_datatype_mapping_config
-    configure_oracle_wallet >&2
+    configure_active_oracle_wallet >&2
     require_command sqlplus
     show_datatype_mapping "$MIGRATION_NAME"
     return 0
-  fi
-
-  if [[ "$MODE" != "init" ]]; then
-    validate_config "true"
   fi
 
   bootstrap_logging
@@ -3531,7 +3559,7 @@ main() {
     log_info "Inferred the only configured migration for repository initialization: $MIGRATION_NAME"
   fi
 
-  configure_oracle_wallet
+  configure_active_oracle_wallet
   configure_sqldeveloper_file_output_option
   log_info "Config validation passed"
   log_info "Load tuning source: config.yaml defaults.load_preferences with per-migration overrides in migrations[].load_preferences"
@@ -3566,7 +3594,6 @@ main() {
     return 0
   fi
 
-  migration_idx="$(get_migration_index "$MIGRATION_NAME")"
   run_single_migration "$migration_idx"
 
   log_info "Requested operation completed."

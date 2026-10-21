@@ -61,6 +61,11 @@ assert_context() {
   assert_eq "$ACTIVE_REPOSITORY_NAME" "$repository" "repository connection name"
   assert_eq "$ACTIVE_SUPER_CONNECTION_NAME" "$super_name" "super connection name"
   assert_eq "$ACTIVE_WALLET_DIR" "$wallet" "wallet directory"
+  if [[ "$index" == '0' ]]; then
+    assert_eq "$ACTIVE_WALLET_CONFIG_PATH" '.defaults.target.wallet_dir' "default wallet config path"
+  else
+    assert_eq "$ACTIVE_WALLET_CONFIG_PATH" ".migrations[$index].target.wallet_dir" "migration wallet config path"
+  fi
 }
 
 (
@@ -85,6 +90,7 @@ assert_eq "$ACTIVE_REPOSITORY_CONN" 'tcps://cecrealm.example:1522/cecrealm_high'
 assert_eq "$ACTIVE_REPOSITORY_NAME" migration_repo_cecrealm "replaced repository name"
 assert_eq "$ACTIVE_SUPER_CONNECTION_NAME" super_migration_cecrealm "replaced super name"
 assert_eq "$ACTIVE_WALLET_DIR" /wallets/Wallet_cecrealm "replaced wallet"
+assert_eq "$ACTIVE_WALLET_CONFIG_PATH" '.migrations[1].target.wallet_dir' "replaced wallet config path"
 
 resolve_global_repository_context
 assert_eq "$ACTIVE_MIGRATION_INDEX" '' "global context migration index"
@@ -93,5 +99,15 @@ assert_eq "$ACTIVE_REPOSITORY_CONN" 'tcps://legacy.example:1522/legacy' "global 
 assert_eq "$ACTIVE_REPOSITORY_NAME" migration_repo "global repository name"
 assert_eq "$ACTIVE_SUPER_CONNECTION_NAME" super_migration "global super name"
 assert_eq "$ACTIVE_WALLET_DIR" /wallets/Wallet_default "global wallet"
+assert_eq "$ACTIVE_WALLET_CONFIG_PATH" '.defaults.target.wallet_dir' "global wallet config path"
+
+invalid_wallet_output="$(
+  ACTIVE_WALLET_DIR='/wallets/does-not-exist'
+  ACTIVE_WALLET_CONFIG_PATH='.migrations[1].target.wallet_dir'
+  configure_active_oracle_wallet 2>&1
+)" || invalid_wallet_rc=$?
+[[ "${invalid_wallet_rc:-0}" -ne 0 ]] || fail_test "invalid active wallet unexpectedly succeeded"
+[[ "$invalid_wallet_output" == *'.migrations[1].target.wallet_dir'* ]] \
+  || fail_test "invalid active wallet did not identify its selected config path"
 
 echo "per-migration repository context test passed"

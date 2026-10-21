@@ -68,3 +68,16 @@ assert_eq "$PROJECT_DIR" "$tmpdir/projects/tpcc"
 assert_eq "$RUN_DIR" "$tmpdir/projects/tpcc/run_20260427_014117"
 assert_eq "$AUTOKIT_DIR" "$tmpdir/projects/tpcc/run_20260427_014117/autokit"
 assert_eq "$SDCLI_OUTPUT_DIR" "$tmpdir/projects/tpcc/run_20260427_014117/sdcli"
+
+MODE="init"
+MIGRATION_NAME="tpcc"
+RUN_NAME_INPUT=""
+RUN_NAME=""
+PROJECT_DIR=""
+RUN_DIR=""
+AUTOKIT_DIR=""
+SDCLI_OUTPUT_DIR=""
+bootstrap_logging
+
+assert_eq "$PROJECT_DIR" "$tmpdir/projects/_init/tpcc"
+assert_eq "$RUN_DIR" "$tmpdir/projects/_init/tpcc/run_20260427_001939"
