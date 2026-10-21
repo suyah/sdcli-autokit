@@ -3,6 +3,23 @@
 This file is for maintainers. It records release differences but is not copied
 into the customer offline bundle.
 
+## Unreleased
+
+### Fixed
+
+- Isolated SQL Developer repository aliases, repository endpoint selection,
+  wallets, locks, and initialization evidence by named migration. A named
+  migration now uses its own target endpoint and derived repository aliases
+  instead of a shared global alias.
+
+### Changed
+
+- Repository initialization is `./migrate.sh <migration> --init` when multiple
+  migrations are configured. The single-migration no-name form remains
+  compatible.
+- `migration_repository.conn` is now the default only for no-name datatype
+  mapping inspection; named migration workflows use `migrations[].target.conn`.
+
 ## 1.1.0 - 2026-10-19
 
 ### Added

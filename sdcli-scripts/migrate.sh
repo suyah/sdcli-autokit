@@ -56,12 +56,12 @@ declare -a SQLPLUS_RUNTIME_TEMP_DIRS=()
 usage() {
   cat <<'USAGE'
 Usage:
-  ./migrate.sh --init [options]
+  ./migrate.sh [<migration_name>] --init [options]
   ./migrate.sh [<migration_name>] --show-datatype-mapping
   ./migrate.sh <migration_name> [options]
 
 Modes:
-  --init                 One-off repository setup: driver + repository init
+  --init                 Repository setup for one migration target: driver + repository init
   --conn-setup           Create source and target SDCLI connections only
   --phase <name>         Run one phase only: capture|convert|generate|deploy|datamove|offload|load|postdeploy|validate|cleanup
   --deploy               Shorthand for --phase deploy (setup only; never runs cleanup)
@@ -81,7 +81,7 @@ Options:
   -h, --help             Show help
 
 Examples:
-  ./migrate.sh --init
+  ./migrate.sh tpcc --init
   ./migrate.sh --show-datatype-mapping
   ./migrate.sh tpcc --show-datatype-mapping
   ./migrate.sh tpcc
