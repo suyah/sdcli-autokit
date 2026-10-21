@@ -4,6 +4,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATE_SH_SOURCE_ONLY=true source "$REPO_ROOT/sdcli-scripts/migrate.sh"
 
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
 fail_test() {
   echo "$1" >&2
   exit 1
@@ -109,5 +112,137 @@ assert_contains "${calls[1]}" 'migration_repo_proda:mkrepouser:migrep/repo_passw
 assert_not_contains "${calls[1]}" 'legacy.example' "legacy endpoint isolation"
 assert_not_contains "${calls[1]}" 'migration_repo:mkrepouser' "unsuffixed repository isolation"
 assert_not_contains "${calls[1]}" 'super_migration:oracle' "unsuffixed super isolation"
+
+# Exercise main rather than only its helpers. These fakes keep the test
+# hermetic while proving argument parsing and init selection happen before any
+# driver, wallet, lock, or SDCLI side effect.
+main_tmpdir="$tmpdir/main"
+mkdir -p "$main_tmpdir"
+: > "$main_tmpdir/config.yaml"
+export INIT_MAIN_CALLS="$main_tmpdir/sdcli.calls"
+CONFIG_FILE="$main_tmpdir/config.yaml"
+
+require_command() { :; }
+yq_eval() {
+  [[ "$1" == '.migrations | length' ]] || fail_test "unexpected main yq lookup: $1"
+  printf '%s\n' "${INIT_TEST_MIGRATION_COUNT:-2}"
+}
+migration_required_value() {
+  local idx="$1"
+  shift
+  case "$idx:$*" in
+    '0:name') printf 'proda\n' ;;
+    '1:name') printf 'cecrealm\n' ;;
+    *) fail_test "unexpected main migration lookup: $idx:$*" ;;
+  esac
+}
+get_required_value() {
+  case "$1" in
+    '.defaults.paths.project_root') printf '%s\n' "$main_tmpdir/projects" ;;
+    '.defaults.driver_file') printf '/vendor/jtds.jar\n' ;;
+    '.migration_repository.name') printf 'repo\n' ;;
+    '.migration_repository.repo_user.user') printf 'migrep\n' ;;
+    '.migration_repository.super_user.user') printf 'admin\n' ;;
+    *) fail_test "unexpected main required config lookup: $1" ;;
+  esac
+}
+get_secret_value() {
+  case "$1" in
+    '.migration_repository.repo_user.password') printf 'repo_password\n' ;;
+    '.migration_repository.super_user.password') printf 'super_password\n' ;;
+    *) fail_test "unexpected main secret config lookup: $1" ;;
+  esac
+}
+validate_config() { :; }
+resolve_migration_context() {
+  case "$1" in
+    0)
+      ACTIVE_MIGRATION_NAME='proda'
+      ACTIVE_REPOSITORY_CONN='tcps://proda.example:1522/proda_high'
+      ACTIVE_REPOSITORY_NAME='migration_repo_proda'
+      ACTIVE_SUPER_CONNECTION_NAME='super_migration_proda'
+      ;;
+    1)
+      ACTIVE_MIGRATION_NAME='cecrealm'
+      ACTIVE_REPOSITORY_CONN='tcps://cecrealm.example:1522/cecrealm_high'
+      ACTIVE_REPOSITORY_NAME='migration_repo_cecrealm'
+      ACTIVE_SUPER_CONNECTION_NAME='super_migration_cecrealm'
+      ;;
+    *) fail_test "unexpected main repository context index: $1" ;;
+  esac
+  ACTIVE_WALLET_DIR=''
+  ACTIVE_WALLET_CONFIG_PATH='.defaults.target.wallet_dir'
+}
+configure_active_oracle_wallet() { :; }
+configure_sqldeveloper_file_output_option() { :; }
+acquire_repository_lock() { :; }
+validate_sdcli_conn_details_password() { :; }
+run_sdcli() {
+  printf '%s\n' "$*" >> "$INIT_MAIN_CALLS"
+}
+
+reset_main_state() {
+  MIGRATION_NAME=''
+  MODE='full'
+  MODE_EXPLICIT=false
+  PHASE_NAME=''
+  MODEL_NAME_INPUT=''
+  RUN_NAME_INPUT=''
+  DRY_RUN=false
+  RUN_NAME=''
+  PROJECT_ROOT=''
+  PROJECT_DIR=''
+  RUN_DIR=''
+  AUTOKIT_DIR=''
+  SDCLI_OUTPUT_DIR=''
+  RUN_LOG_FILE=''
+  SDCLI_COMMAND_LOG=''
+  SDCLI_SUMMARY_FILE=''
+  MIGRATION_SUMMARY_FILE=''
+  PHASE_STATUS_FILE=''
+  ACTIVE_MIGRATION_NAME=''
+  ACTIVE_REPOSITORY_CONN=''
+  ACTIVE_REPOSITORY_NAME=''
+  ACTIVE_SUPER_CONNECTION_NAME=''
+}
+
+assert_main_init_fails_without_sdcli() {
+  local label="$1"
+  shift
+  local output rc
+  : > "$INIT_MAIN_CALLS"
+  reset_main_state
+  set +e
+  output="$(main "$@" 2>&1)"
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || fail_test "$label unexpectedly succeeded"
+  [[ ! -s "$INIT_MAIN_CALLS" ]] || fail_test "$label invoked SDCLI before failing"
+  printf '%s' "$output"
+}
+
+INIT_TEST_MIGRATION_COUNT=2
+multi_main_output="$(assert_main_init_fails_without_sdcli 'multi-migration unnamed init' --init)"
+assert_contains "$multi_main_output" './migrate.sh <name> --init' "main multi-migration init guidance"
+unknown_main_output="$(assert_main_init_fails_without_sdcli 'unknown migration init' missing --init)"
+assert_contains "$unknown_main_output" "Migration 'missing' not found in config" "main unknown init rejection"
+
+for migration_name in proda cecrealm; do
+  : > "$INIT_MAIN_CALLS"
+  reset_main_state
+  main "$migration_name" --init
+  init_main_call="$(tail -n 1 "$INIT_MAIN_CALLS")"
+  assert_contains "$init_main_call" "migration_repo_${migration_name}:mkrepouser" "main ${migration_name} repository alias"
+  assert_contains "$init_main_call" "super_migration_${migration_name}:oracle" "main ${migration_name} super alias"
+  assert_contains "$init_main_call" "${migration_name}.example:1522/${migration_name}_high" "main ${migration_name} endpoint"
+  assert_not_contains "$init_main_call" 'legacy.example' "main ${migration_name} legacy endpoint isolation"
+done
+
+INIT_TEST_MIGRATION_COUNT=1
+: > "$INIT_MAIN_CALLS"
+reset_main_state
+single_main_output="$(main --init)"
+assert_contains "$single_main_output" 'Inferred the only configured migration' "main single-migration init inference"
+assert_contains "$(tail -n 1 "$INIT_MAIN_CALLS")" 'migration_repo_proda:mkrepouser' "main inferred repository alias"
 
 echo "per-migration repository init test passed"

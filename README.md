@@ -611,12 +611,12 @@ not accept the captured model name (for example, `tpcc_20260427_014117`) as
 export RUN=20260427_014117
 
 # Find the integer index for tpcc_<run id>, then use that index.
-sdcli migration -actions=lscaptured
+sdcli migration -actions=lscaptured -repository=migration_repo_tpcc
 export CAPTURE_MODEL=<captured_model_index>
 ./migrate.sh tpcc --phase convert --run "$RUN" --model "$CAPTURE_MODEL"
 
 # Find the integer index for the converted model created above.
-sdcli migration -actions=lsconverted
+sdcli migration -actions=lsconverted -repository=migration_repo_tpcc
 export CONVERTED_MODEL=<converted_model_index>
 ./migrate.sh tpcc --phase generate --run "$RUN" --model "$CONVERTED_MODEL"
 ./migrate.sh tpcc --phase datamove --run "$RUN" --model "$CONVERTED_MODEL"

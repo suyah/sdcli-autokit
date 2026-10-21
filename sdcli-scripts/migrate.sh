@@ -2831,10 +2831,11 @@ sdcli_model_exists() {
   esac
 
   output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_model_lookup_XXXXXX")" || return 1
+  require_active_repository_identity
   saved_action="$SDCLI_LAST_ACTION"
   saved_marker="$SDCLI_LAST_SUCCESS_MARKER"
   SDCLI_CAPTURE_OUTPUT_FILE="$output_file"
-  if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action"; then
+  if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action" "-repository=$ACTIVE_REPOSITORY_NAME"; then
     rc=1
   elif ! LC_ALL=C awk -v expected="$expected_model" '
     {
