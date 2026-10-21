@@ -31,10 +31,16 @@ case "${1:-}:${2:-}" in
 
     if [[ "$inspect_format" == '{{.Id}}' ]]; then
       printf '%s\n' 'sha256:docker-test-image'
-    elif [[ "$inspect_format" == *'printf'* ]]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        'sha256:docker-test-image' 'linux' 'amd64' '1.1.0' \
-        "$DOCKER_TEST_SOURCE_COMMIT" '2026-10-21T00:00:00Z' 'linux/amd64'
+    elif [[ "$inspect_format" == *'printf "%s\t'* ]]; then
+      if [[ "$inspect_format" == *'.Os'* ]]; then
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          'sha256:docker-test-image' 'linux' 'amd64' '1.1.0' \
+          "$DOCKER_TEST_SOURCE_COMMIT" '2026-10-21T00:00:00Z' 'linux/amd64'
+      else
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+          'sha256:docker-test-image' '1.1.0' \
+          "$DOCKER_TEST_SOURCE_COMMIT" '2026-10-21T00:00:00Z' 'linux/amd64'
+      fi
     else
       # Docker renders {{"\\t"}} as the literal characters backslash and t.
       # This reproduces the regression that the production scripts must avoid.
@@ -74,7 +80,12 @@ output="$(
   "$REPO_ROOT/release/release.sh" 1.1.0 --rebuild
 )"
 
-grep -F "Image labels: version=1.1.0 revision=$source_commit created=2026-10-21T00:00:00Z platform=linux/amd64" <<< "$output" >/dev/null
+expected_labels="Image labels: version=1.1.0 revision=$source_commit created=2026-10-21T00:00:00Z platform=linux/amd64"
+label_count="$(grep -Fxc "$expected_labels" <<< "$output")"
+if [[ "$label_count" != '2' ]]; then
+  echo "expected validated labels twice, got $label_count" >&2
+  exit 1
+fi
 grep -F 'Created offline bundle:' <<< "$output" >/dev/null
 [[ -f "$tmpdir/dist/sdcli-autokit-1.1.0-linux-amd64.tar.gz" ]]
 

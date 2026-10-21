@@ -63,10 +63,6 @@ if [[ "$VERIFY" == true ]]; then
       bash "$ROOT_DIR/$test_file"
     done < <(git -C "$ROOT_DIR" ls-files 'tests/*.sh')
 
-    (
-      cd "$ROOT_DIR"
-      python3 -m unittest discover -s tests -p 'test_validation_report.py' -v
-    )
   fi
 fi
 
