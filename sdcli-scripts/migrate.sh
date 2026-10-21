@@ -566,6 +566,13 @@ validate_migration_secret_placeholder() {
   validate_secret_placeholder "$path" "${path#.}"
 }
 
+require_active_repository_context() {
+  [[ -n "$ACTIVE_MIGRATION_NAME" ]] || fail "No active migration repository context was resolved"
+  [[ -n "$ACTIVE_REPOSITORY_CONN" ]] || fail "Active migration '$ACTIVE_MIGRATION_NAME' has no repository endpoint"
+  [[ -n "$ACTIVE_REPOSITORY_NAME" ]] || fail "Active migration '$ACTIVE_MIGRATION_NAME' has no repository connection name"
+  [[ -n "$ACTIVE_SUPER_CONNECTION_NAME" ]] || fail "Active migration '$ACTIVE_MIGRATION_NAME' has no super-user connection name"
+}
+
 derive_migration_connection_name() {
   local prefix="$1"
   local migration_name="$2"
@@ -1020,6 +1027,7 @@ validate_migration_config() {
 
 validate_config() {
   local require_migrations="${1:-true}"
+  local selected_migration_index="${2:-}"
 
   validate_supported_migration_pair
   get_required_value '.defaults.driver_file' 'defaults.driver_file' >/dev/null
@@ -1029,7 +1037,6 @@ validate_config() {
   validate_bcp_packet_size_for_tls "$bcp_tls_mode" "$(get_bcp_packet_size)" >/dev/null
 
   get_required_value '.migration_repository.name' 'migration_repository.name' >/dev/null
-  get_required_value '.migration_repository.conn' 'migration_repository.conn' >/dev/null
   get_required_value '.migration_repository.repo_user.connection_name' 'migration_repository.repo_user.connection_name' >/dev/null
   get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user' >/dev/null
   get_required_value '.migration_repository.super_user.connection_name' 'migration_repository.super_user.connection_name' >/dev/null
@@ -1047,6 +1054,13 @@ validate_config() {
   migration_count="$(yq_eval '.migrations | length')"
   [[ "$migration_count" =~ ^[0-9]+$ ]] || fail "Invalid migrations list in config"
   (( migration_count > 0 )) || fail "No migrations defined in config"
+
+  if [[ -n "$selected_migration_index" ]]; then
+    [[ "$selected_migration_index" =~ ^[0-9]+$ && "$selected_migration_index" -lt "$migration_count" ]] \
+      || fail "Selected migration index is invalid: $selected_migration_index"
+    validate_migration_config "$selected_migration_index"
+    return 0
+  fi
 
   local i
   for ((i = 0; i < migration_count; i++)); do
@@ -1230,6 +1244,8 @@ SQL
 }
 
 setup_repository() {
+  require_active_repository_context
+
   local driver_file
   driver_file="$(get_required_value '.defaults.driver_file' 'defaults.driver_file')"
   run_sdcli sdcli migration -actions=driver -files="$driver_file" || fail "Failed to register SQL Server driver"
@@ -1237,14 +1253,14 @@ setup_repository() {
 
   local repo_label repo_name repo_conn repo_user repo_password
   repo_label="$(get_required_value '.migration_repository.name' 'migration_repository.name')"
-  repo_name="$(get_repository_connection_name)"
-  repo_conn="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
+  repo_name="$ACTIVE_REPOSITORY_NAME"
+  repo_conn="$ACTIVE_REPOSITORY_CONN"
   repo_user="$(get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user')"
   repo_password="$(get_secret_value '.migration_repository.repo_user.password' 'migration_repository.repo_user.password')"
   validate_sdcli_conn_details_password "migration_repository.repo_user.password" "$repo_password"
 
   local super_name super_user super_password
-  super_name="$(get_required_value '.migration_repository.super_user.connection_name' 'migration_repository.super_user.connection_name')"
+  super_name="$ACTIVE_SUPER_CONNECTION_NAME"
   super_user="$(get_required_value '.migration_repository.super_user.user' 'migration_repository.super_user.user')"
   super_password="$(get_secret_value '.migration_repository.super_user.password' 'migration_repository.super_user.password')"
   validate_sdcli_conn_details_password "migration_repository.super_user.password" "$super_password"
@@ -1252,7 +1268,7 @@ setup_repository() {
   local init_conn_details
   init_conn_details="${super_name}:oracle:${super_user}/${super_password}@${repo_conn},${repo_name}:mkrepouser:${repo_user}/${repo_password}:${super_name}"
 
-  log_info "Initializing repository '${repo_label}' via connection '${repo_name}'"
+  log_info "Initializing repository '${repo_label}' for migration '${ACTIVE_MIGRATION_NAME}' via connection '${repo_name}'"
   run_sdcli sdcli migration -actions=init -connDetails="$init_conn_details" \
     || fail "Repository initialization failed; verify the Oracle connection and repository user details"
 }
@@ -1273,6 +1289,23 @@ get_migration_index() {
   done
 
   fail "Migration '$migration_name' not found in config"
+}
+
+select_init_migration() {
+  local migration_count
+
+  if [[ -n "$MIGRATION_NAME" ]]; then
+    get_migration_index "$MIGRATION_NAME"
+    return 0
+  fi
+
+  migration_count="$(yq_eval '.migrations | length')"
+  [[ "$migration_count" =~ ^[0-9]+$ ]] || fail "Invalid migrations list in config"
+  if (( migration_count != 1 )); then
+    fail "--init requires a migration name when config.yaml contains multiple migrations (example: ./migrate.sh <name> --init)"
+  fi
+
+  printf '0\n'
 }
 
 # --- BCP offload helpers -----------------------------------------------------
@@ -3261,7 +3294,8 @@ run_single_migration() {
   case "$MODE" in
     conn-setup)
       run_connection_setup "$idx" "$source_conn_name" "$source_conn" "$target_name"
-      record_migration_completion "$migration_name" "connection_setup_completed" "" "$output_dir" "$start_ts" "Connection setup completed: $migration_name"
+      log_info "SDCLI connection definitions saved; this command does not authenticate source or target database credentials."
+      record_migration_completion "$migration_name" "connection_setup_completed" "" "$output_dir" "$start_ts" "Connection definitions saved: $migration_name"
       ;;
     phase)
       local phase_model
@@ -3368,9 +3402,7 @@ parse_args() {
     esac
   done
 
-  if [[ "$MODE" == "init" ]]; then
-    [[ -z "$MIGRATION_NAME" ]] || fail "Migration name is not allowed with --init"
-  elif [[ "$MODE" == "show-datatype-mapping" ]]; then
+  if [[ "$MODE" == "init" || "$MODE" == "show-datatype-mapping" ]]; then
     : # Migration project name is an optional repository filter.
   else
     [[ -n "$MIGRATION_NAME" ]] || fail "Migration name is required (example: ./migrate.sh tpcc)"
@@ -3459,6 +3491,17 @@ main() {
   [[ -f "$CONFIG_FILE" ]] || fail "Config file not found: $CONFIG_FILE"
   require_command yq
 
+  local migration_idx=""
+  local init_migration_was_explicit=true
+
+  if [[ "$MODE" == "init" ]]; then
+    [[ -n "$MIGRATION_NAME" ]] || init_migration_was_explicit=false
+    migration_idx="$(select_init_migration)"
+    MIGRATION_NAME="$(migration_required_value "$migration_idx" name)"
+    validate_config "true" "$migration_idx"
+    resolve_migration_context "$migration_idx"
+  fi
+
   if [[ "$MODE" == "show-datatype-mapping" ]]; then
     validate_datatype_mapping_config
     configure_oracle_wallet >&2
@@ -3467,9 +3510,7 @@ main() {
     return 0
   fi
 
-  if [[ "$MODE" == "init" ]]; then
-    validate_config "false"
-  else
+  if [[ "$MODE" != "init" ]]; then
     validate_config "true"
   fi
 
@@ -3485,6 +3526,10 @@ main() {
   log_info "Run log: $RUN_LOG_FILE"
   log_info "SDCLI command log: $SDCLI_COMMAND_LOG"
   log_info "Dry run mode: $DRY_RUN"
+
+  if [[ "$MODE" == "init" && "$init_migration_was_explicit" == "false" ]]; then
+    log_info "Inferred the only configured migration for repository initialization: $MIGRATION_NAME"
+  fi
 
   configure_oracle_wallet
   configure_sqldeveloper_file_output_option
@@ -3521,7 +3566,6 @@ main() {
     return 0
   fi
 
-  local migration_idx
   migration_idx="$(get_migration_index "$MIGRATION_NAME")"
   run_single_migration "$migration_idx"
 
