@@ -19,6 +19,8 @@ into the customer offline bundle.
 
 - Improved deployment, postdeploy continuation, password handling, repository
   locking, and migration failure detection.
+- Corrected Docker release-image metadata parsing so valid provenance labels
+  are preserved when producing the offline bundle.
 
 ### Compatibility
 
