@@ -114,19 +114,27 @@ The following set was smoke-tested on Oracle Linux 9 x86_64 on 2026-10-09. These
 
 ### Offline handoff
 
-On a connected Linux/amd64 build host, create a versioned bundle:
+The publisher builds the container **online** because the image build downloads
+its base packages, `yq`, and jTDS. The customer installation is **offline**:
+the customer only downloads the finished bundle, loads `image.tar`, and stages
+its separately obtained vendor RPMs and wallet.
+
+On a connected Linux/amd64 publisher host, create a release candidate bundle:
 
 ~~~bash
-./release/release.sh 1.1.0
+./release/release.sh 1.1.0 --verify --rebuild
 ~~~
 
-Maintainers should follow the engineering-only [release process](docs/release-process.md)
-before creating a customer bundle.
+The default command, `./release/release.sh 1.1.0`, only packages a previously
+validated local image; it does not rebuild or run tests. It refuses an image
+whose version, Git commit, or platform provenance does not match the current
+source. Maintainers should follow the engineering-only
+[release process](docs/release-process.md) before creating a customer bundle.
 
 The scripts prefer Podman when both tools are installed. To build with Rancher Desktop/Docker explicitly, use:
 
 ~~~bash
-CONTAINER_ENGINE=docker ./release/release.sh 1.1.0
+CONTAINER_ENGINE=docker ./release/release.sh 1.1.0 --verify --rebuild
 ~~~
 
 Rancher Desktop must be running with its Docker engine available before starting the build.
