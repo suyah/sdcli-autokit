@@ -58,7 +58,7 @@ RELEASE_PLATFORM="$PLATFORM" \
   bash "$ROOT_DIR/deployment/build.sh" "$IMAGE_NAME"
 
 image_metadata="$("$CONTAINER_ENGINE" image inspect \
-  --format '{{.Id}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.version"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.revision"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.created"}}{{"\\t"}}{{index .Config.Labels "org.opencontainers.image.platform"}}' \
+  --format '{{.Id}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.version"}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.revision"}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.created"}}{{printf "\\t"}}{{index .Config.Labels "org.opencontainers.image.platform"}}' \
   "$IMAGE_NAME")"
 IFS=$'\t' read -r image_id image_version image_commit image_created image_platform <<< "$image_metadata"
 
