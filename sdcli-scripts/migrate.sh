@@ -630,10 +630,6 @@ resolve_global_repository_context() {
   ACTIVE_WALLET_CONFIG_PATH='.defaults.target.wallet_dir'
 }
 
-get_repository_connection_name() {
-  get_required_value '.migration_repository.repo_user.connection_name' 'migration_repository.repo_user.connection_name'
-}
-
 to_lower() {
   echo "$1" | tr '[:upper:]' '[:lower:]'
 }
@@ -1090,7 +1086,6 @@ validate_config() {
 }
 
 validate_datatype_mapping_config() {
-  get_required_value '.migration_repository.conn' 'migration_repository.conn' >/dev/null
   get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user' >/dev/null
   validate_secret_placeholder '.migration_repository.repo_user.password' 'migration_repository.repo_user.password'
 }
@@ -1102,7 +1097,8 @@ run_repository_sql_capture() {
   local errexit_enabled=false
   local -a pipeline_status=()
 
-  repo_conn="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
+  require_active_repository_identity
+  repo_conn="$ACTIVE_REPOSITORY_CONN"
   repo_user="$(get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user')"
   repo_password="$(get_secret_value '.migration_repository.repo_user.password' 'migration_repository.repo_user.password')"
   register_sqlplus_secret "migration_repository.repo_user.password" "$repo_password"
@@ -3293,8 +3289,8 @@ run_single_migration() {
   local target_name
   target_name="tgt_${migration_name}"
 
-  local repo_name
-  repo_name="$(get_repository_connection_name)"
+  require_active_repository_identity
+  local repo_name="$ACTIVE_REPOSITORY_NAME"
 
   local output_dir="$SDCLI_OUTPUT_DIR"
   mkdir -p "$output_dir"

@@ -77,6 +77,9 @@ get_secret_value() {
   printf '%s\n' "$repo_secret"
 }
 
+ACTIVE_REPOSITORY_CONN='repo_alias'
+ACTIVE_REPOSITORY_NAME='migration_repo'
+
 MODE="full"
 MODE_EXPLICIT=false
 MIGRATION_NAME=""
@@ -100,14 +103,20 @@ all_output="$(show_datatype_mapping "" 2> "$all_stderr")"
 [[ "$all_output" == "$expected_all" ]] || fail_test "all-project mapping output was not deterministic TSV"
 [[ "$(grep -c '^call$' "$SQLPLUS_CALLS_FILE")" == 2 ]] || fail_test "mapping command did not run preflight then query"
 grep -F "$repo_secret" "$SQLPLUS_INPUT_FILE" >/dev/null || fail_test "repository password did not reach SQL*Plus"
+grep -F 'connect migrep/"Repo@Test-42!"@repo_alias' "$SQLPLUS_INPUT_FILE" >/dev/null \
+  || fail_test "global mapping command did not use the active repository endpoint"
 if grep -F "$repo_secret" "$all_stderr" >/dev/null || [[ "$all_output" == *"$repo_secret"* ]]; then
   fail_test "repository password leaked from mapping command"
 fi
 
 : > "$SQLPLUS_CALLS_FILE"
+ACTIVE_REPOSITORY_CONN='tcps://proda.example:1522/proda_high'
+ACTIVE_REPOSITORY_NAME='migration_repo_proda'
 project_output="$(MAPPING_RESULT_MODE=project show_datatype_mapping "proda" 2> "$tmpdir/project.stderr")"
 [[ "$project_output" == "$expected_header"$'\nproda\tSQLServerDataMap\tVARCHAR\t\t\tVARCHAR2\t\t' ]] \
   || fail_test "project-specific mapping output was incorrect"
+grep -F 'connect migrep/"Repo@Test-42!"@tcps://proda.example:1522/proda_high' "$SQLPLUS_INPUT_FILE" >/dev/null \
+  || fail_test "named mapping command did not use its active repository endpoint"
 
 ampersand_output="$(MAPPING_RESULT_MODE=ampersand show_datatype_mapping "R&D" 2> "$tmpdir/ampersand.stderr")"
 [[ "$ampersand_output" == "$expected_header"$'\nR&D\tSQLServerDataMap\tINT\t\t\tNUMBER\t10\t0' ]] \

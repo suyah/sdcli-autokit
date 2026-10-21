@@ -21,8 +21,10 @@ migration_required_value() {
   shift
   case "$idx:$*" in
     '0:name') printf 'proda\n' ;;
+    '0:source conn') printf '10.0.0.10:1433:proda\n' ;;
     '0:target conn') printf 'tcps://proda.example:1522/proda_high\n' ;;
     '1:name') printf 'cecrealm\n' ;;
+    '1:source conn') printf '10.0.0.11:1433:cecrealm\n' ;;
     '1:target conn') printf 'tcps://cecrealm.example:1522/cecrealm_high\n' ;;
     *) fail_test "unexpected migration config lookup: $idx:$*" ;;
   esac
@@ -100,6 +102,24 @@ assert_eq "$ACTIVE_REPOSITORY_NAME" migration_repo "global repository name"
 assert_eq "$ACTIVE_SUPER_CONNECTION_NAME" super_migration "global super name"
 assert_eq "$ACTIVE_WALLET_DIR" /wallets/Wallet_default "global wallet"
 assert_eq "$ACTIVE_WALLET_CONFIG_PATH" '.defaults.target.wallet_dir' "global wallet config path"
+
+declare -a phase_calls=()
+run_phase() {
+  phase_calls+=("$1|$2")
+}
+record_migration_completion() { :; }
+log_info() { :; }
+MODE='phase'
+SDCLI_OUTPUT_DIR="$(mktemp -d)"
+for phase_name in capture convert generate datamove; do
+  PHASE_NAME="$phase_name"
+  phase_calls=()
+  resolve_migration_context 1
+  run_single_migration 1
+  assert_eq "${#phase_calls[@]}" 1 "${phase_name} phase call count"
+  assert_eq "${phase_calls[0]}" "${phase_name}|migration_repo_cecrealm" "${phase_name} active repository"
+done
+rmdir "$SDCLI_OUTPUT_DIR"
 
 invalid_wallet_output="$(
   ACTIVE_WALLET_DIR='/wallets/does-not-exist'
