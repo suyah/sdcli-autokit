@@ -30,6 +30,12 @@ SDCLI_COMMAND_LOG=""
 SDCLI_SUMMARY_FILE=""
 MIGRATION_SUMMARY_FILE=""
 ORACLE_WALLET_DIR=""
+ACTIVE_MIGRATION_INDEX=""
+ACTIVE_MIGRATION_NAME=""
+ACTIVE_REPOSITORY_CONN=""
+ACTIVE_REPOSITORY_NAME=""
+ACTIVE_SUPER_CONNECTION_NAME=""
+ACTIVE_WALLET_DIR=""
 PHASE_STATUS_FILE=""
 ACTIVE_PHASE=""
 ACTIVE_PHASE_ATTEMPT=""
@@ -558,6 +564,43 @@ validate_migration_secret_placeholder() {
   local path
   path="$(migration_value_path "$@")"
   validate_secret_placeholder "$path" "${path#.}"
+}
+
+derive_migration_connection_name() {
+  local prefix="$1"
+  local migration_name="$2"
+
+  [[ -n "$prefix" ]] || fail "Repository connection-name prefix must not be empty"
+  [[ -n "$migration_name" ]] || fail "Migration name must not be empty when deriving repository connection names"
+  printf '%s_%s\n' "$prefix" "$migration_name"
+}
+
+resolve_migration_context() {
+  local index="$1"
+  local migration_name repository_conn repository_prefix super_prefix migration_wallet default_wallet
+
+  migration_name="$(migration_required_value "$index" name)"
+  repository_conn="$(migration_required_value "$index" target conn)"
+  repository_prefix="$(get_required_value '.migration_repository.repo_user.connection_name' 'migration_repository.repo_user.connection_name')"
+  super_prefix="$(get_required_value '.migration_repository.super_user.connection_name' 'migration_repository.super_user.connection_name')"
+  migration_wallet="$(migration_optional_value "$index" target wallet_dir)"
+  default_wallet="$(get_optional_value '.defaults.target.wallet_dir')"
+
+  ACTIVE_MIGRATION_INDEX="$index"
+  ACTIVE_MIGRATION_NAME="$migration_name"
+  ACTIVE_REPOSITORY_CONN="$repository_conn"
+  ACTIVE_REPOSITORY_NAME="$(derive_migration_connection_name "$repository_prefix" "$migration_name")"
+  ACTIVE_SUPER_CONNECTION_NAME="$(derive_migration_connection_name "$super_prefix" "$migration_name")"
+  ACTIVE_WALLET_DIR="${migration_wallet:-$default_wallet}"
+}
+
+resolve_global_repository_context() {
+  ACTIVE_MIGRATION_INDEX=""
+  ACTIVE_MIGRATION_NAME=""
+  ACTIVE_REPOSITORY_CONN="$(get_required_value '.migration_repository.conn' 'migration_repository.conn')"
+  ACTIVE_REPOSITORY_NAME="$(get_required_value '.migration_repository.repo_user.connection_name' 'migration_repository.repo_user.connection_name')"
+  ACTIVE_SUPER_CONNECTION_NAME="$(get_required_value '.migration_repository.super_user.connection_name' 'migration_repository.super_user.connection_name')"
+  ACTIVE_WALLET_DIR="$(get_optional_value '.defaults.target.wallet_dir')"
 }
 
 get_repository_connection_name() {
