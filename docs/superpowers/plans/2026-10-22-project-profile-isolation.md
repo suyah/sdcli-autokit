@@ -39,9 +39,9 @@ pending/ready state; `mark_project_profile_ready()` commits ready state;
 `normalize_oracle_java_options()` removes wallet properties without losing
 other options. `mode_uses_sdcli()` decides which modes consume this interface.
 
-- [ ] Write a focused test exercising actual library and runner calls through a fake executable: separate concurrent profile/wallet environments; ready gating; same-profile contention; changed identity; no-wallet normalization.
-- [ ] Observe missing behavior fail, implement the library and child env boundary.
-- [ ] Run the focused test and affected runner/wallet tests; commit.
+- [x] Write a focused test exercising actual library and runner calls through a fake executable: separate concurrent profile/wallet environments; ready gating; same-profile contention; changed identity; no-wallet normalization.
+- [x] Observe missing behavior fail, implement the library and child env boundary.
+- [x] Run the focused test and affected runner/wallet tests; commit.
 
 ### Task 2: Initialization and repository routing
 
@@ -51,25 +51,25 @@ other options. `mode_uses_sdcli()` decides which modes consume this interface.
 the existing configure_sqldeveloper_file_output_option consumes SDCLI_PROFILE_DIR.
 Repository lock consumes endpoint plus configured repository user.
 
-- [ ] Extend existing tests for profile-before-driver ordering, help handling, failed init remaining pending and alias-independent repository locks; observe failures.
-- [ ] Route named SDK modes through profile setup/locks; mark ready only after init success. Remove unsupported -repository flags from affected vendor commands; update boundary expectations to check profile selection.
-- [ ] Configure preferences inside the selected profile; preserve unrelated vendor metadata. Normalize wallet environment once for Oracle subprocesses.
-- [ ] Run focused tests and relevant existing suite; commit.
+- [x] Extend existing tests for profile-before-driver ordering, help handling, failed init remaining pending and alias-independent repository locks; observe failures.
+- [x] Route named SDK modes through profile setup/locks; mark ready only after init success. Remove unsupported -repository flags from affected vendor commands; update boundary expectations to check profile selection.
+- [x] Configure preferences inside the selected profile; preserve unrelated vendor metadata. Normalize wallet environment once for Oracle subprocesses.
+- [x] Run focused tests and relevant existing suite; commit.
 
 ### Task 3: Deployment, strace and operator documentation
 
 **Files:** `deployment/run.sh`, `deployment/Dockerfile`, `tests/test_offline_run.sh`, `README.md`, `docs/CHANGELOG.md`.
 
-- [ ] Update deployment fixtures to cover preserving old state without initializing shared preferences.
-- [ ] Remove shared preference setup; use a disposable data-volume profile for SDK startup checks. Install/check strace.
-- [ ] Document complete backup, new per-project init sequence, manual SDK profile selection and explicit rollback. Retain source/run artifacts. Update engineering changelog.
-- [ ] Run deployment/offline tests and syntax checks; commit.
+- [x] Update deployment fixtures to cover preserving old state without initializing shared preferences.
+- [x] Remove shared preference setup; use a disposable data-volume profile for SDK startup checks. Install/check strace.
+- [x] Document complete backup, new per-project init sequence, manual SDK profile selection and explicit rollback. Retain source/run artifacts. Update engineering changelog.
+- [x] Run deployment/offline tests and syntax checks; commit.
 
 ### Task 4: Real-container verification and integration
 
 **Files:** engineering verification notes alongside the spec; private container test configuration/logs outside Git.
 
-- [ ] Back up the complete old test-container profile and config under /u01/data with restrictive permissions.
+- [x] Back up the complete old test-container profile and config under /u01/data with restrictive permissions.
 - [ ] Stage the feature scripts separately in the existing running container. Use the explicitly authorized ExaCS schema MIGREP_AUTOKIT_TEST_20261022 for fresh init, then reopen from an independent process. Check preferences/default repository and database evidence without logging passwords.
 - [ ] Run the full shell suite including offline tests and report tests, inspect the branch diff, and perform one independent whole-branch review.
 - [ ] Fix important review findings, commit verified results, push feature branch and create/merge remote PR; fast-forward local main. Preserve test container/schema and report test limitations.

@@ -100,15 +100,16 @@ validate_sdcli_conn_details_password() { :; }
 
 ACTIVE_MIGRATION_NAME='proda'
 ACTIVE_REPOSITORY_CONN='tcps://proda.example:1522/proda_high'
-ACTIVE_REPOSITORY_NAME='migration_repo_proda'
+ACTIVE_REPOSITORY_NAME='repo_proda'
 ACTIVE_SUPER_CONNECTION_NAME='super_migration_proda'
 
 setup_repository
 
 assert_eq "${#calls[@]}" 2 "repository init SDCLI call count"
 assert_eq "${calls[0]}" 'sdcli migration -actions=driver -files=/vendor/jtds.jar' "driver registration"
+assert_contains "${calls[1]}" '-conn=repo_proda' "explicit init repository selection for a non-mig alias prefix"
 assert_contains "${calls[1]}" 'super_migration_proda:oracle:admin/super_password@tcps://proda.example:1522/proda_high' "active super connection"
-assert_contains "${calls[1]}" 'migration_repo_proda:mkrepouser:migrep/repo_password:super_migration_proda' "active repository connection"
+assert_contains "${calls[1]}" 'repo_proda:mkrepouser:migrep/repo_password:super_migration_proda' "active repository connection"
 assert_not_contains "${calls[1]}" 'legacy.example' "legacy endpoint isolation"
 assert_not_contains "${calls[1]}" 'migration_repo:mkrepouser' "unsuffixed repository isolation"
 assert_not_contains "${calls[1]}" 'super_migration:oracle' "unsuffixed super isolation"

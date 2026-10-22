@@ -384,7 +384,13 @@ configure_sqldeveloper_file_output_option() {
 
   if ! grep -F '<!-- sdcli-autokit FileOutputOption v1 begin -->' "$preference_file" >/dev/null 2>&1 \
       || ! grep -F '<!-- sdcli-autokit FileOutputOption v1 end -->' "$preference_file" >/dev/null 2>&1; then
-    log_warn "SQL Developer preferences are not managed by sdcli-autokit; left unchanged: $preference_file (set FileOutputOption manually, or back up and remove the file before rerunning)"
+    if [[ -f "$prefs_root/.autokit-profile" ]]; then
+      # SDCLI strips template comments when it saves its own metadata. The
+      # profile lifecycle establishes ownership; never rewrite that saved XML.
+      log_info "Retained SQL Developer-saved project preferences: $preference_file"
+      return 0
+    fi
+    log_warn "SQL Developer preferences are not managed by sdcli-autokit; left unchanged: $preference_file (inspect FileOutputOption manually; retain saved encryption metadata)"
     return 0
   fi
 
@@ -1304,7 +1310,9 @@ setup_repository() {
   init_conn_details="${super_name}:oracle:${super_user}/${super_password}@${repo_conn},${repo_name}:mkrepouser:${repo_user}/${repo_password}:${super_name}"
 
   log_info "Initializing repository '${repo_label}' for migration '${ACTIVE_MIGRATION_NAME}' via connection '${repo_name}'"
-  run_sdcli sdcli migration -actions=init -connDetails="$init_conn_details" \
+  # Unlike other migration actions, init supports -conn. Select it explicitly:
+  # the vendor's implicit detection otherwise depends on a "mig" alias prefix.
+  run_sdcli sdcli migration -actions=init -conn="$repo_name" -connDetails="$init_conn_details" \
     || fail "Repository initialization failed; verify the Oracle connection and repository user details"
 }
 

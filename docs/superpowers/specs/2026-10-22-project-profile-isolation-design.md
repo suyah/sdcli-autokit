@@ -47,6 +47,11 @@ db.system.id. Do not generate encryption identifiers or edit DefaultRepository
 in production code. A real test must reopen the initialized repository from a
 new process; listing saved connection names is insufficient.
 
+Init alone receives its supported `-conn=<derived repository alias>` option.
+Its implicit connDetails detection otherwise depends on an alias starting with
+`mig`; explicitly selecting the alias also supports configured non-default
+prefixes. This does not restore the unsupported generic `-repository` option.
+
 The profile remains pending on failure, so init can be retried with unchanged
 identity. Changing a target requires an explicit backup and fresh profile;
 there is no silent reuse of a different database's preferences.

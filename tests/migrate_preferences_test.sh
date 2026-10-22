@@ -46,6 +46,17 @@ HOME="$home_dir" SQLDEVELOPER_FILE_OUTPUT_OPTION=3 configure_sqldeveloper_file_o
 after_repeat="$(cksum "$preference_file")"
 [[ "$before_repeat" == "$after_repeat" ]] || fail_test "Repeated preference installation was not idempotent"
 
+# The vendor removes XML comments when saving our bootstrapped preferences.
+# The project lifecycle marker still establishes ownership; do not tell the
+# operator to delete a working preference file and its encryption metadata.
+sed '/<!-- sdcli-autokit FileOutputOption v1 /d' "$preference_file" > "$preference_file.saved"
+mv "$preference_file.saved" "$preference_file"
+printf 'test-identity\tready\n' > "$SDCLI_PROFILE_DIR/.autokit-profile"
+vendor_before="$(cksum "$preference_file")"
+vendor_output="$(SQLDEVELOPER_FILE_OUTPUT_OPTION=3 configure_sqldeveloper_file_output_option 2>&1)"
+[[ "$vendor_before" == "$(cksum "$preference_file")" ]] || fail_test 'Vendor-saved preferences were rewritten'
+[[ "$vendor_output" != *'[WARN]'* ]] || fail_test 'Vendor-saved project preferences were incorrectly treated as unmanaged'
+
 unknown_home="$tmpdir/unknown-home"
 unknown_dir="$unknown_home/.sqldeveloper/system26.2.0.186.2220/o.sqldeveloper"
 unknown_file="$unknown_dir/product-preferences.xml"
