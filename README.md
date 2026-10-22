@@ -166,8 +166,9 @@ to every SDCLI process through `IDE_USER_DIR`. Saved connections, the default
 repository and encryption metadata are not shared between projects.
 The old `/u01/data/sdcli-autokit/sqldeveloper` directory and its
 `/home/sduser/.sqldeveloper` compatibility link are preserved for backup and
-rollback only; migration commands do not import or use them. All persistent
-configuration and profiles remain on the existing `/u01/data` volume.
+rollback only; migration connections and repository selection are not imported
+from them. The SDK launcher may still inspect HOME/launcher settings. All
+persistent configuration and profiles remain on the existing `/u01/data` volume.
 
 ### Upgrade an existing offline installation
 
@@ -561,6 +562,10 @@ A failed fresh init remains pending and can be retried. If the endpoint,
 repository user or repository alias changes, back up and move aside that
 project's whole profile during a maintenance window, then run named `--init`
 and `--conn-setup` again. There is no silent fallback to an old target.
+If saved repository credentials become unusable, SDCLI may fail before it can
+replace them during init. After correcting the credentials, use the same
+backup/move-aside/re-init procedure for that project only; do not delete an
+individual preferences file or copy another project's connections.
 Standalone use without `TOOL_DATA` places `profiles/` beside the configured
 `defaults.paths.project_root` directory; use absolute paths.
 

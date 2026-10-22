@@ -134,12 +134,20 @@ or drop a repository. Rolling back files does not reverse database DDL.
   locks were released. This is not a successful initialization result.
 - The actual read-only readiness helper rejected that partial schema with
   `Repository installation is incomplete` (REAL_INCOMPLETE_GUARD=PASS).
-- A clean positive init/reopen remains an integration gate. The user explicitly
-  approved MIGREP_AUTOKIT_RETRY_20261022 for the clean retry, which uses a
-  non-default repository alias prefix and a private 1800-second test bound.
-  No automatic repository cleanup or extra database account creation is part
-  of production execution. ADB mTLS and a complete data migration are outside
-  this acceptance run.
+- Clean positive acceptance passed with the explicitly approved
+  MIGREP_AUTOKIT_RETRY_20261022 on PDBSYH. The init run
+  `20261022_031538` completed at 03:29:18 UTC (about 14 minutes overall),
+  verified installation revision 65, and reopened the saved repository with an
+  independent SDCLI lscaptured process. The profile became ready only afterward.
+- The non-default alias prefix worked: DefaultRepository was saved as
+  `IdeConnections%23repo_test_isolation_test`. The SDK persisted its own
+  db.system.id; FileOutputOption remained 1. No encryption identifier or
+  DefaultRepository was manually injected. Direct SQL*Plus evidence showed
+  the expected retry schema with 134 tables; old shared-profile hashes matched.
+- The running container and both test schemas were preserved. No automatic
+  repository cleanup is part of production execution. ADB mTLS, a complete
+  data migration and a clean image rebuild are outside this acceptance run;
+  the strace Dockerfile change is for the next image build.
 
 Private container evidence and complete old-state backups are under
 `/u01/data/sdcli-autokit/profile-isolation-test.VR30Ea`; credentials are not

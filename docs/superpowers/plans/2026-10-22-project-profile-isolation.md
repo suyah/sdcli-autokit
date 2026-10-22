@@ -70,6 +70,6 @@ Repository lock consumes endpoint plus configured repository user.
 **Files:** engineering verification notes alongside the spec; private container test configuration/logs outside Git.
 
 - [x] Back up the complete old test-container profile and config under /u01/data with restrictive permissions.
-- [ ] Stage the feature scripts separately in the existing running container. Use the explicitly authorized ExaCS schema MIGREP_AUTOKIT_TEST_20261022 for fresh init, then reopen from an independent process. Check preferences/default repository and database evidence without logging passwords.
-- [ ] Run the full shell suite including offline tests and report tests, inspect the branch diff, and perform one independent whole-branch review.
+- [x] Stage the feature scripts separately in the existing running container. Use the explicitly authorized ExaCS schema MIGREP_AUTOKIT_TEST_20261022 for fresh init, then reopen from an independent process. Check preferences/default repository and database evidence without logging passwords. The bounded initial install remained incomplete; the user explicitly approved MIGREP_AUTOKIT_RETRY_20261022 for a clean positive retry, which passed.
+- [x] Run the full shell suite including offline tests and report tests, inspect the branch diff, and perform one independent whole-branch review.
 - [ ] Fix important review findings, commit verified results, push feature branch and create/merge remote PR; fast-forward local main. Preserve test container/schema and report test limitations.
