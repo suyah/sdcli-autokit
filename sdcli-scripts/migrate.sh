@@ -52,6 +52,8 @@ declare -a SENSITIVE_VALUES=()
 declare -a DATATYPE_MAPPING_TEMP_DIRS=()
 declare -a SQLPLUS_RUNTIME_TEMP_DIRS=()
 
+source "$SCRIPT_DIR/lib/sdcli_profile.sh"
+
 # --- CLI and logging helpers -------------------------------------------------
 usage() {
   cat <<'USAGE'
@@ -180,6 +182,7 @@ on_exit() {
   cleanup_sqlplus_runtime_temp_dirs || true
   cleanup_datatype_mapping_temp_dirs || true
   release_repository_lock || true
+  release_profile_lock || true
 
   if [[ $rc -ne 0 ]]; then
     status="failed($rc)"
@@ -281,6 +284,14 @@ get_optional_value() {
 configure_oracle_wallet_dir() {
   local wallet_dir="$1"
   local wallet_config_path="$2"
+  local option_variable normalized
+  for option_variable in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS; do
+    normalized="$(normalize_oracle_java_options "${!option_variable:-}")"
+    printf -v "$option_variable" '%s' "$normalized"
+    export "$option_variable"
+  done
+  unset TNS_ADMIN
+  ORACLE_WALLET_DIR=""
   [[ -n "$wallet_dir" ]] || return 0
 
   [[ "$wallet_dir" == /* ]] || fail "$wallet_config_path must be an absolute path"
@@ -794,6 +805,7 @@ run_sdcli() {
   done
   SDCLI_LAST_ACTION="$action"
   SDCLI_LAST_SUCCESS_MARKER=false
+  [[ -n "$SDCLI_PROFILE_DIR" ]] || { log_error 'No SQL Developer project profile selected'; return 1; }
   register_environment_secrets
   printable="$(mask_sensitive "${cmd[@]}")"
 
@@ -818,9 +830,9 @@ run_sdcli() {
   [[ "$-" == *e* ]] && errexit_enabled=true
   set +e
   if (( timeout_seconds > 0 )) && command -v timeout >/dev/null 2>&1; then
-    timeout "$timeout_seconds" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
+    timeout "$timeout_seconds" env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
   else
-    "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
+    env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
   fi
   rc=${PIPESTATUS[0]}
 
