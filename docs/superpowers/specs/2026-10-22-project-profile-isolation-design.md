@@ -132,10 +132,14 @@ or drop a repository. Rolling back files does not reverse database DDL.
   SDK worker was running vendor repository SQL. Read-only checks showed 109
   tables and no installation revision row. The profile stayed pending and
   locks were released. This is not a successful initialization result.
-- A clean positive init/reopen remains an integration gate. A second dedicated
-  schema requires explicit approval; no automatic repository cleanup or extra
-  database account creation is part of production execution. ADB mTLS and a
-  complete data migration are outside this acceptance run.
+- The actual read-only readiness helper rejected that partial schema with
+  `Repository installation is incomplete` (REAL_INCOMPLETE_GUARD=PASS).
+- A clean positive init/reopen remains an integration gate. The user explicitly
+  approved MIGREP_AUTOKIT_RETRY_20261022 for the clean retry, which uses a
+  non-default repository alias prefix and a private 1800-second test bound.
+  No automatic repository cleanup or extra database account creation is part
+  of production execution. ADB mTLS and a complete data migration are outside
+  this acceptance run.
 
 Private container evidence and complete old-state backups are under
 `/u01/data/sdcli-autokit/profile-isolation-test.VR30Ea`; credentials are not
