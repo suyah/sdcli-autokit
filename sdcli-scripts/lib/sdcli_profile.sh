@@ -6,14 +6,32 @@ PROFILE_LOCK_HELD=false
 PROFILE_IDENTITY=""
 
 normalize_oracle_java_options() {
-  local options="$1"
-  local wallet_option="(^|[[:space:]])-Doracle[.]net[.]tns_admin=(\"[^\"]*\"|'[^']*'|[^[:space:]]*)"
-  while [[ "$options" =~ $wallet_option ]]; do
-    options="${options/"${BASH_REMATCH[0]}"/}"
+  local options="$1" result="" raw="" value="" quote="" character
+  local index
+  # JVM option variables accept single/double quotes within or around a token.
+  # Inspect the unquoted token, but retain unrelated options verbatim. Do not
+  # eval these values or remove wallet-looking text inside another property's value.
+  for ((index = 0; index <= ${#options}; index++)); do
+    character="${options:index:1}"
+    if [[ -n "$quote" ]]; then
+      raw+="$character"
+      if [[ "$character" == "$quote" ]]; then quote=""; else value+="$character"; fi
+    elif [[ "$character" == '"' || "$character" == "'" ]]; then
+      quote="$character"
+      raw+="$character"
+    elif [[ -z "$character" || "$character" == [[:space:]] ]]; then
+      if [[ -n "$raw" && "$value" != -Doracle.net.tns_admin=* ]]; then
+        result+="${result:+ }$raw"
+      fi
+      raw=""
+      value=""
+    else
+      raw+="$character"
+      value+="$character"
+    fi
   done
-  options="${options#"${options%%[![:space:]]*}"}"
-  options="${options%"${options##*[![:space:]]}"}"
-  printf '%s' "$options"
+  [[ -z "$quote" ]] || { log_error 'Unbalanced quotes in Java option variable; correct the exported JVM options'; return 1; }
+  printf '%s' "$result"
 }
 
 mode_uses_sdcli() {

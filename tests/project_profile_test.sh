@@ -47,7 +47,7 @@ job() {
   touch "$RUN_LOG_FILE"
   JAVA_TOOL_OPTIONS='-Xmx256m -Dkeep="a b" -Doracle.net.tns_admin=/stale -Doracle.net.tns_admin="/old path"'
   JDK_JAVA_OPTIONS='-Dkeep2=yes -Doracle.net.tns_admin=/stale2'
-  _JAVA_OPTIONS='-Dkeep3=yes -Doracle.net.tns_admin=/stale3'
+  _JAVA_OPTIONS='"-Doracle.net.tns_admin=/stale3" -Dkeep3="value -Doracle.net.tns_admin=/literal"'
   configure_active_oracle_wallet
   prepare_project_profile
   export PROFILE_LABEL="$label" PROFILE_CAPTURE="$tmpdir/$label.env"
@@ -67,7 +67,7 @@ for label in a b; do
   [[ "$(sed -n '3p' "$tmpdir/$label.env")" == *"-Doracle.net.tns_admin=$tmpdir/wallet-$label"* ]] || fail_test 'selected JVM wallet missing'
   ! grep -Eq 'stale|old path' "$tmpdir/$label.env" || fail_test 'inherited wallet survived'
   [[ "$(sed -n '4p' "$tmpdir/$label.env")" == '-Dkeep2=yes' ]] || fail_test 'JDK options changed'
-  [[ "$(sed -n '5p' "$tmpdir/$label.env")" == '-Dkeep3=yes' ]] || fail_test 'JVM options changed'
+  [[ "$(sed -n '5p' "$tmpdir/$label.env")" == '-Dkeep3="value -Doracle.net.tns_admin=/literal"' ]] || fail_test 'quoted JVM token was not removed or an unrelated quoted value was changed'
 done
 context a
 MODE=conn-setup

@@ -402,6 +402,13 @@ for the repository-wide `./migrate.sh --show-datatype-mapping` command with no
 migration name; changing it does not change a named migration's target or
 repository endpoint.
 
+Use a normal privileged Oracle connection for `super_user`, such as the ADB
+`admin` account or a PDB administrator with the required user/grant privileges.
+Do not use a `SYSDBA` connection for SDCLI 26.2 `mkrepouser`: the vendor command
+copies the super connection's properties, including its role, into the new
+repository connection. On a multitenant database, select a PDB service rather
+than the CDB root service.
+
 For a large migration program, define one migration entry per source/target database pair. For example, 50 source databases usually means 50 migration entries with 50 unique migration names.
 
 ### Source connection format
