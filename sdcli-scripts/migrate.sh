@@ -2901,6 +2901,13 @@ sdcli_model_exists() {
         model_index=substr(line, 1, marker_pos - 1)
         model_name=substr(line, marker_pos + length(marker))
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_index)
+        # The marker includes the closing ")". SQL Developer 26.2 therefore
+        # leaves "(1" in model_index, while older output leaves "1". Remove
+        # only the leading display parenthesis; the exact marker and numeric
+        # check still reject malformed rows.
+        if (model_index ~ /^\([0-9]+$/) {
+          sub(/^\(/, "", model_index)
+        }
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_name)
         if (model_index ~ /^[0-9]+$/ && model_name == expected) found=1
       }

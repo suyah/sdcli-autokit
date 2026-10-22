@@ -54,7 +54,22 @@ for arg in "$@"; do
   [[ "$arg" == -actions=* ]] && action="${arg#-actions=}"
 done
 if [[ "${FAKE_MODEL_LOOKUP_HAS_MODEL:-false}" == "true" ]]; then
-  printf '1) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+  case "${FAKE_MODEL_LIST_STYLE:-parenthesized}" in
+    parenthesized)
+      # SQL Developer 26.2 formats the numeric model index as "(1)".
+      printf '(1) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+      ;;
+    legacy)
+      printf '1) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+      ;;
+    malformed)
+      printf '(1 --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+      ;;
+    *)
+      printf 'Unsupported fake model-list style: %s\n' "$FAKE_MODEL_LIST_STYLE" >&2
+      exit 2
+      ;;
+  esac
 fi
 printf '%s completed successfully\n' "$action"
 SCRIPT
@@ -194,6 +209,15 @@ set_sdcli_postcondition_state convert
 verify_phase_postcondition convert latest "$project_name" "$output_dir"
 grep -Fx -- "$SDCLI_PROFILE_DIR" "$SDCLI_ARGS_FILE" >/dev/null \
   || fail_test "converted model lookup did not use the selected profile"
+FAKE_MODEL_LIST_STYLE=legacy
+export FAKE_MODEL_LIST_STYLE
+set_sdcli_postcondition_state capture
+verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+FAKE_MODEL_LIST_STYLE=malformed
+export FAKE_MODEL_LIST_STYLE
+set_sdcli_postcondition_state capture
+expect_failure "malformed model index" verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+unset FAKE_MODEL_LIST_STYLE
 for phase in generate datamove offload deploy load postdeploy validate cleanup; do
   verify_phase_postcondition "$phase" latest "$project_name" "$output_dir"
 done
