@@ -5,6 +5,8 @@ into the customer offline bundle.
 
 ## Unreleased
 
+## 1.2.0 - 2026-10-22
+
 ### Added
 
 - Bundled pinned Oracle SQLcl 26.2.2 with its FUTC license and notices for
