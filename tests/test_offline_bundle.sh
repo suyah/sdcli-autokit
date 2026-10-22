@@ -137,6 +137,11 @@ exit 1
 SH
 chmod +x "$fakebin/podman"
 
+# This test exercises release scripts with the fake podman above.  Do not
+# inherit a publisher's CONTAINER_ENGINE=docker setting, which would turn this
+# unit test into a real image build.
+export CONTAINER_ENGINE=podman
+
 dist_dir="$tmpdir/dist"
 podman_log="$tmpdir/podman.log"
 release_changelog="$tmpdir/CHANGELOG.md"
