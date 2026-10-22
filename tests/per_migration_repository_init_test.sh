@@ -117,6 +117,7 @@ assert_not_contains "${calls[1]}" 'super_migration:oracle' "unsuffixed super iso
 # hermetic while proving argument parsing and init selection happen before any
 # driver, wallet, lock, or SDCLI side effect.
 main_tmpdir="$tmpdir/main"
+TOOL_DATA="$main_tmpdir/data"
 mkdir -p "$main_tmpdir"
 : > "$main_tmpdir/config.yaml"
 export INIT_MAIN_CALLS="$main_tmpdir/sdcli.calls"
@@ -174,10 +175,16 @@ resolve_migration_context() {
   ACTIVE_WALLET_CONFIG_PATH='.defaults.target.wallet_dir'
 }
 configure_active_oracle_wallet() { :; }
-configure_sqldeveloper_file_output_option() { :; }
 acquire_repository_lock() { :; }
 validate_sdcli_conn_details_password() { :; }
 run_sdcli() {
+  [[ -n "$SDCLI_PROFILE_DIR" && "$PROFILE_LOCK_HELD" == true ]] || fail_test 'SDCLI started before project profile selection/locking'
+  if [[ "$*" == *'-help=init'* ]]; then
+    mkdir -p "$SDCLI_PROFILE_DIR/system26.2.0.186.2220/o.sqldeveloper"
+  fi
+  if [[ "${FAIL_MAIN_INIT:-false}" == true && "$*" == *'-actions=init'* ]]; then
+    return 1
+  fi
   printf '%s\n' "$*" >> "$INIT_MAIN_CALLS"
 }
 
@@ -231,6 +238,8 @@ for migration_name in proda cecrealm; do
   : > "$INIT_MAIN_CALLS"
   reset_main_state
   main "$migration_name" --init
+  [[ "$(awk -F '\t' '{print $2}' "$SDCLI_PROFILE_DIR/.autokit-profile")" == ready ]] || fail_test 'successful init did not mark the profile ready'
+  release_profile_lock
   init_main_call="$(tail -n 1 "$INIT_MAIN_CALLS")"
   assert_contains "$init_main_call" "migration_repo_${migration_name}:mkrepouser" "main ${migration_name} repository alias"
   assert_contains "$init_main_call" "super_migration_${migration_name}:oracle" "main ${migration_name} super alias"
@@ -238,10 +247,21 @@ for migration_name in proda cecrealm; do
   assert_not_contains "$init_main_call" 'legacy.example' "main ${migration_name} legacy endpoint isolation"
 done
 
+if (
+  trap 'release_profile_lock' EXIT
+  TOOL_DATA="$main_tmpdir/failed-data"
+  FAIL_MAIN_INIT=true
+  reset_main_state
+  main proda --init
+) >/dev/null 2>&1; then
+  fail_test 'failed initialization unexpectedly succeeded'
+fi
+[[ "$(awk -F '\t' '{print $2}' "$main_tmpdir/failed-data/profiles/proda/.autokit-profile")" == pending ]] || fail_test 'failed init left a ready profile'
+
 INIT_TEST_MIGRATION_COUNT=1
 : > "$INIT_MAIN_CALLS"
 reset_main_state
-single_main_output="$(main --init)"
+single_main_output="$(trap 'release_profile_lock' EXIT; main --init)"
 assert_contains "$single_main_output" 'Inferred the only configured migration' "main single-migration init inference"
 assert_contains "$(tail -n 1 "$INIT_MAIN_CALLS")" 'migration_repo_proda:mkrepouser' "main inferred repository alias"
 

@@ -16,6 +16,7 @@ ACTIVE_REPOSITORY_CONN='tcps://adb.example/service'
 RUN_LOG_FILE="$tmpdir/run.log"
 mkdir -p "$PROJECT_ROOT"
 touch "$RUN_LOG_FILE"
+get_required_value() { printf '%s\n' "${TEST_REPOSITORY_USER:-migrep}"; }
 
 acquire_repository_lock
 [[ -d "$REPOSITORY_LOCK_DIR" ]]
@@ -36,8 +37,23 @@ second_rc=$?
 set -e
 [[ $second_rc -ne 0 ]]
 
+if (
+  REPOSITORY_LOCK_HELD=false
+  ACTIVE_REPOSITORY_NAME='migration_repo_another_project'
+  acquire_repository_lock
+) >/dev/null 2>&1; then
+  echo 'A different alias bypassed the lock on the same repository user/database' >&2
+  exit 1
+fi
+
 release_repository_lock
 [[ ! -e "$lock_dir" ]]
+
+TEST_REPOSITORY_USER=another_repo
+acquire_repository_lock
+[[ "$REPOSITORY_LOCK_DIR" != "$lock_dir" ]]
+release_repository_lock
+TEST_REPOSITORY_USER=migrep
 
 ACTIVE_REPOSITORY_CONN='tcps://other-adb.example/service'
 acquire_repository_lock
