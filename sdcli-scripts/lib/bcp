@@ -113,6 +113,32 @@ if [[ -n "$PACKET_SIZE" && $has_a -eq 0 ]]; then
   args+=("-a" "$PACKET_SIZE")
 fi
 
+bcp_object="${args[0]:-}"
+bcp_data_file=""
+for ((arg_idx = 0; arg_idx + 1 < ${#args[@]}; arg_idx++)); do
+  case "${args[$arg_idx]}" in
+    [Oo][Uu][Tt]|[Qq][Uu][Ee][Rr][Yy][Oo][Uu][Tt])
+      bcp_data_file="${args[$((arg_idx + 1))]}"
+      [[ "$bcp_data_file" == /* || "$bcp_data_file" == "-" ]] || bcp_data_file="$PWD/$bcp_data_file"
+      break
+      ;;
+  esac
+done
+
+if [[ -n "$BCP_STATUS_FILE" ]]; then
+  if [[ -z "$bcp_object" || -z "$bcp_data_file" || "$bcp_data_file" == "-" ]]; then
+    echo "ERROR: bcp export arguments do not identify one source object/query and external data file" >&2
+    exit 2
+  fi
+  case "$bcp_object$bcp_data_file" in
+    *$'\t'*|*$'\r'*|*$'\n'*)
+      echo "ERROR: bcp structured evidence does not support control characters in object/query or data-file arguments" >&2
+      exit 2
+      ;;
+  esac
+  printf '[SDCLI-BCP-OBJECT] %s\n' "$bcp_object"
+fi
+
 output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_output_XXXXXX")"
 trap 'rm -f "$output_file"' EXIT
 
@@ -130,18 +156,8 @@ else
 fi
 
 if [[ -n "$BCP_STATUS_FILE" ]]; then
-  bcp_data_file=""
   bcp_rows="$(sed -nE 's/^[[:space:]]*([0-9]+)[[:space:]]+rows[[:space:]]+copied\..*/\1/p' "$output_file" | tail -n 1)"
-  for ((arg_idx = 0; arg_idx + 1 < ${#args[@]}; arg_idx++)); do
-    case "${args[$arg_idx]}" in
-      out|queryout)
-        bcp_data_file="${args[$((arg_idx + 1))]}"
-        [[ "$bcp_data_file" == /* || "$bcp_data_file" == "-" ]] || bcp_data_file="$PWD/$bcp_data_file"
-        break
-        ;;
-    esac
-  done
-  printf '%s\t%s\t%s\t%s\n' "$rc" "${args[0]:-unknown}" "$bcp_data_file" "$bcp_rows" >> "$BCP_STATUS_FILE"
+  printf '%s\t%s\t%s\t%s\n' "$rc" "$bcp_object" "$bcp_data_file" "$bcp_rows" >> "$BCP_STATUS_FILE"
 fi
 
 exit "$rc"

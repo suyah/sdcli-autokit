@@ -10,6 +10,8 @@ into the customer offline bundle.
 - Corrected SQL Developer 26.2 parenthesized model-list parsing and pinned full
   workflows to unique numeric captured and converted model indexes instead of
   mutable `latest` selection.
+- Replaced generated BCP shell-token parsing with wrapper-owned structured
+  execution evidence and control-file coverage checks.
 
 ## 1.2.0 - 2026-10-22
 

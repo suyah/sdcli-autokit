@@ -960,7 +960,7 @@ Important files:
 | `autokit/migration_summary.csv` | Append-only high-level migration result summary. |
 | `autokit/phase_status.tsv` | Append-only phase attempts and their final status. |
 | `autokit/deploy_manifest.tsv` | Generated SQL inventory and scripts executed during deploy, postdeploy, and explicit cleanup. |
-| `autokit/bcp_status.tsv` | Per-table SQL Server export status and exported row count. |
+| `autokit/bcp_status.tsv` | Per-export SQL Server status written from the BCP wrapper's actual argv, data file, exit code, and exported row count. |
 | `autokit/sqlldr_status.tsv` | Per-table Oracle load status, loaded/rejected/discarded counts, and paths. |
 | `autokit/reconciliation.tsv` | Source-to-target per-table row reconciliation. Every row must be `PASS`. |
 | `autokit/source_object_inventory.tsv` | Read-only SQL Server user-object inventory collected during validation. |
