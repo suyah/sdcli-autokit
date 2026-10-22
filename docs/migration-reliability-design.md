@@ -136,8 +136,9 @@ Before a fresh deploy, fail if target tables from the deployment inventory alrea
 
 Discover generated `MicrosoftSQLServer_data.sh` and `oracle_loader.sh` scripts
 in stable sorted order. Run each root BCP script tree once and each independent
-loader script once; do not execute nested BCP scripts again after their parent
-entry script already invoked them.
+leaf loader script once; do not execute nested BCP scripts again after their
+parent entry script already invoked them. Loader selection is structural and
+does not grep generated shell text for a `sqlldr` token.
 
 Do not tokenize or interpret the generated shell command text. Execute only the
 root entry script in each generated BCP script tree; nested scripts are reached

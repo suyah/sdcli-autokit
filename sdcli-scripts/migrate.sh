@@ -1380,9 +1380,10 @@ select_init_migration() {
   printf '0\n'
 }
 
-# --- BCP offload helpers -----------------------------------------------------
-discover_bcp_entry_scripts() {
+# --- Generated data-movement helpers ----------------------------------------
+discover_generated_entry_scripts() {
   local datamove_dir="$1"
+  local script_name="$2"
   local script parent ancestor has_ancestor
 
   datamove_dir="$(cd "$datamove_dir" && pwd -P)" || return 1
@@ -1393,13 +1394,37 @@ discover_bcp_entry_scripts() {
     has_ancestor=false
     while [[ "$ancestor" != "$datamove_dir" ]]; do
       ancestor="$(dirname "$ancestor")"
-      if [[ -f "$ancestor/MicrosoftSQLServer_data.sh" ]]; then
+      if [[ -f "$ancestor/$script_name" ]]; then
         has_ancestor=true
         break
       fi
     done
     $has_ancestor || printf '%s\n' "$script"
-  done < <(find "$datamove_dir" -type f -name 'MicrosoftSQLServer_data.sh' 2>/dev/null | LC_ALL=C sort)
+  done < <(find "$datamove_dir" -type f -name "$script_name" 2>/dev/null | LC_ALL=C sort)
+}
+
+discover_generated_leaf_scripts() {
+  local datamove_dir="$1"
+  local script_name="$2"
+  local script candidate script_dir has_descendant
+  local -a scripts=()
+
+  datamove_dir="$(cd "$datamove_dir" && pwd -P)" || return 1
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] && scripts+=("$candidate")
+  done < <(find "$datamove_dir" -type f -name "$script_name" 2>/dev/null | LC_ALL=C sort)
+
+  for script in "${scripts[@]}"; do
+    script_dir="$(dirname "$script")"
+    has_descendant=false
+    for candidate in "${scripts[@]}"; do
+      if [[ "$candidate" != "$script" && "$candidate" == "$script_dir/"* ]]; then
+        has_descendant=true
+        break
+      fi
+    done
+    $has_descendant || printf '%s\n' "$script"
+  done
 }
 
 summarize_bcp_output() {
@@ -1728,12 +1753,6 @@ write_load_tns_alias() {
 
   echo "$tns_dir"
 }
-
-is_sqlldr_loader_script() {
-  local script="$1"
-  grep -Eiq '(^|[[:space:]])sqlldr([[:space:]]|$)' "$script"
-}
-
 
 source "$SCRIPT_DIR/lib/sqlplus_deploy.sh"
 
@@ -2643,11 +2662,13 @@ run_load() {
 
   local loader_scripts=() found_loader_script
   while IFS= read -r found_loader_script; do
-    if is_sqlldr_loader_script "$found_loader_script"; then
-      loader_scripts+=("$found_loader_script")
-    fi
-  done < <(find "$datamove_dir" -type f -name 'oracle_loader.sh' 2>/dev/null | LC_ALL=C sort)
-  [[ ${#loader_scripts[@]} -gt 0 ]] || fail "Oracle loader script with sqlldr not found under $datamove_dir"
+    [[ -n "$found_loader_script" ]] && loader_scripts+=("$found_loader_script")
+  done < <(discover_generated_leaf_scripts "$datamove_dir" 'oracle_loader.sh')
+  [[ ${#loader_scripts[@]} -gt 0 ]] || fail "Generated Oracle loader leaf script not found under $datamove_dir"
+
+  local expected_sqlldr_count
+  expected_sqlldr_count="$(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  (( expected_sqlldr_count > 0 )) || fail "No SQL*Loader control file found under $datamove_dir"
 
   local direct rows bindsize readsize
   direct="$(get_bool_value SQLLDR_DIRECT "$(get_sqlldr_config_raw "$idx" direct false)")"
@@ -2726,7 +2747,7 @@ run_load() {
   while IFS=$'\t' read -r sqlldr_exit_code target_table control_file data_file loaded_rows rejected_rows discarded_rows sqlldr_log_file; do
     [[ -n "$sqlldr_exit_code" ]] || continue
     sqlldr_status_count=$((sqlldr_status_count + 1))
-    if [[ "$sqlldr_exit_code" != "0" || -z "$target_table" || -z "$data_file" \
+    if [[ "$sqlldr_exit_code" != "0" || -z "$target_table" || -z "$control_file" || -z "$data_file" || -z "$sqlldr_log_file" \
         || ! "$loaded_rows" =~ ^[0-9]+$ || ! "$rejected_rows" =~ ^[0-9]+$ \
         || ! "$discarded_rows" =~ ^[0-9]+$ ]]; then
       sqlldr_status_issues=$((sqlldr_status_issues + 1))
@@ -2734,8 +2755,13 @@ run_load() {
     fi
   done < "$sqlldr_status_file"
 
-  if (( sqlldr_status_count == 0 || sqlldr_status_issues > 0 )); then
-    log_error "SQL*Loader status verification failed: records=$sqlldr_status_count issues=$sqlldr_status_issues"
+  local unique_sqlldr_control_count=0
+  if (( sqlldr_status_count > 0 )); then
+    unique_sqlldr_control_count="$(cut -f3 "$sqlldr_status_file" | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
+  fi
+  if (( sqlldr_status_count != expected_sqlldr_count \
+      || unique_sqlldr_control_count != sqlldr_status_count || sqlldr_status_issues > 0 )); then
+    log_error "SQL*Loader status verification failed: records=$sqlldr_status_count expected=$expected_sqlldr_count unique_controls=$unique_sqlldr_control_count issues=$sqlldr_status_issues"
     rc=1
   else
     log_info "SQL*Loader status records: $sqlldr_status_count file=$sqlldr_status_file"
@@ -2775,7 +2801,7 @@ run_offload() {
   local bcp_scripts=() bcp_script
   while IFS= read -r bcp_script; do
     [[ -n "$bcp_script" ]] && bcp_scripts+=("$bcp_script")
-  done < <(discover_bcp_entry_scripts "$datamove_dir")
+  done < <(discover_generated_entry_scripts "$datamove_dir" 'MicrosoftSQLServer_data.sh')
   [[ ${#bcp_scripts[@]} -gt 0 ]] || fail "Generated BCP entry script not found under $datamove_dir"
 
   log_info "Running BCP offload script"
@@ -2932,7 +2958,8 @@ lookup_sdcli_model_index() {
 verify_datamove_artifacts() {
   local output_dir="$1"
   local datamove_dir="$output_dir/datamove"
-  local bcp_script control_file bcp_script_count=0 control_file_count=0
+  local bcp_script loader_script control_file
+  local bcp_script_count=0 loader_script_count=0 control_file_count=0
 
   [[ -d "$datamove_dir" ]] || {
     log_error "Datamove postcondition failed: directory not found: $datamove_dir"
@@ -2941,7 +2968,12 @@ verify_datamove_artifacts() {
   while IFS= read -r bcp_script; do
     [[ -n "$bcp_script" ]] || continue
     bcp_script_count=$((bcp_script_count + 1))
-  done < <(discover_bcp_entry_scripts "$datamove_dir")
+  done < <(discover_generated_entry_scripts "$datamove_dir" 'MicrosoftSQLServer_data.sh')
+
+  while IFS= read -r loader_script; do
+    [[ -n "$loader_script" ]] || continue
+    loader_script_count=$((loader_script_count + 1))
+  done < <(discover_generated_leaf_scripts "$datamove_dir" 'oracle_loader.sh')
 
   while IFS= read -r control_file; do
     [[ -n "$control_file" ]] || continue
@@ -2950,6 +2982,10 @@ verify_datamove_artifacts() {
 
   (( bcp_script_count > 0 )) || {
     log_error "Datamove postcondition failed: no generated BCP entry script was found under $datamove_dir"
+    return 1
+  }
+  (( loader_script_count > 0 )) || {
+    log_error "Datamove postcondition failed: no generated Oracle loader leaf script was found under $datamove_dir"
     return 1
   }
   (( control_file_count > 0 )) || {

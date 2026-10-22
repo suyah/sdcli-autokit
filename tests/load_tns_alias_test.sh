@@ -56,6 +56,7 @@ cat > "$datamove_dir/tpcc/oracle_loader.sh" <<'SH'
 servername=$1
 username=$2
 password=$3
+loader_command=sqlldr
 echo "SCRIPT_ARG3=${3:-}"
 echo "SERVER=$servername"
 echo "TNS_ADMIN=${TNS_ADMIN:-}"
@@ -68,7 +69,7 @@ sqlplus /nolog <<SQL
 connect $username/$password@$servername
 prompt NOLOG_PRE_LOAD
 SQL
-sqlldr userid=$username/$password@$servername control=control/tpcc.customer.ctl
+"$loader_command" userid=$username/$password@$servername control=control/tpcc.customer.ctl
 SH
 
 fakebin="$tmpdir/bin"
@@ -243,3 +244,17 @@ into table TPCC.CUSTOMER;DROP
 (ID)
 CTL
 assert_control_rejected "unsupported INTO TABLE identifier"
+
+cat > "$datamove_dir/tpcc/control/tpcc.customer.ctl" <<'CTL'
+load data
+infile 'data/tpcc.customer.dat'
+into table TPCC.CUSTOMER
+(ID)
+CTL
+cat > "$datamove_dir/tpcc/control/not_invoked.ctl" <<'CTL'
+load data
+infile 'data/not_invoked.dat'
+into table TPCC.NOT_INVOKED
+(ID)
+CTL
+assert_control_rejected "records=1 expected=2 unique_controls=1 issues=0"

@@ -205,6 +205,11 @@ and requires one unique successful data-file record per generated SQL*Loader
 control file. This supports quoted object names and `queryout` without growing
 a partial shell parser.
 
+SQL*Loader script selection is also structural: the autokit executes each leaf
+`oracle_loader.sh` directly under Bash so its credential-safe wrappers remain
+active. It does not grep generated shell for the word `sqlldr`. Structured
+wrapper status must cover every generated control file exactly once.
+
 ### P2 — Preferences and maintainability
 
 `configure_sqldeveloper_file_output_option` edits arbitrary XML with AWK and
