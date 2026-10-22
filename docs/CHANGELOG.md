@@ -7,6 +7,11 @@ into the customer offline bundle.
 
 ### Fixed
 
+- Isolated SQL Developer 26.2 saved connections, DefaultRepository and encryption
+  state per migration with IDE_USER_DIR, preventing stale shared repository
+  discovery before init. Fresh profiles require successful initialization.
+- Scoped inherited Java wallet settings to the selected project and keyed
+  repository locks by endpoint/user rather than saved connection alias.
 - Isolated SQL Developer repository aliases, repository endpoint selection,
   wallets, locks, and initialization evidence by named migration. A named
   migration now uses its own target endpoint and derived repository aliases
@@ -14,6 +19,10 @@ into the customer offline bundle.
 
 ### Changed
 
+- Upgrades from shared preferences require named init and connection setup for
+  each project; existing models and data artifacts are retained. Deployment
+  uses disposable startup-check profiles and preserves old state for rollback.
+- Added strace to the image's diagnostic tools.
 - Repository initialization is `./migrate.sh <migration> --init` when multiple
   migrations are configured. The single-migration no-name form remains
   compatible.

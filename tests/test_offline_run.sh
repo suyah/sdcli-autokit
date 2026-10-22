@@ -61,6 +61,7 @@ mkdir -p "$source_dir/lib" "$source_dir/templates" "$container_root/home/sduser/
 printf '%s\n' '#!/usr/bin/env bash' 'echo new-program' > "$source_dir/migrate.sh"
 printf '%s\n' 'new report renderer' > "$source_dir/lib/generate_validation_report.py"
 printf '%s\n' 'new deploy library' > "$source_dir/lib/sqlplus_deploy.sh"
+printf '%s\n' 'new profile library' > "$source_dir/lib/sdcli_profile.sh"
 printf '%s\n' 'new wrapper' > "$source_dir/lib/sqlplus"
 printf '%s\n' 'new template' > "$source_dir/templates/product-preferences.xml"
 printf '%s\n' 'defaults:' '  driver_file: /u01/app/jtds-1.3.1.jar' > "$source_dir/config.example.yaml"
@@ -157,6 +158,25 @@ assert_mode "$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh" 644
 [[ "$(readlink "$HOME_DIR/.sqldeveloper")" == "$TOOL_DATA/sqldeveloper" ]]
 grep -F 'customer preferences' "$TOOL_DATA/sqldeveloper/system26.2.0/o.sqldeveloper/product-preferences.xml" >/dev/null
 [[ "$(cat "$SDCLI_SCRIPTS_DEST/.autokit-script-version")" == "1.2.3" ]]
+
+# Startup must not open or modify the preserved shared SQL Developer profile.
+SD_BIN="$tmpdir/fake-sdcli"
+export PROFILE_CHECK_CAPTURE="$tmpdir/startup-profile"
+cat > "$SD_BIN" <<'SH'
+#!/usr/bin/env bash
+set -eu
+: "${IDE_USER_DIR:?startup check needs a private profile}"
+printf '%s\n' "$IDE_USER_DIR" > "$PROFILE_CHECK_CAPTURE"
+mkdir -p "$IDE_USER_DIR/system26.2.0/o.sqldeveloper"
+printf 'startup preferences\n' > "$IDE_USER_DIR/system26.2.0/o.sqldeveloper/product-preferences.xml"
+SH
+chmod +x "$SD_BIN"
+shared_prefs="$HOME_DIR/.sqldeveloper/system26.2.0/o.sqldeveloper/product-preferences.xml"
+shared_checksum="$(cksum "$shared_prefs")"
+check_sdcli_startup
+check_profile="$(cat "$PROFILE_CHECK_CAPTURE")"
+[[ "$check_profile" == "$TOOL_DATA"/.sdcli-check.* && ! -e "$check_profile" ]]
+[[ "$(cksum "$shared_prefs")" == "$shared_checksum" ]]
 
 HOME_DIR="$container_root/home/second-user"
 second_destination="$HOME_DIR/sdcli-scripts"

@@ -164,6 +164,7 @@ script_files=(
   sdcli-scripts/lib/bcp
   sdcli-scripts/lib/generate_validation_report.py
   sdcli-scripts/lib/load_wrappers.sh
+  sdcli-scripts/lib/sdcli_profile.sh
   sdcli-scripts/lib/sqlldr
   sdcli-scripts/lib/sqlplus
   sdcli-scripts/lib/sqlplus_deploy.sh

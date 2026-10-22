@@ -48,6 +48,7 @@ RUN dnf -y install \
       findutils \
       hostname \
       procps-ng \
+      strace \
       shadow-utils \
       sudo \
       jq \

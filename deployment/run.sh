@@ -207,34 +207,17 @@ install_vendor_packages() {
   fi
 }
 
-ensure_sqldeveloper_preferences() {
+check_sdcli_startup() {
   container_engine exec \
-    --env "HOME_DIR=$HOME_DIR" \
-    --env "MIGRATE_SCRIPT=$SDCLI_SCRIPTS_DEST/migrate.sh" \
-    --env "SQLDEVELOPER_FILE_OUTPUT_OPTION=$SQLDEVELOPER_FILE_OUTPUT_OPTION" \
-    "$CONTAINER_NAME" \
-    bash -lc '
+    --env "TOOL_DATA=$TOOL_DATA" \
+    --env "SDCLI_CHECK_BIN=$SD_BIN" \
+    "$CONTAINER_NAME" bash -lc '
       set -euo pipefail
-
-      : "$HOME_DIR"
-      : "$MIGRATE_SCRIPT"
-      : "$SQLDEVELOPER_FILE_OUTPUT_OPTION"
-
-      export HOME="$HOME_DIR"
-      export MIGRATE_SH_SOURCE_ONLY=true
-      source "$MIGRATE_SCRIPT"
-      configure_sqldeveloper_file_output_option
-    '
-}
-
-initialize_sqldeveloper_preferences() {
-  # Start SQL Developer once before patching its preference. Some releases
-  # create product-preferences.xml only after driver registration; migrate.sh
-  # repeats the idempotent preference update after that command.
-  container_engine exec "$CONTAINER_NAME" bash -lc "'$SD_BIN' --help >/dev/null 2>&1" || {
-    echo "Error: sdcli did not start while initializing preferences" >&2
-    return 1
-  }
+      umask 077
+      check_profile="$(mktemp -d "${TOOL_DATA%/}/.sdcli-check.XXXXXX")"
+      trap '\''rm -rf -- "$check_profile"'\'' EXIT
+      IDE_USER_DIR="$check_profile" "$SDCLI_CHECK_BIN" --help >/dev/null 2>&1
+    ' || { echo "Error: sdcli did not start with an isolated profile" >&2; return 1; }
 }
 
 prepare_persistent_user_state() {
@@ -315,6 +298,7 @@ sync_sdcli_scripts() {
     config.example.yaml
     lib/generate_validation_report.py
     lib/sqlplus_deploy.sh
+    lib/sdcli_profile.sh
     templates/product-preferences.xml
   )
 
@@ -358,6 +342,7 @@ sync_sdcli_scripts() {
         config.example.yaml \
         lib/generate_validation_report.py \
         lib/sqlplus_deploy.sh \
+        lib/sdcli_profile.sh \
         templates/product-preferences.xml; do
         test -f "$STAGE_DIR/$required_file" || {
           echo "Error: staged migration program file is missing: $required_file" >&2
@@ -416,7 +401,7 @@ sync_sdcli_scripts() {
 
 check_tools() {
   local tool
-  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq python3; do
+  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq python3 strace; do
     container_engine exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
       echo "Error: $tool is missing after installation" >&2
       return 1
@@ -426,10 +411,11 @@ check_tools() {
   container_engine exec "$CONTAINER_NAME" bash -lc 'bcp -v >/dev/null 2>&1' || { echo "Error: bcp did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'sqlplus -version >/dev/null 2>&1' || { echo "Error: sqlplus did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'sqlldr -help >/dev/null 2>&1' || { echo "Error: sqlldr did not start" >&2; return 1; }
-  container_engine exec "$CONTAINER_NAME" bash -lc "sdcli --help >/dev/null 2>&1" || { echo "Error: sdcli did not start" >&2; return 1; }
+  check_sdcli_startup || return 1
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh'" || { echo "Error: migration scripts are missing" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh'" || { echo "Error: SQL*Plus deploy helper library is missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/sdcli_profile.sh'" || { echo "Error: SQL Developer profile helper library is missing" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/templates/product-preferences.xml'" || { echo "Error: SQL Developer preferences template is missing" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py'" || { echo "Error: validation report program is missing" >&2; return 1; }
 }
@@ -452,9 +438,6 @@ start_or_reuse_container
 prepare_persistent_user_state
 install_vendor_packages
 sync_sdcli_scripts
-initialize_sqldeveloper_preferences
-ensure_sqldeveloper_preferences
-
 if ! check_tools; then
   container_engine stop --time 5 "$CONTAINER_NAME" >/dev/null || true
   exit 1

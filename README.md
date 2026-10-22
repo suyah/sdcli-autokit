@@ -160,11 +160,14 @@ configurations from an older container are moved there automatically. The
 installed program version is recorded in
 `/home/sduser/sdcli-scripts/.autokit-script-version`.
 
-SQL Developer user preferences are stored under
-`/u01/data/sdcli-autokit/sqldeveloper`. `/home/sduser/.sqldeveloper` is a
-symbolic link retained for SQL Developer compatibility. Both locations are on
-the existing `/u01/data` persistent volume, so removing and recreating the
-container does not remove customer configuration or SQL Developer preferences.
+Each migration has an independent SQL Developer 26.2 profile under
+`/u01/data/sdcli-autokit/profiles/<migration>`. The runner passes that directory
+to every SDCLI process through `IDE_USER_DIR`. Saved connections, the default
+repository and encryption metadata are not shared between projects.
+The old `/u01/data/sdcli-autokit/sqldeveloper` directory and its
+`/home/sduser/.sqldeveloper` compatibility link are preserved for backup and
+rollback only; migration commands do not import or use them. All persistent
+configuration and profiles remain on the existing `/u01/data` volume.
 
 ### Upgrade an existing offline installation
 
@@ -173,7 +176,23 @@ newer offline bundle such as `1.1.0`. Schedule a maintenance window: do not
 upgrade while a migration command is running. The procedure preserves the
 named Podman volumes that contain `/u01/data` and `/u01/log`; therefore it
 keeps the customer configuration, wallet, SQL Developer preferences, and
-existing project/run artifacts.
+existing project/run artifacts. Before replacing the container, back up the
+complete old profile and configuration (not just `connections.json`):
+
+```bash
+podman exec --user sduser sdcli-autokit bash -lc '
+  set -euo pipefail
+  umask 077
+  backup="/u01/data/sdcli-autokit/backups/pre-upgrade-$(date +%Y%m%d_%H%M%S)"
+  mkdir -p "$backup"
+  tar -czf "$backup/sqldeveloper.tar.gz" -C /home/sduser/.sqldeveloper .
+  cp -p /home/sduser/sdcli-scripts/config.yaml "$backup/config.yaml"
+  printf "Backup: %s\n" "$backup"
+'
+```
+
+Keep the old bundle/image for rollback. Protect these backups: they include
+saved credentials and their encryption metadata.
 
 Download the new bundle and its adjacent checksum file to a new directory; do
 not overwrite the directory that held the old bundle. Then verify, extract,
@@ -219,14 +238,30 @@ podman exec --user sduser sdcli-autokit readlink /home/sduser/sdcli-scripts/conf
 ```
 
 The script version should be the new release version, and the configuration
-link should resolve to `/u01/data/sdcli-autokit/config/config.yaml`. Do not
-recapture or recreate connections solely because the container image changed.
-If upgrading from a release that used the old unsuffixed repository aliases,
-run the named `--init` command once per existing target to register the new
-aliases, then resume an existing run with its original `--run` id. If you
+link should resolve to `/u01/data/sdcli-autokit/config/config.yaml`.
+When upgrading from a shared-profile release, initialize each new project
+profile, then recreate its source/target connections:
+
+```bash
+# Inside the container, with the configured password variables exported:
+cd ~/sdcli-scripts
+./migrate.sh tpcc --init
+./migrate.sh tpcc --conn-setup
+```
+
+Repeat for each configured migration. Existing repositories/models and run/data
+artifacts are retained; this transition does not require recapture or data reload.
+Deploy the complete `sdcli-scripts/` directory, including `lib/` and `templates/`;
+replacing `migrate.sh` alone is insufficient. Resume with the original `--run` id.
+If you
 manually changed program files under `~/sdcli-scripts` in the old container,
 save those changes first: an upgrade replaces bundled program files, while
 preserving customer data.
+
+For rollback, stop migration activity and use the previous bundle/image with
+the preserved volumes and complete old shared profile. Do not replace only
+`connections.json`, merge profiles, or delete the new profiles/repository.
+Restoring program/profile files does not undo database DDL.
 
 ## Configure `config.yaml`
 
@@ -316,6 +351,12 @@ URL in each named migration's `target.conn`. SQLcl can resolve a wallet TNS alia
 `myadb_high`, but SQL Developer 26.2's `sdcli migration -actions=mkconn`
 does not resolve that alias inside `-connDetails`; using it produces
 `ORA-17870` even when the wallet is valid.
+
+For each invocation the runner removes inherited `oracle.net.tns_admin`
+properties from Java option variables before applying the selected configured
+wallet. With no configured wallet it clears inherited wallet/TNS settings.
+Unrelated JVM options remain intact; your parent shell is unchanged. Configure
+wallets in YAML rather than relying on a previous project's exports.
 
 SDCLI commands have no timeout by default because metadata capture can take a
 long time over a high-latency database connection. Set
@@ -450,12 +491,13 @@ For an offline customer VM, use the bundle workflow above instead. After loading
 
 `run.sh` creates the separate data/log volumes, mounts the RPM directory read-only, and prepares the SQL Developer CLI environment without network downloads.
 
-The runner installs an sdcli-autokit-managed SQL Developer preference template
-when `product-preferences.xml` is absent. Its default `FileOutputOption=1`
-keeps generated SQL separated by object type. If an existing preferences file
-was not created by this tool, it is left unchanged; set the option manually or
-back up and remove that file before rerunning `run.sh` if you want the managed
-template installed.
+Named `--init` bootstraps a fresh project profile and installs the preference
+template before repository initialization. `FileOutputOption=1` keeps generated
+SQL separated by object type. SQL Developer saves its own default repository
+and encryption metadata; Autokit does not fabricate them or copy another
+profile's saved credentials. Deployment startup checks use a disposable profile,
+not the old shared preferences. Unknown existing preference files are left
+unchanged.
 
 For normal daily use after the container already exists:
 
@@ -505,10 +547,15 @@ aliases `super_migration_tpcc` and `migration_repo_tpcc`. With exactly one
 migration in `config.yaml`, `./migrate.sh --init` remains supported and logs
 the inferred name. With two or more migrations, a name is required.
 
-The runner never edits, renames, or removes existing entries in SQL Developer
-`connections.json`. When upgrading an older configuration that used unsuffixed
-aliases, run the named init once for each existing target to register the new
-aliases; this does not delete repository schemas, models, or run artifacts.
+The runner never edits `connections.json` or switches a shared
+`DefaultRepository`. SDCLI manages these inside the selected project profile.
+Other SDCLI phases require that project's init to have completed successfully.
+A failed fresh init remains pending and can be retried. If the endpoint,
+repository user or repository alias changes, back up and move aside that
+project's whole profile during a maintenance window, then run named `--init`
+and `--conn-setup` again. There is no silent fallback to an old target.
+Standalone use without `TOOL_DATA` places `profiles/` beside the configured
+`defaults.paths.project_root` directory; use absolute paths.
 
 ## Typical migration workflow
 
@@ -548,8 +595,9 @@ the migration, use the optional connection-only command:
 ```
 
 `--conn-setup` saves or refreshes only `src_tpcc` and `tgt_tpcc`. It performs a
-TCP reachability preflight for the SQL Server host, but does not authenticate
-either database or initialize a repository.
+TCP reachability preflight for SQL Server; SDCLI also tests the Oracle login
+while creating that connection. It does not initialize a repository or prove
+source SQL Server authentication.
 
 ## Run a migration
 
@@ -589,10 +637,12 @@ counts, and source/generated/target object coverage. Postdeploy continues after
 individual SQL errors but stops on a SQL*Plus runtime failure. Validation also
 creates self-contained HTML and plain-text comparison reports.
 
-Only one repository workflow may run at a time. The script creates an atomic
-lock under `<project_root>/.locks` before repository work so SDCLI's `latest`
-model cannot be changed by another run. A stale lock is not removed
-automatically; the error identifies its directory for operator review.
+Each SDCLI workflow locks its project profile. Repository work also creates
+an atomic lock under `<project_root>/.locks`, keyed by configured endpoint and
+repository user (not connection alias), so another project using that same
+repository cannot change `latest` concurrently. Different profiles with
+different repositories can run in parallel. A stale lock is not removed
+automatically; inspect the owner before removing the reported lock directory.
 
 ## Run a single phase
 
@@ -611,12 +661,12 @@ not accept the captured model name (for example, `tpcc_20260427_014117`) as
 export RUN=20260427_014117
 
 # Find the integer index for tpcc_<run id>, then use that index.
-sdcli migration -actions=lscaptured -repository=migration_repo_tpcc
+IDE_USER_DIR=/u01/data/sdcli-autokit/profiles/tpcc sdcli migration -actions=lscaptured
 export CAPTURE_MODEL=<captured_model_index>
 ./migrate.sh tpcc --phase convert --run "$RUN" --model "$CAPTURE_MODEL"
 
 # Find the integer index for the converted model created above.
-sdcli migration -actions=lsconverted -repository=migration_repo_tpcc
+IDE_USER_DIR=/u01/data/sdcli-autokit/profiles/tpcc sdcli migration -actions=lsconverted
 export CONVERTED_MODEL=<converted_model_index>
 ./migrate.sh tpcc --phase generate --run "$RUN" --model "$CONVERTED_MODEL"
 ./migrate.sh tpcc --phase datamove --run "$RUN" --model "$CONVERTED_MODEL"
@@ -725,10 +775,12 @@ status. It still exits nonzero and records each outcome in
 `autokit/deploy_manifest.tsv`. A retry skips previously successful post-data
 scripts, retries failed scripts, and runs each schema's `post.sql` again.
 
-The lock is local to the shared `<project_root>` volume and protects a single
-full workflow. Separate manual commands do not reserve a model between
-invocations. Do not run two migrations against the same migration repository
-at once; use a separate repository when parallel migrations are required.
+Locks are local to the shared data/project volume, not distributed across
+independent installations. Separate manual commands do not reserve a model
+between invocations. Use the same configured endpoint spelling and repository
+user for a shared repository; aliases resolving to the same DB are not
+automatically discovered. Raw SDCLI calls must select `IDE_USER_DIR` as above
+and must not run concurrently with Autokit on that profile/repository.
 
 Phase status is append-only. Repeating a mutating phase that already succeeded
 is rejected by default. If the repeat is intentional, make it explicit:
