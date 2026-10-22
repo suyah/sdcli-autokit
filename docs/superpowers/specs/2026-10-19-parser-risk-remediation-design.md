@@ -199,6 +199,12 @@ Each action has a small postcondition based on artifacts it owns:
 Generic diagnostic regexes remain supplemental and must never convert missing
 artifacts into success.
 
+BCP coverage does not come from tokenizing generated shell. The autokit runs
+the root of each generated script tree, records actual argv in its BCP wrapper,
+and requires one unique successful data-file record per generated SQL*Loader
+control file. This supports quoted object names and `queryout` without growing
+a partial shell parser.
+
 ### P2 — Preferences and maintainability
 
 `configure_sqldeveloper_file_output_option` edits arbitrary XML with AWK and

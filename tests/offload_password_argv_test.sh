@@ -33,7 +33,7 @@ RUN_DIR="$tmpdir/run"
 AUTOKIT_DIR="$RUN_DIR/autokit"
 output_dir="$RUN_DIR/sdcli"
 datamove_dir="$output_dir/datamove"
-mkdir -p "$AUTOKIT_DIR" "$datamove_dir" "$tmpdir/real"
+mkdir -p "$AUTOKIT_DIR" "$datamove_dir/control" "$tmpdir/real"
 
 cat > "$datamove_dir/MicrosoftSQLServer_data.sh" <<'SH'
 #!/usr/bin/env bash
@@ -44,6 +44,11 @@ echo "SCRIPT_ARG3=${3:-}"
 bcp tpcc.dbo.customer out data/tpcc.customer.dat -q -c -U$username -P$password -S$servername
 SH
 chmod +x "$datamove_dir/MicrosoftSQLServer_data.sh"
+cat > "$datamove_dir/control/tpcc.customer.ctl" <<'CTL'
+load data
+infile 'data/tpcc.customer.dat'
+into table TPCC.CUSTOMER
+CTL
 
 cat > "$tmpdir/real/bcp" <<'SH'
 #!/usr/bin/env bash
@@ -106,6 +111,6 @@ assert_contains "$run_log" "BCP_ARG:-Usa"
 assert_contains "$run_log" "BCP_ARG:-S10.0.1.165,1433"
 assert_not_contains "$run_log" "SourcePass1"
 assert_not_contains "$run_log" "BCP_ARG:-P"
-assert_contains "$run_log" "BCP command summary: invoked=1 expected=1 failed=0 missing_files=0"
+assert_contains "$run_log" "BCP command summary: invoked=1 expected=1 unique_data_files=1 failed=0 missing_files=0"
 [[ "$(cut -f1 "$AUTOKIT_DIR/bcp_status.tsv")" == "0" ]]
 [[ "$(cut -f4 "$AUTOKIT_DIR/bcp_status.tsv")" == "0" ]]

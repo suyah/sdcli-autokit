@@ -11,7 +11,7 @@ RUN_DIR="$tmpdir/run"
 AUTOKIT_DIR="$RUN_DIR/autokit"
 output_dir="$RUN_DIR/sdcli"
 datamove_dir="$output_dir/datamove"
-mkdir -p "$AUTOKIT_DIR" "$datamove_dir" "$tmpdir/real"
+mkdir -p "$AUTOKIT_DIR" "$datamove_dir/control" "$tmpdir/real"
 
 cat > "$datamove_dir/MicrosoftSQLServer_data.sh" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -21,6 +21,11 @@ bcp demo.dbo.table_one out data/table_one.dat -q -c -U"$2" -P"$3" -S"$1"
 true
 SCRIPT
 chmod +x "$datamove_dir/MicrosoftSQLServer_data.sh"
+cat > "$datamove_dir/control/table_one.ctl" <<'CTL'
+load data
+infile 'data/table_one.dat'
+into table DEMO.TABLE_ONE
+CTL
 
 cat > "$tmpdir/real/bcp" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -61,7 +66,7 @@ set -e
   echo "BCP failure unexpectedly returned success" >&2
   exit 1
 }
-grep -F 'BCP command failed: object=demo.dbo.table_one exit_code=17' "$RUN_LOG_FILE" >/dev/null
+grep -F 'BCP command failed or returned incomplete evidence: object=demo.dbo.table_one exit_code=17' "$RUN_LOG_FILE" >/dev/null
 grep -F 'BCP offload verification failed' "$RUN_LOG_FILE" >/dev/null
 
 echo "offload BCP failure test passed"

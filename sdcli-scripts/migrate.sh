@@ -1381,50 +1381,32 @@ select_init_migration() {
 }
 
 # --- BCP offload helpers -----------------------------------------------------
-strip_outer_quotes() {
-  local value="$1"
-  value="${value%\"}"
-  value="${value#\"}"
-  value="${value%\'}"
-  value="${value#\'}"
-  printf '%s\n' "$value"
-}
+discover_bcp_entry_scripts() {
+  local datamove_dir="$1"
+  local script parent ancestor has_ancestor
 
-extract_bcp_table_names() {
-  local bcp_script="$1"
-  local line i object direction
+  datamove_dir="$(cd "$datamove_dir" && pwd -P)" || return 1
 
-  while IFS= read -r line; do
-    line="${line//$'\r'/}"
-    local words=()
-    read -r -a words <<< "$line"
-    for ((i = 0; i + 1 < ${#words[@]}; i++)); do
-      object="$(strip_outer_quotes "${words[$i]}")"
-      direction="$(to_lower "$(strip_outer_quotes "${words[$((i + 1))]}")")"
-
-      if [[ "$direction" == "out" ]]; then
-        printf '%s\n' "$object"
+  while IFS= read -r script; do
+    parent="$(dirname "$script")"
+    ancestor="$parent"
+    has_ancestor=false
+    while [[ "$ancestor" != "$datamove_dir" ]]; do
+      ancestor="$(dirname "$ancestor")"
+      if [[ -f "$ancestor/MicrosoftSQLServer_data.sh" ]]; then
+        has_ancestor=true
         break
       fi
     done
-  done < "$bcp_script"
-}
-
-extract_bcp_table_names_from_dir() {
-  local datamove_dir="$1"
-  local script
-
-  while IFS= read -r script; do
-    extract_bcp_table_names "$script"
-  done < <(find "$datamove_dir" -type f -name 'MicrosoftSQLServer_data.sh' 2>/dev/null | awk '{ print gsub(/\//, "/") " " $0 }' | LC_ALL=C sort -n -k1,1 -k2,2 | cut -d' ' -f2-)
+    $has_ancestor || printf '%s\n' "$script"
+  done < <(find "$datamove_dir" -type f -name 'MicrosoftSQLServer_data.sh' 2>/dev/null | LC_ALL=C sort)
 }
 
 summarize_bcp_output() {
-  local table_names=("$@")
   local table_idx=0 total_tables=0 total_rows=0 total_elapsed_ms=0
   local rows="" packet_size="" elapsed_ms="" rows_per_sec=""
   local warnings=0 diagnostics=0
-  local line
+  local line current_table=""
 
   emit_bcp_table_summary() {
     [[ -n "$rows$packet_size$elapsed_ms$rows_per_sec" ]] || return 0
@@ -1441,7 +1423,7 @@ summarize_bcp_output() {
 
     local table_label table_name summary
     printf -v table_label '%02d' "$table_idx"
-    table_name="${table_names[$((table_idx - 1))]:-table_$table_label}"
+    table_name="${current_table:-table_$table_label}"
     summary="BCP table $table_label $table_name rows=${rows:-unknown} packet=${packet_size:-unknown} elapsed_ms=${elapsed_ms:-unknown}"
     if [[ -n "$rows_per_sec" ]]; then
       summary+=" rate=$rows_per_sec"
@@ -1460,11 +1442,17 @@ summarize_bcp_output() {
     rows_per_sec=""
     warnings=0
     diagnostics=0
+    current_table=""
   }
 
   log_info "BCP table summary:"
 
   while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "[SDCLI-BCP-OBJECT] "* ]]; then
+      emit_bcp_table_summary
+      current_table="${line#\[SDCLI-BCP-OBJECT\] }"
+      continue
+    fi
     if [[ "$line" =~ ^[[:space:]]*$ ]]; then
       continue
     fi
@@ -2786,11 +2774,9 @@ run_offload() {
 
   local bcp_scripts=() bcp_script
   while IFS= read -r bcp_script; do
-    if [[ -n "$(extract_bcp_table_names "$bcp_script" | head -n 1)" ]]; then
-      bcp_scripts+=("$bcp_script")
-    fi
-  done < <(find "$datamove_dir" -type f -name 'MicrosoftSQLServer_data.sh' 2>/dev/null | sort)
-  [[ ${#bcp_scripts[@]} -gt 0 ]] || fail "Generated BCP command script not found under $datamove_dir"
+    [[ -n "$bcp_script" ]] && bcp_scripts+=("$bcp_script")
+  done < <(discover_bcp_entry_scripts "$datamove_dir")
+  [[ ${#bcp_scripts[@]} -gt 0 ]] || fail "Generated BCP entry script not found under $datamove_dir"
 
   log_info "Running BCP offload script"
   log_info "BCP TLS mode: $bcp_tls_mode"
@@ -2803,11 +2789,10 @@ run_offload() {
   log_info "Source port: $source_port"
   log_info "Source database: $source_db"
 
-  local bcp_tables=() bcp_table
-  while IFS= read -r bcp_table; do
-    bcp_tables+=("$bcp_table")
-  done < <(extract_bcp_table_names_from_dir "$datamove_dir")
-  log_info "BCP tables discovered: ${#bcp_tables[@]}"
+  local expected_bcp_count
+  expected_bcp_count="$(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  (( expected_bcp_count > 0 )) || fail "No SQL*Loader control file found under $datamove_dir"
+  log_info "BCP exports expected from control files: $expected_bcp_count"
 
   local start_ts bcp_status_file bcp_command_count bcp_failed_count bcp_missing_file_count errexit_enabled=false
   start_ts="$(date +%s)"
@@ -2832,7 +2817,7 @@ run_offload() {
       script_rc=$?
       [[ $script_rc -eq 0 ]] || exit "$script_rc"
     done
-  ) 2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | summarize_bcp_output "${bcp_tables[@]}"
+  ) 2>&1 | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | summarize_bcp_output
   rc=${PIPESTATUS[0]}
   $errexit_enabled && set -e
 
@@ -2840,21 +2825,30 @@ run_offload() {
   bcp_failed_count=0
   bcp_missing_file_count=0
   local bcp_exit_code bcp_object bcp_data_file bcp_rows
+  local seen_bcp_data_files
+  seen_bcp_data_files="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_files_XXXXXX")" \
+    || fail "Cannot create temporary BCP evidence file"
   while IFS=$'\t' read -r bcp_exit_code bcp_object bcp_data_file bcp_rows; do
     [[ -n "$bcp_exit_code" ]] || continue
-    if [[ "$bcp_exit_code" != "0" ]]; then
+    if [[ "$bcp_exit_code" != "0" || -z "$bcp_object" || -z "$bcp_data_file" || "$bcp_data_file" == "-" ]]; then
       bcp_failed_count=$((bcp_failed_count + 1))
-      log_error "BCP command failed: object=${bcp_object:-unknown} exit_code=$bcp_exit_code"
-    elif [[ -n "$bcp_data_file" && "$bcp_data_file" != "-" && ! -f "$bcp_data_file" ]]; then
+      log_error "BCP command failed or returned incomplete evidence: object=${bcp_object:-unknown} exit_code=${bcp_exit_code:-unknown}"
+    elif [[ ! -f "$bcp_data_file" ]]; then
       bcp_missing_file_count=$((bcp_missing_file_count + 1))
       log_error "BCP command produced no data file: object=${bcp_object:-unknown} path=$bcp_data_file"
     elif [[ ! "$bcp_rows" =~ ^[0-9]+$ ]]; then
       bcp_failed_count=$((bcp_failed_count + 1))
       log_error "BCP command did not report an exported row count: object=${bcp_object:-unknown}"
+    else
+      printf '%s\n' "$bcp_data_file" >> "$seen_bcp_data_files"
     fi
   done < "$bcp_status_file"
-  log_info "BCP command summary: invoked=$bcp_command_count expected=${#bcp_tables[@]} failed=$bcp_failed_count missing_files=$bcp_missing_file_count status_file=$bcp_status_file"
-  if (( bcp_command_count != ${#bcp_tables[@]} || bcp_failed_count > 0 || bcp_missing_file_count > 0 )); then
+  local unique_bcp_data_file_count
+  unique_bcp_data_file_count="$(LC_ALL=C sort -u "$seen_bcp_data_files" | wc -l | tr -d '[:space:]')"
+  rm -f "$seen_bcp_data_files"
+  log_info "BCP command summary: invoked=$bcp_command_count expected=$expected_bcp_count unique_data_files=$unique_bcp_data_file_count failed=$bcp_failed_count missing_files=$bcp_missing_file_count status_file=$bcp_status_file"
+  if (( bcp_command_count != expected_bcp_count || unique_bcp_data_file_count != bcp_command_count \
+      || bcp_failed_count > 0 || bcp_missing_file_count > 0 )); then
     log_error "BCP offload verification failed"
     rc=1
   fi
@@ -2946,12 +2940,8 @@ verify_datamove_artifacts() {
   }
   while IFS= read -r bcp_script; do
     [[ -n "$bcp_script" ]] || continue
-    if [[ -z "$(extract_bcp_table_names "$bcp_script" | head -n 1)" ]]; then
-      log_error "Datamove postcondition failed: generated BCP script has no supported export command: $bcp_script"
-      return 1
-    fi
     bcp_script_count=$((bcp_script_count + 1))
-  done < <(find "$datamove_dir" -type f -name 'MicrosoftSQLServer_data.sh' 2>/dev/null | LC_ALL=C sort)
+  done < <(discover_bcp_entry_scripts "$datamove_dir")
 
   while IFS= read -r control_file; do
     [[ -n "$control_file" ]] || continue
@@ -2959,7 +2949,7 @@ verify_datamove_artifacts() {
   done < <(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | LC_ALL=C sort)
 
   (( bcp_script_count > 0 )) || {
-    log_error "Datamove postcondition failed: no generated BCP command script was found under $datamove_dir"
+    log_error "Datamove postcondition failed: no generated BCP entry script was found under $datamove_dir"
     return 1
   }
   (( control_file_count > 0 )) || {
@@ -2972,31 +2962,32 @@ verify_offload_evidence() {
   local output_dir="$1"
   local datamove_dir="$output_dir/datamove"
   local status_file="$AUTOKIT_DIR/bcp_status.tsv"
-  local expected_file actual_file path rc=0
+  local path expected_count actual_count unique_data_file_count rc=0
 
   [[ -s "$status_file" ]] || {
     log_error "Offload postcondition failed: BCP status evidence is missing or empty: $status_file"
     return 1
   }
-  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_expected_XXXXXX")" || return 1
-  actual_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_bcp_actual_XXXXXX")" || {
-    rm -f "$expected_file"
-    return 1
-  }
-  extract_bcp_table_names_from_dir "$datamove_dir" | LC_ALL=C sort > "$expected_file"
-  if [[ ! -s "$expected_file" ]]; then
-    log_error "Offload postcondition failed: no expected BCP invocation could be derived from $datamove_dir"
+  expected_count="$(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  actual_count="$(wc -l < "$status_file" | tr -d '[:space:]')"
+  if (( expected_count == 0 )); then
+    log_error "Offload postcondition failed: no SQL*Loader control file was found under $datamove_dir"
     rc=1
   elif ! LC_ALL=C awk -F '\t' '
     NF != 4 || $1 != "0" || $2 == "" || $3 == "" || $3 == "-" || $4 !~ /^[0-9]+$/ { invalid=1; next }
-    { print $2 }
     END { if (invalid) exit 1 }
-  ' "$status_file" | LC_ALL=C sort > "$actual_file"; then
+  ' "$status_file"; then
     log_error "Offload postcondition failed: BCP status evidence is malformed or contains a failed invocation"
     rc=1
-  elif ! cmp -s "$expected_file" "$actual_file"; then
-    log_error "Offload postcondition failed: BCP status records do not match the expected invocations"
+  elif (( actual_count != expected_count )); then
+    log_error "Offload postcondition failed: BCP status count $actual_count does not match control-file count $expected_count"
     rc=1
+  else
+    unique_data_file_count="$(cut -f3 "$status_file" | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
+    if (( unique_data_file_count != actual_count )); then
+      log_error "Offload postcondition failed: BCP status contains duplicate data-file records"
+      rc=1
+    fi
   fi
 
   if (( rc == 0 )); then
@@ -3007,7 +2998,6 @@ verify_offload_evidence() {
       }
     done < "$status_file"
   fi
-  rm -f "$expected_file" "$actual_file"
   return "$rc"
 }
 

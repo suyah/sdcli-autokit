@@ -134,11 +134,21 @@ Before a fresh deploy, fail if target tables from the deployment inventory alrea
 
 ### 7.1 Offload and load coverage
 
-Discover all generated `MicrosoftSQLServer_data.sh` and `oracle_loader.sh` scripts in stable sorted order. Reject duplicate script paths and run all of them.
+Discover generated `MicrosoftSQLServer_data.sh` and `oracle_loader.sh` scripts
+in stable sorted order. Run each root BCP script tree once and each independent
+loader script once; do not execute nested BCP scripts again after their parent
+entry script already invoked them.
 
-Before offload, extract the expected source objects and expected data files from the generated scripts. Before load, extract target objects from the SQL\*Loader control files. Each expected table must produce exactly one status record.
+Do not tokenize or interpret the generated shell command text. Execute only the
+root entry script in each generated BCP script tree; nested scripts are reached
+through that generated entry point and are not executed a second time. The BCP
+wrapper records the actual source object or query and resolved output path from
+its argv. The number of unique successful BCP data-file records must equal the
+number of generated SQL\*Loader control files. Load and reconciliation then
+join the independently observed BCP and SQL\*Loader records by absolute data
+path.
 
-The BCP wrapper parses the standard “rows copied” result and writes it with the source object and output file. SQL\*Loader log parsing records loaded, rejected, discarded, and skipped counts with the target table. Zero-row tables are valid when both sides report zero and the expected output/control files exist.
+The BCP wrapper parses the standard “rows copied” result and writes it with the source object or query and output file. SQL\*Loader log parsing records loaded, rejected, discarded, and skipped counts with the target table. Zero-row tables are valid when both sides report zero and the expected output/control files exist.
 
 ### 7.2 Source consistency checkpoint
 
