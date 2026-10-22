@@ -5,6 +5,8 @@ into the customer offline bundle.
 
 ## Unreleased
 
+## 1.2.1 - 2026-10-22
+
 ### Fixed
 
 - Corrected SQL Developer 26.2 parenthesized model-list parsing and pinned full
