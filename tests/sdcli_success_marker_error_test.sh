@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATE_SH_SOURCE_ONLY=true source "$REPO_ROOT/sdcli-scripts/migrate.sh"
 
 tmpdir="$(mktemp -d)"
+SDCLI_PROFILE_DIR="$tmpdir/profile"
 trap 'rm -rf "$tmpdir"' EXIT
 mkdir -p "$tmpdir/bin"
 
@@ -17,6 +18,7 @@ case "${FAKE_SDCLI_CASE:?}" in
     ;;
   benign_plus_other_ora)
     printf '%s\n' 'Error starting at line : 1 in command -'
+    printf '%s\n' 'Error report -'
     printf '%s\n' "ORA-01920: user name 'MIGREP' conflicts with another user or role name"
     printf '%s\n' 'ORA-01017: invalid credential or not authorized'
     printf '%s\n' 'init completed successfully'

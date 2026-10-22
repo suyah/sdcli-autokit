@@ -83,6 +83,9 @@ sdcli-scripts/**/*.pyc
 !tests/migrate_preferences_test.sh
 !tests/per_migration_repository_context_test.sh
 !tests/per_migration_repository_init_test.sh
+!tests/project_profile_test.sh
+!docs/superpowers/specs/2026-10-22-project-profile-isolation-design.md
+!docs/superpowers/plans/2026-10-22-project-profile-isolation.md
 !tests/fixtures/
 !tests/fixtures/validation/
 !tests/fixtures/validation/**

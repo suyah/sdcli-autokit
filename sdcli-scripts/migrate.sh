@@ -52,6 +52,8 @@ declare -a SENSITIVE_VALUES=()
 declare -a DATATYPE_MAPPING_TEMP_DIRS=()
 declare -a SQLPLUS_RUNTIME_TEMP_DIRS=()
 
+source "$SCRIPT_DIR/lib/sdcli_profile.sh"
+
 # --- CLI and logging helpers -------------------------------------------------
 usage() {
   cat <<'USAGE'
@@ -180,6 +182,7 @@ on_exit() {
   cleanup_sqlplus_runtime_temp_dirs || true
   cleanup_datatype_mapping_temp_dirs || true
   release_repository_lock || true
+  release_profile_lock || true
 
   if [[ $rc -ne 0 ]]; then
     status="failed($rc)"
@@ -281,6 +284,18 @@ get_optional_value() {
 configure_oracle_wallet_dir() {
   local wallet_dir="$1"
   local wallet_config_path="$2"
+  local option_variable normalized
+  for option_variable in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS; do
+    normalized="$(normalize_oracle_java_options "${!option_variable:-}")"
+    if [[ -n "$normalized" ]]; then
+      printf -v "$option_variable" '%s' "$normalized"
+      export "$option_variable"
+    else
+      unset "$option_variable"
+    fi
+  done
+  unset TNS_ADMIN
+  ORACLE_WALLET_DIR=""
   [[ -n "$wallet_dir" ]] || return 0
 
   [[ "$wallet_dir" == /* ]] || fail "$wallet_config_path must be an absolute path"
@@ -312,7 +327,8 @@ configure_sqldeveloper_file_output_option() {
   local -a existing_files=() preference_dirs=()
 
   [[ "$output_option" =~ ^[0-9]+$ ]] || fail "SQLDEVELOPER_FILE_OUTPUT_OPTION must be a non-negative integer"
-  prefs_root="${HOME}/.sqldeveloper"
+  [[ -n "$SDCLI_PROFILE_DIR" ]] || fail 'No SQL Developer project profile selected for preferences'
+  prefs_root="$SDCLI_PROFILE_DIR"
   [[ -d "$prefs_root" ]] || return 0
 
   template_file="$SCRIPT_DIR/templates/product-preferences.xml"
@@ -322,7 +338,7 @@ configure_sqldeveloper_file_output_option() {
     [[ -n "$candidate" ]] || continue
     existing_files+=("$candidate")
     existing_count=$((existing_count + 1))
-  done < <(find "$prefs_root" -type f -path '*/o.sqldeveloper/product-preferences.xml' | LC_ALL=C sort)
+  done < <(find -H "$prefs_root" -type f -path '*/o.sqldeveloper/product-preferences.xml' | LC_ALL=C sort)
 
   if (( existing_count == 1 )); then
     preference_file="${existing_files[0]}"
@@ -334,7 +350,7 @@ configure_sqldeveloper_file_output_option() {
       [[ -n "$candidate" ]] || continue
       preference_dirs+=("$candidate")
       directory_count=$((directory_count + 1))
-    done < <(find "$prefs_root" -type d -path '*/o.sqldeveloper' | LC_ALL=C sort)
+    done < <(find -H "$prefs_root" -type d -path '*/o.sqldeveloper' | LC_ALL=C sort)
 
     if (( directory_count == 0 )); then
       log_warn "SQL Developer preference directory not found under $prefs_root; run sdcli once, then retry"
@@ -368,7 +384,13 @@ configure_sqldeveloper_file_output_option() {
 
   if ! grep -F '<!-- sdcli-autokit FileOutputOption v1 begin -->' "$preference_file" >/dev/null 2>&1 \
       || ! grep -F '<!-- sdcli-autokit FileOutputOption v1 end -->' "$preference_file" >/dev/null 2>&1; then
-    log_warn "SQL Developer preferences are not managed by sdcli-autokit; left unchanged: $preference_file (set FileOutputOption manually, or back up and remove the file before rerunning)"
+    if [[ -f "$prefs_root/.autokit-profile" ]]; then
+      # SDCLI strips template comments when it saves its own metadata. The
+      # profile lifecycle establishes ownership; never rewrite that saved XML.
+      log_info "Retained SQL Developer-saved project preferences: $preference_file"
+      return 0
+    fi
+    log_warn "SQL Developer preferences are not managed by sdcli-autokit; left unchanged: $preference_file (inspect FileOutputOption manually; retain saved encryption metadata)"
     return 0
   fi
 
@@ -766,7 +788,7 @@ sdcli_has_only_benign_diagnostics() {
   ! grep -Eqi '^[[:space:]]*fatal[[:space:]:]' "$output_file" || return 1
 
   unexpected="$(grep -Ei '^[[:space:]]*error([[:space:]:]|$)' "$output_file" \
-    | grep -Eiv '^[[:space:]]*Error starting at line([[:space:]:]|$)' || true)"
+    | grep -Eiv '^[[:space:]]*Error starting at line([[:space:]:]|$)|^[[:space:]]*Error report[[:space:]]*-[[:space:]]*$' || true)"
   [[ -z "$unexpected" ]] || return 1
 
   unexpected="$(grep -Eo 'ORA-[0-9]{5}:' "$output_file" | grep -Ev '^ORA-01920:$' || true)"
@@ -785,8 +807,9 @@ sdcli_output_has_diagnostics() {
 
 run_sdcli() {
   local cmd=("$@")
-  local printable output_file rc arg action="" is_convert=false completed_successfully=false timeout_seconds errexit_enabled=false
+  local printable output_file rc arg action="" is_convert=false is_help=false completed_successfully=false timeout_seconds errexit_enabled=false
   for arg in "${cmd[@]}"; do
+    [[ "$arg" == -help=* || "$arg" == -h=* ]] && is_help=true
     if [[ "$arg" == -actions=* ]]; then
       action="${arg#-actions=}"
       [[ "$action" == "convert" ]] && is_convert=true
@@ -794,6 +817,7 @@ run_sdcli() {
   done
   SDCLI_LAST_ACTION="$action"
   SDCLI_LAST_SUCCESS_MARKER=false
+  [[ -n "$SDCLI_PROFILE_DIR" ]] || { log_error 'No SQL Developer project profile selected'; return 1; }
   register_environment_secrets
   printable="$(mask_sensitive "${cmd[@]}")"
 
@@ -818,9 +842,9 @@ run_sdcli() {
   [[ "$-" == *e* ]] && errexit_enabled=true
   set +e
   if (( timeout_seconds > 0 )) && command -v timeout >/dev/null 2>&1; then
-    timeout "$timeout_seconds" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
+    timeout "$timeout_seconds" env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
   else
-    "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
+    env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
   fi
   rc=${PIPESTATUS[0]}
 
@@ -839,7 +863,7 @@ run_sdcli() {
       rc=1
     fi
   fi
-  if (( rc == 0 )) && [[ -z "$action" || "$completed_successfully" != "true" ]]; then
+  if (( rc == 0 )) && ! $is_help && [[ -z "$action" || "$completed_successfully" != "true" ]]; then
     log_error "SDCLI did not report the exact completion marker for action '${action:-unknown}'"
     rc=1
   fi
@@ -950,11 +974,11 @@ repository_lock_key() {
 }
 
 acquire_repository_lock() {
-  local repo_name repo_conn lock_key lock_root owner_file owner=""
+  local repo_user repo_conn lock_key lock_root owner_file owner=""
   require_active_repository_identity
-  repo_name="$ACTIVE_REPOSITORY_NAME"
+  repo_user="$(get_required_value '.migration_repository.repo_user.user' 'migration_repository.repo_user.user')"
   repo_conn="$ACTIVE_REPOSITORY_CONN"
-  lock_key="$(repository_lock_key "${repo_name}|${repo_conn}")"
+  lock_key="$(repository_lock_key "${repo_user}|${repo_conn}")"
   lock_root="$PROJECT_ROOT/.locks"
   REPOSITORY_LOCK_DIR="$lock_root/repository_${lock_key}.lock"
   owner_file="$REPOSITORY_LOCK_DIR/owner"
@@ -1260,6 +1284,33 @@ SQL
   cleanup_datatype_mapping_temp_dirs
 }
 
+verify_initialized_repository() {
+  if $DRY_RUN; then
+    log_info '[DRY-RUN] verify repository install revision and reopen saved connection'
+    return 0
+  fi
+  local query_file="$AUTOKIT_DIR/repository_init_check.sql"
+  local raw_file="$AUTOKIT_DIR/repository_init_check.out"
+  # SDCLI 26.2's existence check only probes MD_CONNECTIONS. A cancelled
+  # install can have that table without the revision written at install end.
+  cat > "$query_file" <<'SQL'
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 TRIMSPOOL ON DEFINE OFF
+SELECT 'SDCLI_REPOSITORY_READY' || CHR(9) || MAX(REVISION)
+FROM MD_REPOVERSIONS
+HAVING COUNT(*) > 0;
+EXIT
+SQL
+  run_repository_sql_capture "$query_file" "$raw_file" \
+    || fail "Cannot verify repository installation; inspect $raw_file before retrying init"
+  awk -F '\t' '$1 == "SDCLI_REPOSITORY_READY" && $2 ~ /^[0-9]+[[:space:]]*$/ { found++ } END { exit found != 1 }' "$raw_file" \
+    || fail "Repository installation is incomplete; ask the DBA to complete or repair it before retrying init. Evidence: $raw_file"
+  # A new process must decrypt the saved password and open this repository.
+  run_sdcli sdcli migration -actions=lscaptured \
+    || fail 'Repository saved connection could not be reopened; project profile remains pending'
+}
+
 setup_repository() {
   require_active_repository_context
 
@@ -1286,8 +1337,11 @@ setup_repository() {
   init_conn_details="${super_name}:oracle:${super_user}/${super_password}@${repo_conn},${repo_name}:mkrepouser:${repo_user}/${repo_password}:${super_name}"
 
   log_info "Initializing repository '${repo_label}' for migration '${ACTIVE_MIGRATION_NAME}' via connection '${repo_name}'"
-  run_sdcli sdcli migration -actions=init -connDetails="$init_conn_details" \
+  # Unlike other migration actions, init supports -conn. Select it explicitly:
+  # the vendor's implicit detection otherwise depends on a "mig" alias prefix.
+  run_sdcli sdcli migration -actions=init -conn="$repo_name" -connDetails="$init_conn_details" \
     || fail "Repository initialization failed; verify the Oracle connection and repository user details"
+  verify_initialized_repository
 }
 
 get_migration_index() {
@@ -2835,7 +2889,7 @@ sdcli_model_exists() {
   saved_action="$SDCLI_LAST_ACTION"
   saved_marker="$SDCLI_LAST_SUCCESS_MARKER"
   SDCLI_CAPTURE_OUTPUT_FILE="$output_file"
-  if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action" "-repository=$ACTIVE_REPOSITORY_NAME"; then
+  if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action"; then
     rc=1
   elif ! LC_ALL=C awk -v expected="$expected_model" '
     {
@@ -3177,15 +3231,15 @@ run_phase() {
       parsed_source="$(parse_source_conn "$source_conn")"
       IFS='|' read -r source_host source_port source_database <<< "$parsed_source"
       check_source_tcp_connectivity "$source_host" "$source_port"
-      run_sdcli sdcli migration -actions=capture -conn="$src_conn_name" -dblist="$source_database" -repository="$repo_name" -model="$model_name" -project="$project_name" -append -output="$output_dir" \
+      run_sdcli sdcli migration -actions=capture -conn="$src_conn_name" -dblist="$source_database" -model="$model_name" -project="$project_name" -append -output="$output_dir" \
         || fail "Capture failed for migration '$project_name'"
       ;;
     convert)
-      run_sdcli sdcli migration -actions=convert -repository="$repo_name" -model="$model_name" -output="$output_dir" \
+      run_sdcli sdcli migration -actions=convert -model="$model_name" -output="$output_dir" \
         || fail "Convert failed for migration '$project_name'"
       ;;
     generate)
-      run_sdcli sdcli migration -actions=generate -repository="$repo_name" -model="$model_name" -dest="$target_name" -output="$output_dir" \
+      run_sdcli sdcli migration -actions=generate -model="$model_name" -dest="$target_name" -output="$output_dir" \
         || fail "Generate failed for migration '$project_name'"
       ;;
     deploy)
@@ -3195,7 +3249,7 @@ run_phase() {
       run_cleanup "$idx" "$output_dir" || fail "Cleanup failed for migration '$project_name'"
       ;;
     datamove)
-      run_sdcli sdcli migration -actions=datamove -repository="$repo_name" -model="$model_name" -output="$output_dir" \
+      run_sdcli sdcli migration -actions=datamove -model="$model_name" -output="$output_dir" \
         || fail "Datamove failed for migration '$project_name'"
       ;;
     offload)
@@ -3312,7 +3366,7 @@ run_single_migration() {
   case "$MODE" in
     conn-setup)
       run_connection_setup "$idx" "$source_conn_name" "$source_conn" "$target_name"
-      log_info "SDCLI connection definitions saved; this command does not authenticate source or target database credentials."
+      log_info "SDCLI connections saved in the project profile; Oracle connection creation also tests its login."
       record_migration_completion "$migration_name" "connection_setup_completed" "" "$output_dir" "$start_ts" "Connection definitions saved: $migration_name"
       ;;
     phase)
@@ -3557,17 +3611,15 @@ main() {
   fi
 
   configure_active_oracle_wallet
-  configure_sqldeveloper_file_output_option
   log_info "Config validation passed"
   log_info "Load tuning source: config.yaml defaults.load_preferences with per-migration overrides in migrations[].load_preferences"
 
-  if mode_needs_repository_lock; then
-    acquire_repository_lock
-  fi
-
   if ! $DRY_RUN; then
-    require_command sdcli
+    if mode_uses_sdcli; then require_command sdcli; fi
     case "$MODE" in
+      init)
+        require_command sqlplus
+        ;;
       full|migrate)
         require_command sqlplus
         require_command sqlcmd
@@ -3585,8 +3637,21 @@ main() {
     esac
   fi
 
+  if mode_uses_sdcli; then
+    prepare_project_profile
+    if [[ "$MODE" == init ]]; then
+      initialize_project_preferences
+    elif ! $DRY_RUN; then
+      configure_sqldeveloper_file_output_option
+    fi
+  fi
+  if mode_needs_repository_lock; then
+    acquire_repository_lock
+  fi
+
   if [[ "$MODE" == "init" ]]; then
     setup_repository
+    mark_project_profile_ready
     log_info "Repository initialization completed."
     return 0
   fi

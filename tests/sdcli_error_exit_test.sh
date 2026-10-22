@@ -5,12 +5,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATE_SH_SOURCE_ONLY=true source "$REPO_ROOT/sdcli-scripts/migrate.sh"
 
 tmpdir="$(mktemp -d)"
+SDCLI_PROFILE_DIR="$tmpdir/profile"
 trap 'rm -rf "$tmpdir"' EXIT
 mkdir -p "$tmpdir/bin"
 
 cat > "$tmpdir/bin/sdcli" <<'SCRIPT'
 #!/usr/bin/env bash
 case "${FAKE_SDCLI_CASE:?}" in
+  help)
+    printf '%s\n' 'INIT: diagnostic usage'
+    ;;
   fatal)
     printf '%s\n' 'Fatal: cannot create the requested connection'
     ;;
@@ -49,5 +53,8 @@ assert_fails fatal mkconn
 grep -F 'Fatal: cannot create the requested connection' "$RUN_LOG_FILE" >/dev/null
 assert_fails bare_ora mkconn
 assert_fails missing_marker driver
+
+export FAKE_SDCLI_CASE=help
+run_sdcli sdcli migration -help=init >/dev/null || { echo 'bootstrap help was rejected' >&2; exit 1; }
 
 echo "sdcli error exit test passed"

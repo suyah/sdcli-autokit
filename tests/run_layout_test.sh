@@ -16,6 +16,7 @@ assert_eq() {
 }
 
 tmpdir="$(mktemp -d)"
+SDCLI_PROFILE_DIR="$tmpdir/profile"
 trap 'rm -rf "$tmpdir"' EXIT
 
 RUN_ID="20260427_001939"

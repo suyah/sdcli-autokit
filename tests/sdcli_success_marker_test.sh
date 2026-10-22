@@ -5,12 +5,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATE_SH_SOURCE_ONLY=true source "$REPO_ROOT/sdcli-scripts/migrate.sh"
 
 tmpdir="$(mktemp -d)"
+SDCLI_PROFILE_DIR="$tmpdir/profile"
 trap 'rm -rf "$tmpdir"' EXIT
 mkdir -p "$tmpdir/bin"
 
 cat > "$tmpdir/bin/sdcli" <<'SCRIPT'
 #!/usr/bin/env bash
 printf '%s\n' 'Error starting at line : 1 in command -'
+printf '%s\n' 'Error report -'
 printf '%s\n' "ORA-01920: user name 'MIGREP' conflicts with another user or role name"
 printf '%s\n' 'init completed successfully'
 exit 0
