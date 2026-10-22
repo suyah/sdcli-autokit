@@ -240,9 +240,7 @@ grep -Fx -- "$SDCLI_PROFILE_DIR" "$SDCLI_ARGS_FILE" >/dev/null \
 FAKE_MODEL_LIST_STYLE=legacy
 export FAKE_MODEL_LIST_STYLE
 set_sdcli_postcondition_state capture
-verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
-[[ "$SDCLI_VERIFIED_MODEL_INDEX" == "4" ]] \
-  || fail_test "legacy model lookup did not return the numeric index"
+expect_model_lookup_failure "unsupported legacy model-list format" verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
 FAKE_MODEL_LIST_STYLE=malformed
 export FAKE_MODEL_LIST_STYLE
 set_sdcli_postcondition_state capture
