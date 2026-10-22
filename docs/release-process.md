@@ -11,9 +11,24 @@ Use `MAJOR.MINOR.PATCH`:
 - `MINOR`: backward-compatible migration capability or workflow additions.
 - `MAJOR`: a breaking configuration, runtime, or supported-pair change.
 
-The next release after `1.0.0` is `1.1.0`, because it adds validation,
-reliability, and persistent-state capabilities without breaking the existing
-offline installation interface.
+Choose the version after reviewing all entries under `Unreleased`; do not
+choose it from a single feature PR in isolation.
+
+## Changelog gate
+
+The changelog is maintained in two deliberate steps:
+
+1. A behaviour-changing feature or fix PR adds a concise entry beneath
+   `## Unreleased`. Pure test, formatting, or internal refactoring PRs do not
+   need an entry.
+2. When preparing a release, make a small release-notes PR. It moves the
+   accumulated entries to `## <version> - <YYYY-MM-DD>` and leaves
+   `## Unreleased` empty. Merge that PR to `main` before any image build or
+   bundle command.
+
+`release/preflight.sh` enforces this: it requires both the selected version
+heading and an empty `Unreleased` section. It never edits the changelog. This
+keeps the Git commit used to build the image unambiguous.
 
 ## Information the release owner confirms
 
@@ -57,10 +72,10 @@ responsibilities:
 | `./release/release.sh 1.1.0 --rebuild` | Online rebuild, provenance inspection, then package. |
 | `./release/release.sh 1.1.0 --verify --rebuild` | Full release-candidate workflow: test, online build, provenance inspection, and offline bundle. |
 
-For a real 1.1.0 release candidate, use:
+For a real `<version>` release candidate, use:
 
 ```bash
-./release/release.sh 1.1.0 --verify --rebuild
+./release/release.sh <version> --verify --rebuild
 ```
 
 The default package-only command requires local image
@@ -85,8 +100,9 @@ same validated existing image. `RELEASE_SKIP_TESTS=true` exists only for the
 automated test fixture and must not be used for a real release.
 
 Preflight checks the version format, a clean tracked Git worktree, an exact
-changelog entry, and absence of the target tarball and checksum. It does not
-modify source files, create a tag, build an image, or upload anything.
+versioned changelog entry, an empty `Unreleased` section, and absence of the
+target tarball and checksum. It does not modify source files, create a tag,
+build an image, or upload anything.
 
 The build creates:
 
