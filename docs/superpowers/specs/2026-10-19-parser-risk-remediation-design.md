@@ -215,20 +215,41 @@ SQL*Loader script selection is also structural: the autokit executes each leaf
 active. It does not grep generated shell for the word `sqlldr`. Structured
 wrapper status must cover every generated control file exactly once.
 
-### P2 — Preferences and maintainability
+### P2 — Preferences and maintainability (completed)
 
-`configure_sqldeveloper_file_output_option` edits arbitrary XML with AWK and
-assumes formatting and attribute order. Replace this with an autokit-owned
-preferences template installed when no SQL Developer preference file exists.
-For an existing unknown file, either verify its known structure before a
-minimal update or stop with an actionable message; do not perform a broad XML
-rewrite.
+`configure_sqldeveloper_file_output_option` now installs an autokit-owned
+preferences template when no preference file exists. It updates only the
+single value inside an autokit-owned begin/end block. SQL Developer-saved
+project preferences, unknown layouts, and ambiguous multiple-version layouts
+are left unchanged with an actionable message; arbitrary XML is not rewritten.
 
 The project remains Bash-first for orchestration. A full Python rewrite is not
 part of this remediation. Python remains the report renderer and pure evidence
 model only; it must not connect to databases or parse generated SQL semantics.
 As focused Bash components stabilize, move them into small files under
 `sdcli-scripts/lib/` rather than extending `migrate.sh` indefinitely.
+
+## Follow-up parser audit — 2026-10-22
+
+The supported runtime remains SQL Developer 26.2 only. The follow-up review
+classified the remaining text handling by whether it can silently determine a
+migration outcome:
+
+| Area | Result |
+| --- | --- |
+| SDCLI model list | Exact 26.2 parenthesized format, unique exact name, numeric index pinned; unsupported formats fail. |
+| Generated BCP shell | No command-text parsing; wrapper argv and control-file coverage are authoritative. |
+| Generated loader shell | No command grep; structural leaf discovery and wrapper status are authoritative. |
+| SQL*Plus master, role, and password files | Narrow documented grammars with rejection of unsupported active records. |
+| SQL*Loader control files | Exactly one supported `INFILE` and `INTO TABLE`; ambiguity fails. |
+| BCP and SQL*Loader statistics | Fixed vendor summary/log patterns; a missing numeric result makes structured evidence invalid and fails the phase. |
+| SDCLI diagnostics and console summaries | Supplemental only; exit codes, exact completion markers, and phase artifacts remain required. |
+| Validation and deployment TSV | Autokit-owned schemas with strict field and status validation. |
+| SQL Developer preferences XML | Autokit-owned template/block only; unknown or ambiguous files are not modified. |
+
+No remaining parser was found that attempts to infer generated Oracle DDL,
+datatype semantics, or arbitrary shell semantics. Adding such a fallback is
+out of scope; a new vendor format must be supported explicitly with a fixture.
 
 ## Generic behavior requirements
 
