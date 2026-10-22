@@ -12,6 +12,8 @@ into the customer offline bundle.
   mutable `latest` selection.
 - Replaced generated BCP shell-token parsing with wrapper-owned structured
   execution evidence and control-file coverage checks.
+- Replaced generated SQL*Loader command grep with structural leaf-script
+  discovery and exact control-file status coverage.
 
 ## 1.2.0 - 2026-10-22
 

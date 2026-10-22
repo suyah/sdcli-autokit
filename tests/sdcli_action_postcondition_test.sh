@@ -109,6 +109,10 @@ cat > "$datamove_dir/MicrosoftSQLServer_data.sh" <<'SH'
 #!/usr/bin/env bash
 bcp demo.dbo.orders out data/orders.dat -q -c -U"$2" -P"$3" -S"$1"
 SH
+cat > "$datamove_dir/oracle_loader.sh" <<'SH'
+#!/usr/bin/env bash
+sqlldr userid="$2/$3@$1" control=control/orders.ctl
+SH
 cat > "$datamove_dir/control/orders.ctl" <<'CTL'
 load data
 infile '../data/orders.dat'
@@ -199,6 +203,9 @@ mv "$schema_dir/master.sql.missing" "$schema_dir/master.sql"
 mv "$control_file" "$control_file.missing"
 expect_failure "datamove control file" verify_phase_postcondition datamove latest "$project_name" "$output_dir"
 mv "$control_file.missing" "$control_file"
+mv "$datamove_dir/oracle_loader.sh" "$datamove_dir/oracle_loader.sh.missing"
+expect_failure "datamove loader script" verify_phase_postcondition datamove latest "$project_name" "$output_dir"
+mv "$datamove_dir/oracle_loader.sh.missing" "$datamove_dir/oracle_loader.sh"
 
 mv "$AUTOKIT_DIR/bcp_status.tsv" "$AUTOKIT_DIR/bcp_status.tsv.missing"
 expect_failure "offload status" verify_phase_postcondition offload latest "$project_name" "$output_dir"
