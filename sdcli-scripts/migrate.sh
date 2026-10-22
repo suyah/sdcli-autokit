@@ -788,7 +788,7 @@ sdcli_has_only_benign_diagnostics() {
   ! grep -Eqi '^[[:space:]]*fatal[[:space:]:]' "$output_file" || return 1
 
   unexpected="$(grep -Ei '^[[:space:]]*error([[:space:]:]|$)' "$output_file" \
-    | grep -Eiv '^[[:space:]]*Error starting at line([[:space:]:]|$)' || true)"
+    | grep -Eiv '^[[:space:]]*Error starting at line([[:space:]:]|$)|^[[:space:]]*Error report[[:space:]]*-[[:space:]]*$' || true)"
   [[ -z "$unexpected" ]] || return 1
 
   unexpected="$(grep -Eo 'ORA-[0-9]{5}:' "$output_file" | grep -Ev '^ORA-01920:$' || true)"

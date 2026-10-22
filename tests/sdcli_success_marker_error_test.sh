@@ -18,6 +18,7 @@ case "${FAKE_SDCLI_CASE:?}" in
     ;;
   benign_plus_other_ora)
     printf '%s\n' 'Error starting at line : 1 in command -'
+    printf '%s\n' 'Error report -'
     printf '%s\n' "ORA-01920: user name 'MIGREP' conflicts with another user or role name"
     printf '%s\n' 'ORA-01017: invalid credential or not authorized'
     printf '%s\n' 'init completed successfully'

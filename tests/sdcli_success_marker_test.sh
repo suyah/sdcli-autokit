@@ -12,6 +12,7 @@ mkdir -p "$tmpdir/bin"
 cat > "$tmpdir/bin/sdcli" <<'SCRIPT'
 #!/usr/bin/env bash
 printf '%s\n' 'Error starting at line : 1 in command -'
+printf '%s\n' 'Error report -'
 printf '%s\n' "ORA-01920: user name 'MIGREP' conflicts with another user or role name"
 printf '%s\n' 'init completed successfully'
 exit 0
