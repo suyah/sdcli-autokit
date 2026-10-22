@@ -70,12 +70,19 @@ SH
 chmod +x "$fakebin/docker"
 
 source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+release_changelog="$tmpdir/CHANGELOG.md"
+printf '%s\n' \
+  '# Engineering change log' '' \
+  '## Unreleased' '' \
+  '## 1.1.0 - 2026-10-21' '' \
+  '### Fixed' '- Docker image inspection test fixture.' > "$release_changelog"
 output="$(
   PATH="$fakebin:$PATH" \
   CONTAINER_ENGINE=docker \
   DOCKER_TEST_SOURCE_COMMIT="$source_commit" \
   DIST_DIR="$tmpdir/dist" \
   RELEASE_ALLOW_DIRTY=true \
+  RELEASE_CHANGELOG_FILE="$release_changelog" \
   RELEASE_SKIP_TESTS=true \
   "$REPO_ROOT/release/release.sh" 1.1.0 --rebuild
 )"

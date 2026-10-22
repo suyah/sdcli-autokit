@@ -20,6 +20,19 @@ expect_failure() {
   [[ $rc -ne 0 ]] || fail_test "Expected missing $label evidence to fail"
 }
 
+expect_model_lookup_failure() {
+  local label="$1"
+  shift
+  local rc
+  set +e
+  "$@" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || fail_test "Expected $label to fail"
+  [[ -z "$SDCLI_VERIFIED_MODEL_INDEX" ]] \
+    || fail_test "$label retained a stale model index"
+}
+
 tmpdir="$(mktemp -d)"
 SDCLI_PROFILE_DIR="$tmpdir/profile"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -45,6 +58,7 @@ touch "$RUN_LOG_FILE" "$SDCLI_COMMAND_LOG"
 DRY_RUN=false
 ACTIVE_REPOSITORY_NAME='migration_repo_demo'
 ACTIVE_REPOSITORY_CONN='tcps://demo.example:1522/demo_high'
+export FAKE_MODEL_LIST_FIXTURE="$REPO_ROOT/tests/fixtures/sdcli/model-list-26.2.txt"
 
 cat > "$tmpdir/bin/sdcli" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -54,16 +68,19 @@ for arg in "$@"; do
   [[ "$arg" == -actions=* ]] && action="${arg#-actions=}"
 done
 if [[ "${FAKE_MODEL_LOOKUP_HAS_MODEL:-false}" == "true" ]]; then
-  case "${FAKE_MODEL_LIST_STYLE:-parenthesized}" in
-    parenthesized)
-      # SQL Developer 26.2 formats the numeric model index as "(1)".
-      printf '(1) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+  case "${FAKE_MODEL_LIST_STYLE:-fixture}" in
+    fixture)
+      cat "${FAKE_MODEL_LIST_FIXTURE:?}"
       ;;
     legacy)
-      printf '1) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+      printf '4) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
       ;;
     malformed)
       printf '(1 --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+      ;;
+    duplicate)
+      printf '(2) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+      printf '(3) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
       ;;
     *)
       printf 'Unsupported fake model-list style: %s\n' "$FAKE_MODEL_LIST_STYLE" >&2
@@ -203,20 +220,30 @@ mv "$AUTOKIT_DIR/validation_checks.tsv.missing" "$AUTOKIT_DIR/validation_checks.
 
 set_sdcli_postcondition_state capture
 verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+[[ "$SDCLI_VERIFIED_MODEL_INDEX" == "2" ]] \
+  || fail_test "capture model lookup did not return the fixture index"
 grep -Fx -- "$SDCLI_PROFILE_DIR" "$SDCLI_ARGS_FILE" >/dev/null \
   || fail_test "capture model lookup did not use the selected profile"
 set_sdcli_postcondition_state convert
 verify_phase_postcondition convert latest "$project_name" "$output_dir"
+[[ "$SDCLI_VERIFIED_MODEL_INDEX" == "2" ]] \
+  || fail_test "converted model lookup did not return the fixture index"
 grep -Fx -- "$SDCLI_PROFILE_DIR" "$SDCLI_ARGS_FILE" >/dev/null \
   || fail_test "converted model lookup did not use the selected profile"
 FAKE_MODEL_LIST_STYLE=legacy
 export FAKE_MODEL_LIST_STYLE
 set_sdcli_postcondition_state capture
 verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+[[ "$SDCLI_VERIFIED_MODEL_INDEX" == "4" ]] \
+  || fail_test "legacy model lookup did not return the numeric index"
 FAKE_MODEL_LIST_STYLE=malformed
 export FAKE_MODEL_LIST_STYLE
 set_sdcli_postcondition_state capture
-expect_failure "malformed model index" verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+expect_model_lookup_failure "malformed model index" verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+FAKE_MODEL_LIST_STYLE=duplicate
+export FAKE_MODEL_LIST_STYLE
+set_sdcli_postcondition_state capture
+expect_model_lookup_failure "duplicate model name" verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
 unset FAKE_MODEL_LIST_STYLE
 for phase in generate datamove offload deploy load postdeploy validate cleanup; do
   verify_phase_postcondition "$phase" latest "$project_name" "$output_dir"
