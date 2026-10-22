@@ -673,10 +673,12 @@ creates self-contained HTML and plain-text comparison reports.
 
 Each SDCLI workflow locks its project profile. Repository work also creates
 an atomic lock under `<project_root>/.locks`, keyed by configured endpoint and
-repository user (not connection alias), so another project using that same
-repository cannot change `latest` concurrently. Different profiles with
-different repositories can run in parallel. A stale lock is not removed
-automatically; inspect the owner before removing the reported lock directory.
+repository user (not connection alias). A full workflow resolves the unique
+numeric captured and converted model indexes and passes those exact indexes to
+later phases; it does not depend on mutable `latest` selection. Different
+profiles with different repositories can run in parallel. A stale lock is not
+removed automatically; inspect the owner before removing the reported lock
+directory.
 
 ## Run a single phase
 
@@ -798,7 +800,7 @@ For normal use:
 
 - `capture` creates a new model using `<migration_name>_<run_id>`.
 - `convert`, `generate`, and `datamove` accept only `latest` or a numeric SQL Developer model index; a model name is not valid.
-- A full `--migrate` workflow can use its protected current model. For manual phases, use the numeric index from `lscaptured` or `lsconverted`, not `latest`.
+- A full `--migrate` workflow resolves and pins the unique numeric index after capture and convert. For manual phases, use the numeric index from `lscaptured` or `lsconverted`, not `latest`.
 - `--run <run_id>` reuses an existing run directory. Supply it for every manual phase after `capture`.
 
 Use `--run` when rerunning phases that depend on files already generated in a previous run, such as `deploy`, `load`, `postdeploy`, or `validate`.

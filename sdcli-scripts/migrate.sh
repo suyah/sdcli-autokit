@@ -46,6 +46,7 @@ RERUN_COMPLETED=false
 SDCLI_LAST_ACTION=""
 SDCLI_LAST_SUCCESS_MARKER=false
 SDCLI_CAPTURE_OUTPUT_FILE=""
+SDCLI_VERIFIED_MODEL_INDEX=""
 
 declare -a SDCLI_COMMANDS=()
 declare -a SENSITIVE_VALUES=()
@@ -2870,10 +2871,12 @@ expected_run_model_name() {
   printf '%s_%s\n' "$project_name" "$run_id"
 }
 
-sdcli_model_exists() {
+lookup_sdcli_model_index() {
   local phase="$1"
   local expected_model="$2"
-  local list_action output_file rc=0 saved_action saved_marker
+  local list_action output_file model_index="" rc=0 saved_action saved_marker
+
+  SDCLI_VERIFIED_MODEL_INDEX=""
 
   case "$phase" in
     capture) list_action="lscaptured" ;;
@@ -2891,7 +2894,7 @@ sdcli_model_exists() {
   SDCLI_CAPTURE_OUTPUT_FILE="$output_file"
   if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action"; then
     rc=1
-  elif ! LC_ALL=C awk -v expected="$expected_model" '
+  elif ! model_index="$(LC_ALL=C awk -v expected="$expected_model" '
     {
       line=$0
       gsub(/\r/, "", line)
@@ -2909,13 +2912,21 @@ sdcli_model_exists() {
           sub(/^\(/, "", model_index)
         }
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_name)
-        if (model_index ~ /^[0-9]+$/ && model_name == expected) found=1
+        if (model_index ~ /^[0-9]+$/ && model_name == expected) {
+          matches++
+          matched_index=model_index
+        }
       }
     }
-    END { exit(found ? 0 : 1) }
-  ' "$output_file"; then
-    log_error "SQL Developer $phase model lookup did not return the expected model '$expected_model'"
+    END {
+      if (matches != 1) exit 1
+      print matched_index
+    }
+  ' "$output_file")"; then
+    log_error "SQL Developer $phase model lookup did not return exactly one model named '$expected_model'"
     rc=1
+  else
+    SDCLI_VERIFIED_MODEL_INDEX="$model_index"
   fi
   SDCLI_CAPTURE_OUTPUT_FILE=""
   SDCLI_LAST_ACTION="$saved_action"
@@ -3191,7 +3202,7 @@ verify_phase_postcondition() {
       else
         expected_model="$(expected_run_model_name "$project_name")" || return 1
       fi
-      sdcli_model_exists "$phase" "$expected_model"
+      lookup_sdcli_model_index "$phase" "$expected_model"
       ;;
     generate)
       ( validate_generated_sql_inventory "$output_dir" ) || {
@@ -3291,14 +3302,30 @@ run_all_phases() {
   local output_dir="$6"
   local idx="$7"
 
-  local phase phase_model
-  for phase in capture convert generate datamove offload deploy load postdeploy validate; do
-    # Capture accepts a human-readable name, while the remaining SDCLI actions
-    # accept only `latest` or an internal numeric model index.  `latest` is the
-    # model captured by the preceding action in this single workflow.
-    phase_model="latest"
-    [[ "$phase" == "capture" ]] && phase_model="$model_name"
-    run_phase "$phase" "$repo_name" "$src_conn_name" "$target_name" "$phase_model" "$project_name" "$output_dir" "$idx"
+  local phase captured_model_index converted_model_index
+
+  SDCLI_VERIFIED_MODEL_INDEX=""
+  run_phase capture "$repo_name" "$src_conn_name" "$target_name" "$model_name" "$project_name" "$output_dir" "$idx"
+  if $DRY_RUN; then
+    captured_model_index="<captured-model-index>"
+  else
+    captured_model_index="$SDCLI_VERIFIED_MODEL_INDEX"
+    [[ "$captured_model_index" =~ ^[0-9]+$ ]] \
+      || fail "Capture did not resolve a unique numeric SQL Developer model index"
+  fi
+
+  SDCLI_VERIFIED_MODEL_INDEX=""
+  run_phase convert "$repo_name" "$src_conn_name" "$target_name" "$captured_model_index" "$project_name" "$output_dir" "$idx"
+  if $DRY_RUN; then
+    converted_model_index="<converted-model-index>"
+  else
+    converted_model_index="$SDCLI_VERIFIED_MODEL_INDEX"
+    [[ "$converted_model_index" =~ ^[0-9]+$ ]] \
+      || fail "Convert did not resolve a unique numeric SQL Developer model index"
+  fi
+
+  for phase in generate datamove offload deploy load postdeploy validate; do
+    run_phase "$phase" "$repo_name" "$src_conn_name" "$target_name" "$converted_model_index" "$project_name" "$output_dir" "$idx"
   done
 }
 

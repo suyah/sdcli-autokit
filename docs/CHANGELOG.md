@@ -5,6 +5,12 @@ into the customer offline bundle.
 
 ## Unreleased
 
+### Fixed
+
+- Corrected SQL Developer 26.2 parenthesized model-list parsing and pinned full
+  workflows to unique numeric captured and converted model indexes instead of
+  mutable `latest` selection.
+
 ## 1.2.0 - 2026-10-22
 
 ### Added

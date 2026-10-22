@@ -92,6 +92,8 @@ sdcli-scripts/**/*.pyc
 !tests/fixtures/
 !tests/fixtures/validation/
 !tests/fixtures/validation/**
+!tests/fixtures/sdcli/
+!tests/fixtures/sdcli/**
 
 # Never track backup files
 *.bak
