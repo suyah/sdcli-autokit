@@ -221,6 +221,7 @@ checksum="$bundle.sha256"
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/image.tar' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/VERSION' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/IMAGE_ID' >/dev/null
+tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/licenses/ORACLE-FUTC.txt' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/run.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/install-vendor.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/migrate.sh' >/dev/null

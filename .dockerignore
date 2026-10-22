@@ -2,3 +2,6 @@
 !.dockerignore
 !deployment/
 !deployment/Dockerfile
+!docs/
+!docs/licenses/
+!docs/licenses/ORACLE-FUTC.txt
