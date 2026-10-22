@@ -93,7 +93,7 @@ mkdir -p "$DIST_DIR"
 stage_dir="$(mktemp -d)"
 trap 'rm -rf "$stage_dir"' EXIT
 bundle_dir="$stage_dir/$BUNDLE_NAME"
-mkdir -p "$bundle_dir/deployment" "$bundle_dir/sdcli-scripts"
+mkdir -p "$bundle_dir/deployment" "$bundle_dir/licenses" "$bundle_dir/sdcli-scripts"
 
 if ! image_metadata="$("$CONTAINER_ENGINE" image inspect \
   --format '{{printf "%s\t%s\t%s\t%s\t%s\t%s\t%s" .Id .Os .Architecture (index .Config.Labels "org.opencontainers.image.version") (index .Config.Labels "org.opencontainers.image.revision") (index .Config.Labels "org.opencontainers.image.created") (index .Config.Labels "org.opencontainers.image.platform")}}' \
@@ -153,6 +153,11 @@ printf '%s\n' "$SOURCE_COMMIT" > "$bundle_dir/SOURCE_COMMIT"
 printf '%s\n' "$image_id" > "$bundle_dir/IMAGE_ID"
 
 cp "$ROOT_DIR/README.md" "$bundle_dir/README.md"
+[[ -f "$ROOT_DIR/docs/licenses/ORACLE-FUTC.txt" ]] || {
+  echo "Error: required SQLcl license file not found: $ROOT_DIR/docs/licenses/ORACLE-FUTC.txt" >&2
+  exit 1
+}
+cp "$ROOT_DIR/docs/licenses/ORACLE-FUTC.txt" "$bundle_dir/licenses/ORACLE-FUTC.txt"
 for deployment_file in .env run.sh start.sh stop.sh install-vendor.sh; do
   cp "$ROOT_DIR/deployment/$deployment_file" "$bundle_dir/deployment/$deployment_file"
 done

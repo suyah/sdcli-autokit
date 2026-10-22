@@ -401,7 +401,7 @@ sync_sdcli_scripts() {
 
 check_tools() {
   local tool
-  for tool in sdcli sqlcmd bcp sqlplus sqlldr jq yq python3 strace; do
+  for tool in sdcli sql sqlcmd bcp sqlplus sqlldr jq yq python3 strace; do
     container_engine exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
       echo "Error: $tool is missing after installation" >&2
       return 1
@@ -410,6 +410,7 @@ check_tools() {
   container_engine exec "$CONTAINER_NAME" bash -lc 'sqlcmd -? >/dev/null 2>&1' || { echo "Error: sqlcmd did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'bcp -v >/dev/null 2>&1' || { echo "Error: bcp did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'sqlplus -version >/dev/null 2>&1' || { echo "Error: sqlplus did not start" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc 'sql -version >/dev/null 2>&1' || { echo "Error: SQLcl did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'sqlldr -help >/dev/null 2>&1' || { echo "Error: sqlldr did not start" >&2; return 1; }
   check_sdcli_startup || return 1
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }

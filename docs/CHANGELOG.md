@@ -5,6 +5,12 @@ into the customer offline bundle.
 
 ## Unreleased
 
+### Added
+
+- Bundled pinned Oracle SQLcl 26.2.2 with its FUTC license and notices for
+  DBA connectivity and diagnostics; migration orchestration remains on SQL
+  Developer CLI 26.2.
+
 ### Fixed
 
 - Isolated SQL Developer 26.2 saved connections, DefaultRepository and encryption

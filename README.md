@@ -80,11 +80,21 @@ On the host machine, you need:
 - network access to the target Oracle database
 - a `.env` file in the `deployment/` directory for container settings
 
-The connected build machine needs internet access for the base image, `yq`, and jTDS. The customer VM does not need registry or software-repository access. Its `.env` contains the container, image repository, separate data/log volume, and user/path settings; it has no package download URLs.
+The connected build machine needs internet access for the base image, `yq`, jTDS,
+and the pinned SQLcl 26.2.2 ZIP. The customer VM does not need registry or
+software-repository access. Its `.env` contains the container, image repository,
+separate data/log volume, and user/path settings; it has no package download URLs.
 
 ### Customer-provided proprietary artifacts for offline installation
 
 The offline bundle does not distribute Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver, or Microsoft SQL Server command-line tool binaries. The customer obtains the required packages through its approved vendor account or internal software repository, accepts the applicable terms, and transfers them separately to the isolated environment.
+
+The image does include Oracle SQLcl 26.2.2 for DBA connectivity and diagnostic
+work; migration orchestration continues to use SQL Developer CLI 26.2. SQLcl is
+redistributed unmodified under Oracle Free Use Terms and Conditions (FUTC). The
+customer bundle includes the FUTC copy at `licenses/ORACLE-FUTC.txt`; the image
+also preserves SQLcl's `LICENSE.txt` and `NOTICES.txt` under
+`/usr/share/licenses/sqlcl/`.
 
 | Required software | Customer download source | Files to stage |
 | --- | --- | --- |
