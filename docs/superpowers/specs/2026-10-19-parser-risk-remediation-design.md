@@ -199,6 +199,11 @@ Each action has a small postcondition based on artifacts it owns:
 Generic diagnostic regexes remain supplemental and must never convert missing
 artifacts into success.
 
+The supported SQL Developer 26.2 model-list protocol is exactly
+`(n) --> Model Name : name`. Capture and conversion require one exact model
+name and retain its numeric index. Legacy or malformed display formats fail
+closed rather than falling back to `latest`.
+
 BCP coverage does not come from tokenizing generated shell. The autokit runs
 the root of each generated script tree, records actual argv in its BCP wrapper,
 and requires one unique successful data-file record per generated SQL*Loader
