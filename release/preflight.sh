@@ -45,6 +45,15 @@ if ! awk -v version="$VERSION" '
   fail "engineering changelog has no entry for version $VERSION: $CHANGELOG_FILE"
 fi
 
+if ! awk '
+  $0 == "## Unreleased" { seen = 1; in_unreleased = 1; next }
+  in_unreleased && /^## / { in_unreleased = 0 }
+  in_unreleased && /[^[:space:]]/ { content = 1 }
+  END { exit !(seen && !content) }
+' "$CHANGELOG_FILE"; then
+  fail "engineering changelog still has unreleased entries; merge a release-notes PR before packaging"
+fi
+
 BUNDLE_NAME="sdcli-autokit-$VERSION-linux-amd64"
 BUNDLE_PATH="$DIST_DIR/$BUNDLE_NAME.tar.gz"
 CHECKSUM_PATH="$BUNDLE_PATH.sha256"

@@ -140,7 +140,7 @@ chmod +x "$fakebin/podman"
 dist_dir="$tmpdir/dist"
 podman_log="$tmpdir/podman.log"
 release_changelog="$tmpdir/CHANGELOG.md"
-printf '%s\n' '# Engineering change log' '' '## 1.2.3 - 2026-10-19' '' '### Added' '- Test release entry.' > "$release_changelog"
+printf '%s\n' '# Engineering change log' '' '## Unreleased' '' '## 1.2.3 - 2026-10-19' '' '### Added' '- Test release entry.' > "$release_changelog"
 source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
 preflight_repo="$tmpdir/preflight-repo"
@@ -167,6 +167,20 @@ preflight_output="$(
 )"
 grep -F 'Release preflight passed' <<< "$preflight_output" >/dev/null
 grep -F "Source commit: $source_commit" <<< "$preflight_output" >/dev/null
+
+unreleased_changelog="$tmpdir/CHANGELOG-with-unreleased.md"
+printf '%s\n' \
+  '# Engineering change log' '' \
+  '## Unreleased' '' \
+  '### Fixed' '- A change waiting to be released.' '' \
+  '## 1.2.3 - 2026-10-19' '' \
+  '### Added' '- Test release entry.' > "$unreleased_changelog"
+if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$unreleased_changelog" \
+    "$REPO_ROOT/release/preflight.sh" 1.2.3 >"$tmpdir/preflight-unreleased.log" 2>&1; then
+  echo "release preflight unexpectedly accepted unreleased changelog entries" >&2
+  exit 1
+fi
+grep -F 'engineering changelog still has unreleased entries' "$tmpdir/preflight-unreleased.log" >/dev/null
 
 if RELEASE_ALLOW_DIRTY=true RELEASE_CHANGELOG_FILE="$release_changelog" \
     "$REPO_ROOT/release/preflight.sh" 1.2.4 >/dev/null 2>&1; then

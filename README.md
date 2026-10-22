@@ -130,6 +130,9 @@ validated local image; it does not rebuild or run tests. It refuses an image
 whose version, Git commit, or platform provenance does not match the current
 source. Maintainers should follow the engineering-only
 [release process](docs/release-process.md) before creating a customer bundle.
+First merge the small release-notes PR: it moves all `Unreleased` entries into
+the chosen version and leaves `Unreleased` empty. The release command rejects
+a bundle when that step has not happened.
 
 The scripts prefer Podman when both tools are installed. To build with Rancher Desktop/Docker explicitly, use:
 

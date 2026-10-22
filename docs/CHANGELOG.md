@@ -30,6 +30,8 @@ into the customer offline bundle.
   compatible.
 - `migration_repository.conn` is now the default only for no-name datatype
   mapping inspection; named migration workflows use `migrations[].target.conn`.
+- Release preflight now rejects a package when `Unreleased` still contains
+  entries, requiring a separate release-notes PR before a version is built.
 
 ## 1.1.0 - 2026-10-19
 
