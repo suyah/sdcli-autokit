@@ -6,6 +6,17 @@ MIGRATE_SH_SOURCE_ONLY=true source "$REPO_ROOT/sdcli-scripts/migrate.sh"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
+mkdir -p "$tmpdir/bin" "$tmpdir/autokit"
+AUTOKIT_DIR="$tmpdir/autokit"
+cat > "$tmpdir/bin/sqlplus" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+if [[ "${TEST_REPOSITORY_INCOMPLETE:-false}" != true ]]; then
+  printf 'SDCLI_REPOSITORY_READY\t65\n'
+fi
+SH
+chmod +x "$tmpdir/bin/sqlplus"
+export PATH="$tmpdir/bin:$PATH"
 
 fail_test() {
   echo "$1" >&2
@@ -103,9 +114,13 @@ ACTIVE_REPOSITORY_CONN='tcps://proda.example:1522/proda_high'
 ACTIVE_REPOSITORY_NAME='repo_proda'
 ACTIVE_SUPER_CONNECTION_NAME='super_migration_proda'
 
+DRY_RUN=true
+verify_initialized_repository
+[[ ! -f "$AUTOKIT_DIR/repository_init_check.sql" && ${#calls[@]} -eq 0 ]] || fail_test 'dry-run verification executed queries or wrote evidence'
+DRY_RUN=false
 setup_repository
 
-assert_eq "${#calls[@]}" 2 "repository init SDCLI call count"
+assert_eq "${#calls[@]}" 3 "repository init and independent reopen SDCLI call count"
 assert_eq "${calls[0]}" 'sdcli migration -actions=driver -files=/vendor/jtds.jar' "driver registration"
 assert_contains "${calls[1]}" '-conn=repo_proda' "explicit init repository selection for a non-mig alias prefix"
 assert_contains "${calls[1]}" 'super_migration_proda:oracle:admin/super_password@tcps://proda.example:1522/proda_high' "active super connection"
@@ -113,6 +128,7 @@ assert_contains "${calls[1]}" 'repo_proda:mkrepouser:migrep/repo_password:super_
 assert_not_contains "${calls[1]}" 'legacy.example' "legacy endpoint isolation"
 assert_not_contains "${calls[1]}" 'migration_repo:mkrepouser' "unsuffixed repository isolation"
 assert_not_contains "${calls[1]}" 'super_migration:oracle' "unsuffixed super isolation"
+assert_eq "${calls[2]}" 'sdcli migration -actions=lscaptured' "independent saved-connection reopen"
 
 # Exercise main rather than only its helpers. These fakes keep the test
 # hermetic while proving argument parsing and init selection happen before any
@@ -241,7 +257,7 @@ for migration_name in proda cecrealm; do
   main "$migration_name" --init
   [[ "$(awk -F '\t' '{print $2}' "$SDCLI_PROFILE_DIR/.autokit-profile")" == ready ]] || fail_test 'successful init did not mark the profile ready'
   release_profile_lock
-  init_main_call="$(tail -n 1 "$INIT_MAIN_CALLS")"
+  init_main_call="$(grep -- '-actions=init' "$INIT_MAIN_CALLS")"
   assert_contains "$init_main_call" "migration_repo_${migration_name}:mkrepouser" "main ${migration_name} repository alias"
   assert_contains "$init_main_call" "super_migration_${migration_name}:oracle" "main ${migration_name} super alias"
   assert_contains "$init_main_call" "${migration_name}.example:1522/${migration_name}_high" "main ${migration_name} endpoint"
@@ -259,11 +275,22 @@ if (
 fi
 [[ "$(awk -F '\t' '{print $2}' "$main_tmpdir/failed-data/profiles/proda/.autokit-profile")" == pending ]] || fail_test 'failed init left a ready profile'
 
+if (
+  trap 'release_profile_lock' EXIT
+  TOOL_DATA="$main_tmpdir/incomplete-data"
+  export TEST_REPOSITORY_INCOMPLETE=true
+  reset_main_state
+  main proda --init
+) >/dev/null 2>&1; then
+  fail_test 'native init success with an incomplete repository was accepted'
+fi
+[[ "$(awk -F '\t' '{print $2}' "$main_tmpdir/incomplete-data/profiles/proda/.autokit-profile")" == pending ]] || fail_test 'incomplete repository left a ready profile'
+
 INIT_TEST_MIGRATION_COUNT=1
 : > "$INIT_MAIN_CALLS"
 reset_main_state
 single_main_output="$(trap 'release_profile_lock' EXIT; main --init)"
 assert_contains "$single_main_output" 'Inferred the only configured migration' "main single-migration init inference"
-assert_contains "$(tail -n 1 "$INIT_MAIN_CALLS")" 'migration_repo_proda:mkrepouser' "main inferred repository alias"
+assert_contains "$(grep -- '-actions=init' "$INIT_MAIN_CALLS")" 'migration_repo_proda:mkrepouser' "main inferred repository alias"
 
 echo "per-migration repository init test passed"

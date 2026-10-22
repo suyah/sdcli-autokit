@@ -1284,6 +1284,33 @@ SQL
   cleanup_datatype_mapping_temp_dirs
 }
 
+verify_initialized_repository() {
+  if $DRY_RUN; then
+    log_info '[DRY-RUN] verify repository install revision and reopen saved connection'
+    return 0
+  fi
+  local query_file="$AUTOKIT_DIR/repository_init_check.sql"
+  local raw_file="$AUTOKIT_DIR/repository_init_check.out"
+  # SDCLI 26.2's existence check only probes MD_CONNECTIONS. A cancelled
+  # install can have that table without the revision written at install end.
+  cat > "$query_file" <<'SQL'
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 32767 TRIMSPOOL ON DEFINE OFF
+SELECT 'SDCLI_REPOSITORY_READY' || CHR(9) || MAX(REVISION)
+FROM MD_REPOVERSIONS
+HAVING COUNT(*) > 0;
+EXIT
+SQL
+  run_repository_sql_capture "$query_file" "$raw_file" \
+    || fail "Cannot verify repository installation; inspect $raw_file before retrying init"
+  awk -F '\t' '$1 == "SDCLI_REPOSITORY_READY" && $2 ~ /^[0-9]+[[:space:]]*$/ { found++ } END { exit found != 1 }' "$raw_file" \
+    || fail "Repository installation is incomplete; ask the DBA to complete or repair it before retrying init. Evidence: $raw_file"
+  # A new process must decrypt the saved password and open this repository.
+  run_sdcli sdcli migration -actions=lscaptured \
+    || fail 'Repository saved connection could not be reopened; project profile remains pending'
+}
+
 setup_repository() {
   require_active_repository_context
 
@@ -1314,6 +1341,7 @@ setup_repository() {
   # the vendor's implicit detection otherwise depends on a "mig" alias prefix.
   run_sdcli sdcli migration -actions=init -conn="$repo_name" -connDetails="$init_conn_details" \
     || fail "Repository initialization failed; verify the Oracle connection and repository user details"
+  verify_initialized_repository
 }
 
 get_migration_index() {
@@ -3589,6 +3617,9 @@ main() {
   if ! $DRY_RUN; then
     if mode_uses_sdcli; then require_command sdcli; fi
     case "$MODE" in
+      init)
+        require_command sqlplus
+        ;;
       full|migrate)
         require_command sqlplus
         require_command sqlcmd

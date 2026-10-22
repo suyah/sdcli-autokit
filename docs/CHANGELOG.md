@@ -12,6 +12,8 @@ into the customer offline bundle.
   discovery before init. Fresh profiles require successful initialization.
 - Scoped inherited Java wallet settings to the selected project and keyed
   repository locks by endpoint/user rather than saved connection alias.
+- Verified repository installation completion and independent saved-connection
+  reopening before marking a profile ready, including retries after failed init.
 - Isolated SQL Developer repository aliases, repository endpoint selection,
   wallets, locks, and initialization evidence by named migration. A named
   migration now uses its own target endpoint and derived repository aliases

@@ -29,7 +29,8 @@ No PRODA-specific branch, automatic import or legacy profile fallback.
 - A private `.autokit-profile` file stores an identity hash and pending/ready
   state. The hash includes target endpoint, repository username and alias.
   Nonempty unmanaged profiles and identity changes are rejected with backup /
-  fresh-profile instructions. Successful init alone writes ready atomically.
+  fresh-profile instructions. Every init attempt starts pending, including a
+  retry of a ready profile. Verified init writes ready atomically.
 - SDCLI modes require ready except init. Oracle-only artifact phases and datatype
   mapping inspection do not require or modify a SQL Developer profile. Dry runs
   show the selected directory without creating or updating profile state.
@@ -47,13 +48,23 @@ db.system.id. Do not generate encryption identifiers or edit DefaultRepository
 in production code. A real test must reopen the initialized repository from a
 new process; listing saved connection names is insufficient.
 
+Before marking ready, SQL*Plus verifies an installation revision exists in
+MD_REPOVERSIONS (the vendor's install script writes it at the end), then an
+independent SDCLI lscaptured process reopens the saved repository. These are
+read-only checks; no fixed revision number or project-specific object name is
+used. Keep query/output evidence in the init run's autokit directory. This
+guards the native existence test, which checks only MD_CONNECTIONS and can
+accept a cancelled partial installation. Init therefore also requires SQL*Plus.
+
 Init alone receives its supported `-conn=<derived repository alias>` option.
 Its implicit connDetails detection otherwise depends on an alias starting with
 `mig`; explicitly selecting the alias also supports configured non-default
 prefixes. This does not restore the unsupported generic `-repository` option.
 
-The profile remains pending on failure, so init can be retried with unchanged
-identity. Changing a target requires an explicit backup and fresh profile;
+The profile remains pending on failure. Init can be retried with unchanged
+identity after resolving the cause; an incomplete database repository requires
+DBA repair, not an automatic drop/recreate or a silent success. Changing a
+target requires an explicit backup and fresh profile;
 there is no silent reuse of a different database's preferences.
 
 ## Wallets and locking
@@ -103,3 +114,30 @@ workflow against this target. ADB mTLS remains a separate validation scope.
 Rollback selects the previous Git/release version and backed-up complete shared
 profile during a maintenance window. Never automatically delete either profile
 or drop a repository. Rolling back files does not reverse database DDL.
+
+## Engineering verification — 2026-10-22
+
+- The tracked Bash suite passed 35/35, including the report's 17 unit cases.
+  Focused regressions were observed failing before fixes for profile selection,
+  alias-independent locks, quoted wallet tokens, explicit init alias selection,
+  vendor-saved preferences, incomplete installation and re-init pending state.
+- The actual deployment startup helper passed in the existing container. Its
+  disposable profile was removed, strace 6.12 was available, and the complete
+  original shared-profile file hash list remained unchanged.
+- The supplied ExaCS screenshot service selected CDB root. PDBSYH's full service
+  was verified by direct login. Native mkrepouser inherited SYSDBA from the SYS
+  connection; an ordinary SYSTEM connection avoided that vendor role issue.
+  No production role workaround was added.
+- The first real install hit the private test's 600-second limit while the
+  SDK worker was running vendor repository SQL. Read-only checks showed 109
+  tables and no installation revision row. The profile stayed pending and
+  locks were released. This is not a successful initialization result.
+- A clean positive init/reopen remains an integration gate. A second dedicated
+  schema requires explicit approval; no automatic repository cleanup or extra
+  database account creation is part of production execution. ADB mTLS and a
+  complete data migration are outside this acceptance run.
+
+Private container evidence and complete old-state backups are under
+`/u01/data/sdcli-autokit/profile-isolation-test.VR30Ea`; credentials are not
+included in Git or release artifacts. Preserve the running container and test
+schemas for inspection.

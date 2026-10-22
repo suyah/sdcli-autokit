@@ -564,6 +564,15 @@ and `--conn-setup` again. There is no silent fallback to an old target.
 Standalone use without `TOOL_DATA` places `profiles/` beside the configured
 `defaults.paths.project_root` directory; use absolute paths.
 
+Init requires SQL*Plus as well as SDCLI. After vendor init reports success,
+the runner checks for the installation revision in `MD_REPOVERSIONS`, then
+opens the saved repository from an independent SDCLI process. Every init
+attempt stays pending until both checks pass, including re-init of an existing
+profile. An interrupted install may leave database objects behind: ask the DBA
+to complete/repair that installation before retrying. Autokit never drops or
+recreates a repository automatically. Check `repository_init_check.sql` and
+`repository_init_check.out` in the init run's `autokit/` directory for evidence.
+
 ## Typical migration workflow
 
 ### Migrate a new database

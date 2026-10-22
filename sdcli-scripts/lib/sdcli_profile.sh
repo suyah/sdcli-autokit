@@ -99,8 +99,12 @@ prepare_project_profile() {
   IFS=$'\t' read -r stored_identity state extra < "$state_file"
   [[ "$stored_identity" == "$PROFILE_IDENTITY" && -z "$extra" && ( "$state" == pending || "$state" == ready ) ]] \
     || fail "Project repository configuration changed or profile state is invalid: $SDCLI_PROFILE_DIR. Back up and move this profile aside, then run named --init"
-  [[ "$MODE" == init || "$state" == ready ]] \
-    || fail "Project initialization did not complete; retry ./migrate.sh $ACTIVE_MIGRATION_NAME --init"
+  if [[ "$MODE" == init ]]; then
+    write_project_profile_state pending
+  else
+    [[ "$state" == ready ]] \
+      || fail "Project initialization did not complete; retry ./migrate.sh $ACTIVE_MIGRATION_NAME --init"
+  fi
 }
 
 initialize_project_preferences() {

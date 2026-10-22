@@ -76,6 +76,10 @@ if (trap - EXIT; PROFILE_LOCK_HELD=false; prepare_project_profile) >/dev/null 2>
   fail_test 'same profile accepted concurrent writer'
 fi
 release_profile_lock
+context a
+prepare_project_profile
+[[ "$(awk -F '\t' '{print $2}' "$SDCLI_PROFILE_DIR/.autokit-profile")" == pending ]] || fail_test 'reinitialization left an old ready state active'
+release_profile_lock
 ACTIVE_REPOSITORY_CONN='changed-host:1521/other'
 if (trap 'release_profile_lock' EXIT; prepare_project_profile) >/dev/null 2>&1; then
   fail_test 'changed target reused the existing profile'
