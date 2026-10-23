@@ -771,12 +771,14 @@ comments. The autokit does not claim to parse arbitrary SQL or PL/SQL to detect
 every possible destructive statement; review generated migration DDL before
 running it in a target environment.
 
-Automated deploy supports only SQL Developer's tested flat per-schema layout:
-each schema directory must contain `user.sql` and `master.sql`, and executable
-schema files must be directly accounted for by that master plan. A monolithic
-`gen/*.sql`-only output or nested generated SQL directory is rejected before
-SQL*Plus runs; review or execute an unsupported layout manually instead of
-asking the autokit to guess its semantics.
+Automated deploy uses each schema's `user.sql` and the ordered includes in
+`master.sql` to split pre-data and post-data execution. SQL*Plus executes
+nested includes inside the selected scripts, including `post.sql` references
+such as `<schema>/post/rebuild.sql`. Autokit records the parent script's
+result; it does not separately schedule its children or inspect their SQL.
+Additional files do not make `generate` fail and are not automatically executed
+just because they exist. Deploy still requires the per-schema entry scripts;
+a monolithic `gen/*.sql`-only output cannot be split automatically.
 
 ### SQL Developer Emulation schema
 
@@ -1021,6 +1023,10 @@ Run migration commands from `sdcli-scripts/`:
 ## Troubleshooting tips
 
 - Start with `autokit/migrate.log` for the full run history.
+- The terminal hides repeated SQL Developer banners and known Java startup
+  deprecation messages. The full redacted SDCLI output remains in
+  `autokit/migrate.log`; other warnings, object conversion diagnostics, errors,
+  model lists, and completion messages remain visible in the terminal.
 - Check `autokit/migration_summary.csv` for a quick status summary.
 - Treat a migration as successful only when `validation_summary.txt` is `PASS`
   and the HTML report is `PASS`; every row in `reconciliation.tsv` must also be
@@ -1030,6 +1036,14 @@ Run migration commands from `sdcli-scripts/`:
   marker, with no Oracle/SQL*Plus fatal diagnostic. The sole accepted diagnostic
   exception is repository `init` reporting existing-user `ORA-01920` together
   with its exact completion marker.
+- Object-level conversion diagnostics such as `[ line 9:2: unexpected token: ... ]`
+  are warnings when SDCLI completes successfully. They require manual object
+  review and repair, but do not block the remaining migration stages. General
+  `Error:`/`Fatal:` output and Oracle error codes still fail the command.
+- `generate` and `datamove` use the SDCLI command result; Autokit does not
+  determine their success by scanning generated directories. Input resolution
+  happens when deploy/offload/load actually use the generated files. A completed
+  SDCLI phase does not imply that all converted objects are valid in Oracle.
 - Use `--dry-run` to confirm config and command construction before a real run.
 - Run `--conn-setup` again if source or target connection details changed.
 - Use `--run <run_id>` when rerunning a later phase against files from an existing run.

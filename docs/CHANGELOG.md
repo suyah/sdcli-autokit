@@ -5,6 +5,16 @@ into the customer offline bundle.
 
 ## Unreleased
 
+### Fixed
+
+- Treat object-level conversion diagnostics as warnings after successful SDCLI
+  completion, while retaining failures for tool errors and Oracle error codes.
+- Judge generate/datamove by the SDCLI result and remove whole-directory SQL
+  layout rejection. SQL*Plus executes nested includes through their parent
+  scripts during deployment, including schema post/rebuild.sql.
+- Hide repeated SQL Developer banners and known Java startup deprecation
+  messages in the terminal; retain the full redacted output in migrate.log.
+
 ## 1.2.1 - 2026-10-22
 
 ### Fixed

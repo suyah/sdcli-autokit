@@ -67,11 +67,17 @@ Files use TSV where values may contain commas. Headers are written only when a f
 2. fail on a timeout or nonzero exit;
 3. fail on fatal/error diagnostics even when an action success marker also appears;
 4. allow only exact, documented benign diagnostics scoped to a specific action;
-5. keep conversion diagnostics fatal;
+5. retain object-level conversion diagnostics as warnings when SDCLI completes;
 6. redact all configured secrets before writing console or log output; and
 7. restore the caller's `errexit` setting instead of always enabling `set -e`.
 
 The benign diagnostic list is a small function returning action plus exact pattern pairs. A general rule such as “ignore errors when success is printed” is prohibited.
+
+Generate and datamove success follows the SDCLI command result, without scanning
+output directories for an assumed layout. Capture/convert model-list lookup
+remains necessary for selecting the next phase's numeric model index. Repeated
+SQL Developer banners and known Java startup deprecation messages are hidden
+only in the terminal; full redacted SDCLI output remains in `migrate.log`.
 
 ### 5.2 Native tools
 
@@ -87,14 +93,14 @@ The tool will not recursively execute arbitrary `*.sql` files in alphabetical or
 
 ### 6.1 Inventory before execution
 
-After generation, create an inventory of SQL Developer output. For each schema directory:
+At deploy/postdeploy time, resolve the inputs required for execution. For each schema directory:
 
 - identify `master.sql` and parse only its SQL\*Plus include directives;
 - resolve each include relative to the master file and reject path traversal;
 - require every referenced file to exist;
-- reject duplicate references and cycles;
-- classify each referenced file as pre-data, post-data, password definition, or unsupported;
-- fail before deployment if an SQL file is neither referenced by the chosen master nor explicitly classified.
+- reject duplicate references in the master;
+- classify each master include as pre-data or post-data;
+- leave nested execution to SQL\*Plus and record its parent script's result.
 
 The actual SQL Developer output from the supported/tested version becomes the fixture for these tests. The code must not contain FY3000 schema names, Hyderabad endpoints, or a list of objects derived from only that project.
 
@@ -105,15 +111,16 @@ The initial supported classification is based on generated file purpose, not alp
 - pre-data: roles, users/schemas, tables, sequences needed by table defaults, and other files confirmed by the generated master to be prerequisites for loading;
 - post-data: indexes, constraints, views, synonyms, functions, procedures, packages, triggers, and final/post scripts;
 - control-only: master scripts and password-definition files; these are not separately executed when their child files are executed;
-- unsupported: any new generated file type not covered by the tested plan. Unsupported means fail with its path, not silently skip it.
+- additional files: do not schedule files merely because they exist, and do not
+  treat their presence as evidence of an SDCLI failure.
 
 Within a class, preserve the order in the generated master. Across schemas, use a stable sorted schema order. Each child script executes exactly once and is recorded in `deploy_manifest.tsv`.
 
-Only the tested flat per-schema layout is automated: each schema directory has
-`user.sql` and `master.sql`, and executable schema scripts are directly listed
-in the bounded master plan. A monolithic `gen/*.sql`-only layout or nested SQL
-directory is unsupported and must fail before SQL\*Plus executes generated
-schema SQL; the tool does not guess cleanup or phase semantics for those files.
+Each schema directory requires `user.sql` and `master.sql` for the pre/post-data
+split. SQL\*Plus executes nested includes inside selected parent scripts,
+including `<schema>/post.sql` invoking `<schema>/post/rebuild.sql`; Autokit does
+not parse their SQL or execute the children separately. A monolithic
+`gen/*.sql`-only layout still lacks the inputs required for that split.
 
 ### 6.3 Oracle error handling
 
@@ -261,7 +268,8 @@ Minimum automated coverage:
 - a success marker cannot hide an unrelated error;
 - validation returns nonzero for every issue class and for missing evidence;
 - all offload/load scripts execute and table coverage mismatches fail;
-- generated SQL inventory rejects duplicates, unknown files, missing includes, traversal, and master-plus-child double execution;
+- deployment input resolution rejects duplicate/missing master includes and
+  traversal; nested scripts are delegated to SQL\*Plus without double scheduling;
 - phase history survives resume and completed mutating phases require explicit override;
 - generated password files remain unchanged and private DEFINE files are
   removed after success, failure, and handled signal interruption;

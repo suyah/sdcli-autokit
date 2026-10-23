@@ -521,57 +521,23 @@ schema_post_files() {
   fi
 }
 
-schema_file_is_covered() {
+check_deploy_inputs() {
   local output_dir="$1"
-  local schema_dir="$2"
-  local rel_path="$3"
-  local schema_rel include_path
-  schema_rel="${schema_dir#$output_dir/}"
+  local found_schema=false schema_dir
 
-  case "$rel_path" in
-    "$schema_rel/user.sql"|"$schema_rel/master.sql"|"$schema_rel/post.sql"|\
-    "$schema_rel/dropobjects.sql"|"$schema_rel/dropobjecttypes.sql"|\
-    "$schema_rel/disable.sql"|"$schema_rel/enable.sql"|\
-    "$schema_rel/reportallstatus.sql"|"$schema_rel/reportinvalidstatus.sql"|\
-    "$schema_rel/foreignkeys.sql") return 0 ;;
-  esac
-
-  while IFS= read -r include_path; do
-    [[ "$rel_path" == "$include_path" ]] && return 0
-  done < <(schema_master_includes "$output_dir" "$schema_dir")
-  return 1
-}
-
-validate_generated_sql_inventory() {
-  local output_dir="$1"
-  local found_schema=false schema_dir schema_rel sql_file rel_path schema_child
-
-  while IFS= read -r sql_file; do
-    case "$(basename "$sql_file")" in
-      role.sql|passworddefinition.sql|dropallschemas.sql|reportallstatus.sql) ;;
-      *) fail "Generated root SQL file is not part of the supported deployment plan: $sql_file" ;;
-    esac
-  done < <(find "$output_dir" -mindepth 1 -maxdepth 1 -type f -name '*.sql' | LC_ALL=C sort)
-
+  # Resolve only the inputs the runner needs to split pre/post-data execution.
+  # SQL*Plus executes nested includes inside each selected parent script and
+  # reports errors itself. Do not infer SQL correctness from directory layout.
   while IFS= read -r schema_dir; do
     found_schema=true
-    schema_rel="${schema_dir#$output_dir/}"
     schema_master_includes "$output_dir" "$schema_dir" >/dev/null
-    while IFS= read -r sql_file; do
-      rel_path="${sql_file#$output_dir/}"
-      schema_child="${rel_path#"$schema_rel/"}"
-      [[ "$schema_child" != */* ]] \
-        || fail "Unsupported nested generated SQL file: $sql_file; only flat per-schema SQL Developer output is supported"
-      schema_file_is_covered "$output_dir" "$schema_dir" "$rel_path" \
-        || fail "Generated SQL file is not accounted for by the schema master plan: $sql_file"
-    done < <(find "$schema_dir" -type f -name '*.sql' | LC_ALL=C sort)
   done < <(schema_dirs "$output_dir")
 
   if $found_schema; then
     return 0
   fi
 
-  fail "Unsupported generated SQL layout: expected at least one flat <schema>/user.sql and <schema>/master.sql pair; monolithic gen/*.sql deployment is not supported"
+  fail "Unsupported generated SQL layout: deploy requires <schema>/user.sql and <schema>/master.sql; monolithic gen/*.sql deployment is not supported"
 }
 
 record_root_sql_inventory() {
@@ -652,7 +618,7 @@ run_deploy() {
     return 0
   fi
 
-  validate_generated_sql_inventory "$output_dir"
+  check_deploy_inputs "$output_dir"
   if [[ -f "$output_dir/role.sql" ]]; then
     prepare_role_scripts "$output_dir"
   fi
@@ -758,7 +724,7 @@ run_postdeploy() {
 
   ensure_deploy_manifest
   record_deploy_manifest "postdeploy" "__phase_complete__" "pending" "postdeploy phase started"
-  validate_generated_sql_inventory "$output_dir"
+  check_deploy_inputs "$output_dir"
 
   local schema_dir schema_name rel_script include_path failures=0 attempted=0 skipped=0
   while IFS= read -r schema_dir; do

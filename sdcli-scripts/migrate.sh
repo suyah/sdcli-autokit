@@ -756,8 +756,13 @@ redact_sdcli_output() {
 filter_sdcli_console_output() {
   local line
 
+  # Presentation only: run_sdcli records the full redacted stream before this
+  # filter. Never suppress general warnings or conversion/object diagnostics.
   while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
+      "" | "Oracle SQL Developer" | \
+      "Copyright (c) "*", Oracle and/or its affiliates. All rights reserved." | \
+      "OpenJDK 64-Bit Server VM warning: Options -Xverify:none and -noverify were deprecated in JDK 13 and will likely be removed in a future release." | \
       "WARNING: A terminally deprecated method in java.lang.System has been called" | \
       "WARNING: System::setSecurityManager will be removed in a future release" | \
       "WARNING: Please consider reporting this to the maintainers of oracle.ide.IdeCore" | \
@@ -869,8 +874,7 @@ run_sdcli() {
     rc=1
   fi
   if $is_convert && grep -Eq '\[[[:space:]]*line[[:space:]]+[0-9]+:[0-9]+:' "$output_file"; then
-    log_error "SQL Developer reported conversion diagnostics; review the object errors before generating deployment SQL"
-    rc=1
+    log_warn "SQL Developer reported object conversion diagnostics; review and repair the affected objects. Full output: $RUN_LOG_FILE"
   fi
   if [[ -n "${SDCLI_CAPTURE_OUTPUT_FILE:-}" ]]; then
     cp "$output_file" "$SDCLI_CAPTURE_OUTPUT_FILE" || rc=1
@@ -2954,45 +2958,6 @@ lookup_sdcli_model_index() {
   return "$rc"
 }
 
-verify_datamove_artifacts() {
-  local output_dir="$1"
-  local datamove_dir="$output_dir/datamove"
-  local bcp_script loader_script control_file
-  local bcp_script_count=0 loader_script_count=0 control_file_count=0
-
-  [[ -d "$datamove_dir" ]] || {
-    log_error "Datamove postcondition failed: directory not found: $datamove_dir"
-    return 1
-  }
-  while IFS= read -r bcp_script; do
-    [[ -n "$bcp_script" ]] || continue
-    bcp_script_count=$((bcp_script_count + 1))
-  done < <(discover_generated_entry_scripts "$datamove_dir" 'MicrosoftSQLServer_data.sh')
-
-  while IFS= read -r loader_script; do
-    [[ -n "$loader_script" ]] || continue
-    loader_script_count=$((loader_script_count + 1))
-  done < <(discover_generated_leaf_scripts "$datamove_dir" 'oracle_loader.sh')
-
-  while IFS= read -r control_file; do
-    [[ -n "$control_file" ]] || continue
-    control_file_count=$((control_file_count + 1))
-  done < <(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | LC_ALL=C sort)
-
-  (( bcp_script_count > 0 )) || {
-    log_error "Datamove postcondition failed: no generated BCP entry script was found under $datamove_dir"
-    return 1
-  }
-  (( loader_script_count > 0 )) || {
-    log_error "Datamove postcondition failed: no generated Oracle loader leaf script was found under $datamove_dir"
-    return 1
-  }
-  (( control_file_count > 0 )) || {
-    log_error "Datamove postcondition failed: no SQL*Loader control file was found under $datamove_dir"
-    return 1
-  }
-}
-
 verify_offload_evidence() {
   local output_dir="$1"
   local datamove_dir="$output_dir/datamove"
@@ -3229,19 +3194,16 @@ verify_phase_postcondition() {
       fi
       lookup_sdcli_model_index "$phase" "$expected_model"
       ;;
-    generate)
-      ( validate_generated_sql_inventory "$output_dir" ) || {
-        log_error "Generate postcondition failed: generated execution-plan inventory is missing or unsupported"
+    generate|datamove)
+      # These are SDCLI operations. Output layout is not an independent error;
+      # deploy/offload/load resolve their own inputs when those steps execute.
+      if [[ "$SDCLI_LAST_ACTION" != "$phase" || "$SDCLI_LAST_SUCCESS_MARKER" != "true" ]]; then
+        log_error "${phase^} did not report its completion marker"
         return 1
-      }
+      fi
       ;;
-    datamove) verify_datamove_artifacts "$output_dir" ;;
     offload) verify_offload_evidence "$output_dir" ;;
     deploy|postdeploy)
-      ( validate_generated_sql_inventory "$output_dir" ) || {
-        log_error "${phase^} postcondition failed: generated execution-plan inventory is missing or unsupported"
-        return 1
-      }
       verify_deploy_manifest_phase "$phase" "$output_dir"
       ;;
     cleanup) verify_deploy_manifest_phase "$phase" "$output_dir" ;;
