@@ -216,6 +216,8 @@ assert_not_contains "$retry_calls" "tpcc/synonyms.sql"
 assert_not_contains "$retry_calls" "tpcc_copy_tpcc/synonyms.sql"
 
 touch "$output_dir/tpcc/unplanned.sql"
+check_deploy_inputs "$output_dir"
+mv "$output_dir/tpcc/master.sql" "$output_dir/tpcc/master.sql.saved"
 set +e
 ( run_postdeploy 0 "$output_dir" ) >/dev/null 2>&1
 failed_rerun_rc=$?
@@ -227,18 +229,12 @@ latest_completion_status="$(awk -F '\t' '$1 == "postdeploy" && $2 == "__phase_co
   exit 1
 }
 
-set +e
-( validate_generated_sql_inventory "$output_dir" ) >/dev/null 2>&1
-unknown_rc=$?
-set -e
-[[ $unknown_rc -ne 0 ]]
-
-rm -f "$output_dir/tpcc/unplanned.sql"
+mv "$output_dir/tpcc/master.sql.saved" "$output_dir/tpcc/master.sql"
 cat >> "$output_dir/tpcc/master.sql" <<'SQL'
 @@"tpcc/tables.sql" unexpected_argument
 SQL
 set +e
-unsupported_include_output="$(validate_generated_sql_inventory "$output_dir" 2>&1)"
+unsupported_include_output="$(check_deploy_inputs "$output_dir" 2>&1)"
 unsupported_include_rc=$?
 set -e
 [[ $unsupported_include_rc -ne 0 ]]

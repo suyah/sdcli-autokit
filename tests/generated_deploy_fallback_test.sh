@@ -62,7 +62,7 @@ assert_contains "$fallback_output" "Unsupported generated SQL layout"
   exit 1
 }
 
-assert_nested_layout_rejected() {
+assert_nested_layout_supported() {
   local fixture_name="$1"
   local nested_kind="$2"
   local fixture_dir="$tmpdir/$fixture_name"
@@ -76,13 +76,13 @@ assert_nested_layout_rejected() {
   touch "$fixture_output/app/user.sql"
   case "$nested_kind" in
     post)
-      touch "$fixture_output/app/post.sql"
+      printf '%s\n' '@@"app/post/compile.sql"' > "$fixture_output/app/post.sql"
       mkdir -p "$fixture_output/app/post"
       touch "$fixture_output/app/post/compile.sql"
       : > "$fixture_output/app/master.sql"
       ;;
     group)
-      touch "$fixture_output/app/routines.sql"
+      printf '%s\n' '@@"app/routines/procedure.sql"' > "$fixture_output/app/routines.sql"
       mkdir -p "$fixture_output/app/routines"
       touch "$fixture_output/app/routines/procedure.sql"
       printf '%s\n' '@"app/routines.sql"' > "$fixture_output/app/master.sql"
@@ -94,19 +94,26 @@ assert_nested_layout_rejected() {
   output="$({ run_deploy 0 "$fixture_output"; } 2>&1)"
   rc=$?
   set -e
-  [[ $rc -ne 0 ]] || {
-    echo "$fixture_name unexpectedly deployed" >&2
+  [[ $rc -eq 0 ]] || {
+    echo "$fixture_name failed to deploy: $output" >&2
     exit 1
   }
-  assert_contains "$output" "nested generated SQL"
-  [[ ! -s "$calls_file" ]] || {
-    echo "$fixture_name reached SQL*Plus" >&2
-    cat "$calls_file" >&2
+  grep -F 'app/user.sql|' "$calls_file" >/dev/null || {
+    echo "$fixture_name did not deploy its schema" >&2
     exit 1
   }
+  run_postdeploy 0 "$fixture_output"
+  case "$nested_kind" in
+    post) grep -F 'app/post.sql|' "$calls_file" >/dev/null ;;
+    group) grep -F 'app/routines.sql|' "$calls_file" >/dev/null ;;
+  esac
+  if grep -Eq 'app/(post/compile|routines/procedure)\.sql\|' "$calls_file"; then
+    echo "Nested children must be executed by their parent SQL script, not scheduled twice" >&2
+    exit 1
+  fi
 }
 
-assert_nested_layout_rejected nested-post post
-assert_nested_layout_rejected nested-group group
+assert_nested_layout_supported nested-post post
+assert_nested_layout_supported nested-group group
 
 echo "generated deploy fallback test passed"

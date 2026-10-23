@@ -34,6 +34,17 @@ cat > "$fakebin/sdcli" <<'SCRIPT'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$SDCLI_CAPTURE_FILE"
 printf 'diagnostic credential=%s\n' "$SDCLI_TEST_CREDENTIAL"
+printf '%s\n' \
+  'Oracle SQL Developer' \
+  'Copyright (c) 2005, 2026, Oracle and/or its affiliates. All rights reserved.' \
+  'OpenJDK 64-Bit Server VM warning: Options -Xverify:none and -noverify were deprecated in JDK 13 and will likely be removed in a future release.' \
+  'WARNING: A terminally deprecated method in java.lang.System has been called' \
+  'WARNING: System::setSecurityManager has been called by oracle.ide.IdeCore (file:/u01/app/sqldeveloper/ide/extensions/oracle.ide.jar)' \
+  'WARNING: Please consider reporting this to the maintainers of oracle.ide.IdeCore' \
+  'WARNING: System::setSecurityManager has been called by org.netbeans.TopSecurityManager (file:/u01/app/sqldeveloper/netbeans/platform/lib/boot.jar)' \
+  'WARNING: Please consider reporting this to the maintainers of org.netbeans.TopSecurityManager' \
+  'WARNING: System::setSecurityManager will be removed in a future release' \
+  'Warning: connection certificate requires attention'
 printf 'mkconn completed successfully\n'
 SCRIPT
 chmod +x "$fakebin/sdcli"
@@ -54,6 +65,18 @@ validate_sdcli_conn_details_password "source password" "$SDCLI_TEST_CREDENTIAL"
 console_output="$(run_sdcli sdcli migration -actions=mkconn \
   -connDetails="src_test:sqlserver:sa/${SDCLI_TEST_CREDENTIAL}@db.example:1433:test")"
 write_sdcli_summary success
+
+assert_not_contains "$console_output" 'Oracle SQL Developer'
+assert_not_contains "$console_output" 'Copyright (c)'
+assert_not_contains "$console_output" 'OpenJDK 64-Bit Server VM warning:'
+assert_not_contains "$console_output" 'System::setSecurityManager'
+assert_not_contains "$console_output" 'terminally deprecated method'
+assert_not_contains "$console_output" 'Please consider reporting'
+assert_contains "$console_output" 'Warning: connection certificate requires attention'
+assert_contains "$console_output" 'mkconn completed successfully'
+assert_contains "$(cat "$RUN_LOG_FILE")" 'Oracle SQL Developer'
+assert_contains "$(cat "$RUN_LOG_FILE")" 'OpenJDK 64-Bit Server VM warning:'
+assert_contains "$(cat "$RUN_LOG_FILE")" 'System::setSecurityManager'
 
 captured_args="$(cat "$SDCLI_CAPTURE_FILE")"
 assert_contains "$captured_args" "sa/${SDCLI_TEST_CREDENTIAL}@db.example:1433:test"

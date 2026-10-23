@@ -197,14 +197,15 @@ FAKE_MODEL_LOOKUP_HAS_MODEL=true
 export FAKE_MODEL_LOOKUP_HAS_MODEL
 
 mv "$schema_dir/master.sql" "$schema_dir/master.sql.missing"
-expect_failure "generate inventory" verify_phase_postcondition generate latest "$project_name" "$output_dir"
+run_phase generate repository src target 2 "$project_name" "$output_dir" 0 >/dev/null
+phase_succeeded generate || fail_test 'Successful SDCLI generate was rejected because of output layout'
 mv "$schema_dir/master.sql.missing" "$schema_dir/master.sql"
 
 mv "$control_file" "$control_file.missing"
-expect_failure "datamove control file" verify_phase_postcondition datamove latest "$project_name" "$output_dir"
-mv "$control_file.missing" "$control_file"
 mv "$datamove_dir/oracle_loader.sh" "$datamove_dir/oracle_loader.sh.missing"
-expect_failure "datamove loader script" verify_phase_postcondition datamove latest "$project_name" "$output_dir"
+run_phase datamove repository src target 2 "$project_name" "$output_dir" 0 >/dev/null
+phase_succeeded datamove || fail_test 'Successful SDCLI datamove was rejected by artifact inspection'
+mv "$control_file.missing" "$control_file"
 mv "$datamove_dir/oracle_loader.sh.missing" "$datamove_dir/oracle_loader.sh"
 
 mv "$AUTOKIT_DIR/bcp_status.tsv" "$AUTOKIT_DIR/bcp_status.tsv.missing"
@@ -251,6 +252,7 @@ set_sdcli_postcondition_state capture
 expect_model_lookup_failure "duplicate model name" verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
 unset FAKE_MODEL_LIST_STYLE
 for phase in generate datamove offload deploy load postdeploy validate cleanup; do
+  set_sdcli_postcondition_state "$phase"
   verify_phase_postcondition "$phase" latest "$project_name" "$output_dir"
 done
 

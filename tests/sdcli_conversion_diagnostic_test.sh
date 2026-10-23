@@ -27,10 +27,11 @@ run_sdcli sdcli migration -actions=convert -repository=repo -model=model -output
 rc=$?
 set -e
 
-[[ $rc -ne 0 ]] || {
-  echo "Conversion diagnostics unexpectedly returned success" >&2
+[[ $rc -eq 0 ]] || {
+  echo "Completed conversion with object diagnostics unexpectedly failed" >&2
   exit 1
 }
-grep -F 'SQL Developer reported conversion diagnostics' "$RUN_LOG_FILE" >/dev/null
+grep -F '[WARN]' "$RUN_LOG_FILE" >/dev/null
+grep -F 'app.audit_trigger [ line 42:7: unexpected token: INSERT ]' "$RUN_LOG_FILE" >/dev/null
 
 echo "sdcli conversion diagnostic test passed"
