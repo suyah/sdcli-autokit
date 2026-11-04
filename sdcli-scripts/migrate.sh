@@ -2839,6 +2839,10 @@ run_offload() {
   start_ts="$(date +%s)"
   bcp_status_file="$AUTOKIT_DIR/bcp_status.tsv"
   : > "$bcp_status_file"
+  # Refresh the lazy metadata cache for each offload attempt. The wrapper only
+  # populates it if a generated source name is ambiguous due to embedded dots.
+  : > "$AUTOKIT_DIR/bcp_source_tables.tsv"
+  printf 'source_object\tdata_file\tquery\n' > "$AUTOKIT_DIR/bcp_queryout_adjustments.tsv"
 
   local rc=0
   [[ "$-" == *e* ]] && errexit_enabled=true
@@ -2847,6 +2851,9 @@ run_offload() {
     export SQLSERVER_BCP_TLS_MODE_EFFECTIVE="$bcp_tls_mode"
     export SQLSERVER_BCP_PACKET_SIZE="$bcp_packet_size"
     export SQLSERVER_BCP_PASSWORD="${source_password}"
+    export SQLSERVER_BCP_SOURCE_DATABASE="$source_db"
+    export SQLSERVER_BCP_TABLE_CATALOG_FILE="$AUTOKIT_DIR/bcp_source_tables.tsv"
+    export SQLSERVER_BCP_ADJUSTMENTS_FILE="$AUTOKIT_DIR/bcp_queryout_adjustments.tsv"
     export SQLSERVER_BCP_STATUS_FILE="$bcp_status_file"
     export PATH="$SCRIPT_DIR/lib:$PATH"
     local script_dir script_name script_rc

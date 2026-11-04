@@ -5,6 +5,15 @@ into the customer offline bundle.
 
 ## Unreleased
 
+### Fixed
+
+- Export SQL Server local objects with embedded dots using metadata-resolved
+  `queryout`. Real customer BCP testing rejected bracketed table-mode `out` but
+  successfully exported the same table through `SELECT * ... queryout` (89 rows).
+  Query the source catalog lazily once per offload attempt, preserve generated
+  scripts byte-for-byte, and log/persist runtime adjustments. This replaces the
+  unsuccessful bracket-only hotfix, without an image rebuild or new dependency.
+
 ## 1.3.0 - 2026-11-04
 
 ### Added
