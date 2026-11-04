@@ -48,3 +48,10 @@ This release uses the tracked suite defined by release.sh.
 No new live database migration was run. Native remapping behavior is based on
 the operator's successful remote idmap,convert/generate output; local tests
 verify configuration, XML preservation, command composition and error handling.
+
+Final release inspection found that the native remote converted name is
+`Converted:<run name>`, unlike the original unprefixed test fixture. A focused
+regression reproduced the lookup failure. The parser now accepts that exact
+prefix for converted models only and still rejects ambiguous matches. This
+correction is merged through an additional feature PR before the final build;
+the initial untagged candidate is retained separately and is not distributed.

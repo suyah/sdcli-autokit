@@ -25,6 +25,8 @@ into the customer offline bundle.
   messages in the terminal; retain the full redacted output in migrate.log.
 - Check every action completion marker for combined SDCLI commands and reject
   vendor error output even when a later action reports success.
+- Resolve the native `Converted:<run model name>` display name from SQL
+  Developer 26.2 while keeping model lookup exact and rejecting ambiguity.
 
 ### Compatibility
 
