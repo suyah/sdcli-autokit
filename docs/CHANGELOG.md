@@ -17,6 +17,11 @@ into the customer offline bundle.
   rejects `-h` together with `-y 0`. The catalog reader now retains unlimited
   column width, explicitly accepts its named heading/separator, and continues
   to reject malformed data rows.
+- Accept the SQL Developer 26.2 `passworddefinition.sql` variation that uses
+  a block-comment header and joins a prompt's closing quote directly to `HIDE`.
+  The deploy password parser remains fail-closed for non-`ACCEPT` statements,
+  invalid identifiers, duplicate variables, malformed prompts, and
+  unterminated block comments.
 
 ## 1.3.0 - 2026-11-04
 

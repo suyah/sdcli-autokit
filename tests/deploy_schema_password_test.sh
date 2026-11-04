@@ -249,3 +249,19 @@ cat > "$output_dir/passworddefinition.sql" <<'SQL'
 ACCEPT visible_password PROMPT "Password: "
 SQL
 assert_password_prompts_rejected "must end with HIDE"
+
+# SQL Developer 26.2 can use a block-comment header and place HIDE immediately
+# after the closing prompt quote. Both are SQL*Plus-valid and must produce the
+# same private DEFINE input as the whitespace-separated form above.
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+/* This file is used to prompt schema password */
+-- Password for 'tgt_AuditTrail' user  ...
+ACCEPT tgt_AuditTrail_password PROMPT "Provide the password for tgt_AuditTrail: "HIDE
+
+-- Password for 'tgt_landing' user  ...
+ACCEPT tgt_landing_password PROMPT "Provide the password for tgt_landing: "HIDE
+SQL
+observed_prompt_names="$(sqlplus_accept_prompt_names "$output_dir/passworddefinition.sql")"
+assert_contains "$observed_prompt_names" "tgt_AuditTrail_password"
+assert_contains "$observed_prompt_names" "tgt_landing_password"
+[[ "$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql")" == 2 ]]

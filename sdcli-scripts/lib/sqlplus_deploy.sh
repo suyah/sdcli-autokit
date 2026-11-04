@@ -300,6 +300,22 @@ sqlplus_accept_prompt_names() {
       line=$0
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
+      if (in_block_comment) {
+        if (line !~ /\*\//) next
+        sub(/^.*\*\//, "", line)
+        in_block_comment=0
+        sub(/^[[:space:]]+/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+      }
+      if (line ~ /^\/\*/) {
+        if (line !~ /\*\//) {
+          in_block_comment=1
+          next
+        }
+        sub(/^\/\*.*\*\//, "", line)
+        sub(/^[[:space:]]+/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+      }
       if (line == "" || line ~ /^--/) next
 
       field_count=split(line, fields, /[[:space:]]+/)
@@ -312,8 +328,15 @@ sqlplus_accept_prompt_names() {
         reject("invalid ACCEPT identifier")
         next
       }
-      if (field_count < 3 || toupper(fields[field_count]) != "HIDE") {
+      if (field_count < 3 || line !~ /[Hh][Ii][Dd][Ee][[:space:]]*$/) {
         reject("ACCEPT prompt must end with HIDE")
+        next
+      }
+      hide_prefix=line
+      sub(/[Hh][Ii][Dd][Ee][[:space:]]*$/, "", hide_prefix)
+      previous=substr(hide_prefix, length(hide_prefix), 1)
+      if (previous !~ /[[:space:]]/ && previous != "\"" && previous != "\047") {
+        reject("HIDE must follow whitespace or a closing prompt quote")
         next
       }
 
@@ -324,7 +347,13 @@ sqlplus_accept_prompt_names() {
       }
       print identifier
     }
-    END { if (failed) exit 2 }
+    END {
+      if (in_block_comment) {
+        printf "ERROR: Unsupported passworddefinition.sql record: unterminated block comment\n" > "/dev/stderr"
+        failed=1
+      }
+      if (failed) exit 2
+    }
   ' "$password_file"
 }
 
