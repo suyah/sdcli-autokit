@@ -199,7 +199,11 @@ podman exec --user sduser sdcli-autokit bash -lc '
   umask 077
   backup="/u01/data/sdcli-autokit/backups/pre-upgrade-$(date +%Y%m%d_%H%M%S)"
   mkdir -p "$backup"
-  tar -czf "$backup/sqldeveloper.tar.gz" -C /home/sduser/.sqldeveloper .
+  for state in profiles sqldeveloper; do
+    if [[ -d "/u01/data/sdcli-autokit/$state" ]]; then
+      tar -czf "$backup/$state.tar.gz" -C /u01/data/sdcli-autokit "$state"
+    fi
+  done
   cp -p /home/sduser/sdcli-scripts/config.yaml "$backup/config.yaml"
   printf "Backup: %s\n" "$backup"
 '
@@ -271,6 +275,12 @@ If you
 manually changed program files under `~/sdcli-scripts` in the old container,
 save those changes first: an upgrade replaces bundled program files, while
 preserving customer data.
+
+For upgrades from 1.2.x to 1.3.0, keep the existing per-project profiles and
+resume the existing run. Do not delete profiles or rerun repository init merely
+to upgrade. The new optional `schema_mapping` setting applies during convert;
+adding it after generation does not rename existing artifacts or deployed
+objects. See the schema remapping section below before changing an active run.
 
 For rollback, stop migration activity and use the previous bundle/image with
 the preserved volumes and complete old shared profile. Do not replace only
@@ -679,6 +689,52 @@ later phases; it does not depend on mutable `latest` selection. Different
 profiles with different repositories can run in parallel. A stale lock is not
 removed automatically; inspect the owner before removing the reported lock
 directory.
+
+## Optional schema remapping
+
+Add a one-to-one mapping to the selected migration in `config.yaml` **before
+convert**. Keys are exact SQL Server schema names from capture; values are
+simple Oracle owner names (letters, digits, underscore; start with a letter;
+maximum 128 characters). Each source schema must have a different target owner.
+
+```yaml
+migrations:
+  - name: example_migration
+    schema_mapping:
+      dbo: APP
+      audit: APP_AUDIT
+    source:
+      # existing source connection and credentials
+    target:
+      # existing target connection and credentials
+```
+
+No XML editing or extra command is needed. The normal `--migrate` workflow or
+the convert phase exports SQL Developer's identifier mapping, changes only the
+configured schema owners using the existing XML parser, then executes native
+`idmap,convert` together. Unlisted source schemas keep SQL Developer defaults.
+Unknown schemas and conflicting target owners stop before conversion. Without
+`schema_mapping`, conversion keeps its existing behavior.
+
+For an existing capture, use that run's captured numeric index:
+
+```bash
+./migrate.sh example_migration --phase convert --run "$RUN" --model "$CAPTURE_MODEL"
+```
+
+Inspect `autokit/idmap/schema_mapping.tsv` for effective owner names and
+`autokit/idmap/schema-mapping.xml` for the native input retained for diagnosis.
+Then use the converted model index reported by `lsconverted` for generate and
+datamove. Re-conversion may reuse an existing converted model: do not assume
+the index increases. SDCLI 26.2 rejects `idmap` with both `-input` and `-output`,
+so Autokit deliberately omits output from that combined command and runs it
+inside the run's `autokit/idmap` directory.
+
+Choose the mapping before generating/deploying. Changing it later does not
+rename Oracle objects or replace old generated/data artifacts. Start a new run
+if changing a mapping after generation or deployment. A run already remapped
+and generated successfully using native SDCLI can resume at datamove; it does
+not need capture/convert repeated just because Autokit was upgraded.
 
 ## Run a single phase
 

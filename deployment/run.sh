@@ -299,6 +299,7 @@ sync_sdcli_scripts() {
     lib/generate_validation_report.py
     lib/sqlplus_deploy.sh
     lib/sdcli_profile.sh
+    lib/schema_mapping.sh
     templates/product-preferences.xml
   )
 
@@ -343,6 +344,7 @@ sync_sdcli_scripts() {
         lib/generate_validation_report.py \
         lib/sqlplus_deploy.sh \
         lib/sdcli_profile.sh \
+        lib/schema_mapping.sh \
         templates/product-preferences.xml; do
         test -f "$STAGE_DIR/$required_file" || {
           echo "Error: staged migration program file is missing: $required_file" >&2
