@@ -296,31 +296,79 @@ sqlplus_accept_prompt_names() {
       printf "ERROR: Unsupported passworddefinition.sql record at line %d: %s\n", NR, reason > "/dev/stderr"
       failed=1
     }
+    # Strip SQL*Plus comments without interpreting ACCEPT suffix syntax. Block
+    # comments persist across lines; quote state is local to one command line
+    # so comment markers inside a PROMPT string remain literal text.
+    function strip_comments(input,    result, i, ch, next_ch, in_single_quote, in_double_quote) {
+      result=""
+      in_single_quote=0
+      in_double_quote=0
+      for (i = 1; i <= length(input); i++) {
+        ch=substr(input, i, 1)
+        next_ch=substr(input, i + 1, 1)
+
+        if (in_block_comment) {
+          if (ch == "*" && next_ch == "/") {
+            in_block_comment=0
+            i++
+          }
+          continue
+        }
+        if (in_single_quote) {
+          result=result ch
+          if (ch == "\047") {
+            if (next_ch == "\047") {
+              result=result next_ch
+              i++
+            } else {
+              in_single_quote=0
+            }
+          }
+          continue
+        }
+        if (in_double_quote) {
+          result=result ch
+          if (ch == "\"") {
+            if (next_ch == "\"") {
+              result=result next_ch
+              i++
+            } else {
+              in_double_quote=0
+            }
+          }
+          continue
+        }
+        if (ch == "-" && next_ch == "-") break
+        if (ch == "/" && next_ch == "*") {
+          # A removed block comment must not join adjacent tokens into an
+          # accidental ACCEPT keyword or identifier.
+          if (result !~ /[[:space:]]$/) result=result " "
+          in_block_comment=1
+          i++
+          continue
+        }
+
+        result=result ch
+        if (ch == "\047") in_single_quote=1
+        else if (ch == "\"") in_double_quote=1
+      }
+      return result
+    }
     {
-      line=$0
+      line=strip_comments($0)
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
-      if (in_block_comment) {
-        if (line !~ /\*\//) next
-        sub(/^.*\*\//, "", line)
-        in_block_comment=0
-        sub(/^[[:space:]]+/, "", line)
-        sub(/[[:space:]]+$/, "", line)
-      }
-      if (line ~ /^\/\*/) {
-        if (line !~ /\*\//) {
-          in_block_comment=1
-          next
-        }
-        sub(/^\/\*.*\*\//, "", line)
-        sub(/^[[:space:]]+/, "", line)
-        sub(/[[:space:]]+$/, "", line)
-      }
-      if (line == "" || line ~ /^--/) next
+      if (line == "") next
 
       field_count=split(line, fields, /[[:space:]]+/)
-      if (toupper(fields[1]) != "ACCEPT") {
-        reject("only ACCEPT prompts are supported")
+      # This is deliberately an identifier extractor, not a SQL*Plus parser.
+      # SQL Developer owns everything after ACCEPT <identifier>, including
+      # PROMPT/HIDE syntax, quoting, types, formatting, and defaults. Autokit
+      # needs only the safe substitution-variable names for a private DEFINE
+      # file; the generated passworddefinition.sql is never modified or run.
+      if (toupper(fields[1]) != "ACCEPT") next
+      if (field_count < 2) {
+        reject("ACCEPT prompt has no identifier")
         next
       }
       identifier=fields[2]
@@ -328,24 +376,9 @@ sqlplus_accept_prompt_names() {
         reject("invalid ACCEPT identifier")
         next
       }
-      if (field_count < 3 || line !~ /[Hh][Ii][Dd][Ee][[:space:]]*$/) {
-        reject("ACCEPT prompt must end with HIDE")
-        next
-      }
-      hide_prefix=line
-      sub(/[Hh][Ii][Dd][Ee][[:space:]]*$/, "", hide_prefix)
-      previous=substr(hide_prefix, length(hide_prefix), 1)
-      if (previous !~ /[[:space:]]/ && previous != "\"" && previous != "\047") {
-        reject("HIDE must follow whitespace or a closing prompt quote")
-        next
-      }
 
       key=toupper(identifier)
-      if (seen[key]++) {
-        reject("duplicate ACCEPT identifier")
-        next
-      }
-      print identifier
+      if (!seen[key]++) print identifier
     }
     END {
       if (in_block_comment) {
@@ -635,7 +668,7 @@ run_deploy() {
   log_info "Deploying generated Oracle schema for data load"
   log_info "Target: $target_user@$target_conn"
   if (( prompt_count > 0 )); then
-    log_info "Deploy schema password prompts: $prompt_count from migrations[$idx].target.default_schema_password"
+    log_info "Deploy schema password variables: $prompt_count from migrations[$idx].target.default_schema_password"
   fi
 
   if $DRY_RUN; then

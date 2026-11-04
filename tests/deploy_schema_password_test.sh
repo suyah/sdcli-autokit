@@ -205,6 +205,7 @@ run_deploy 0 "$output_dir"
 deploy_output="$(cat "$RUN_LOG_FILE")"
 assert_not_contains "$deploy_output" "defaults.deploy_preferences.schema_password"
 assert_contains "$deploy_output" "migrations[0].target.default_schema_password"
+assert_contains "$deploy_output" "Deploy schema password variables: 3"
 
 [[ "${#file_calls[@]}" -eq 3 ]]
 assert_contains "${file_calls[*]}" "role_setup.sql||0|"
@@ -220,7 +221,7 @@ masked="$(printf '%s\n' \
 assert_contains "$masked" "IDENTIFIED BY *** PASSWORD"
 assert_not_contains "$masked" "$schema_password"
 
-assert_password_prompts_rejected() {
+assert_password_definition_rejected() {
   local expected="$1"
   local output rc
   set +e
@@ -228,7 +229,7 @@ assert_password_prompts_rejected() {
   rc=$?
   set -e
   [[ $rc -ne 0 ]] || {
-    echo "Expected passworddefinition.sql to be rejected" >&2
+    echo "Expected password definition extraction to fail" >&2
     exit 1
   }
   assert_contains "$output" "$expected"
@@ -238,17 +239,28 @@ cat > "$output_dir/passworddefinition.sql" <<'SQL'
 ACCEPT repeated_password PROMPT "Password: " HIDE
 ACCEPT REPEATED_PASSWORD PROMPT "Password again: " HIDE
 SQL
-assert_password_prompts_rejected "duplicate ACCEPT identifier"
+observed_prompt_names="$(sqlplus_accept_prompt_names "$output_dir/passworddefinition.sql")"
+[[ "$observed_prompt_names" == "repeated_password" ]]
+[[ "$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql")" == 1 ]]
 
 cat > "$output_dir/passworddefinition.sql" <<'SQL'
 ACCEPT bad-name PROMPT "Password: " HIDE
 SQL
-assert_password_prompts_rejected "invalid ACCEPT identifier"
+assert_password_definition_rejected "invalid ACCEPT identifier"
 
 cat > "$output_dir/passworddefinition.sql" <<'SQL'
-ACCEPT visible_password PROMPT "Password: "
+SET TERMOUT OFF
+ACCEPT visible_password CHAR FORMAT A80 DEFAULT "unused" PROMPT "Password: "
+PROMPT This directive is intentionally ignored by Autokit.
 SQL
-assert_password_prompts_rejected "must end with HIDE"
+observed_prompt_names="$(sqlplus_accept_prompt_names "$output_dir/passworddefinition.sql")"
+[[ "$observed_prompt_names" == "visible_password" ]]
+[[ "$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql")" == 1 ]]
+
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+ACCEPT
+SQL
+assert_password_definition_rejected "ACCEPT prompt has no identifier"
 
 # SQL Developer 26.2 can use a block-comment header and place HIDE immediately
 # after the closing prompt quote. Both are SQL*Plus-valid and must produce the
@@ -260,8 +272,59 @@ ACCEPT tgt_AuditTrail_password PROMPT "Provide the password for tgt_AuditTrail: 
 
 -- Password for 'tgt_landing' user  ...
 ACCEPT tgt_landing_password PROMPT "Provide the password for tgt_landing: "HIDE
+
+-- Password for 'tgt_MT' user  ...
+ACCEPT tgt_MT_password PROMPT "Provide the password for tgt_MT: "HIDE
+
+/*
+ACCEPT ignored_comment_password PROMPT "This must never become a variable" HIDE
+*/
+-- Password for 'tgt_dbo' user  ...
+ACCEPT tgt_dbo_password PROMPT "Provide the password for tgt_dbo: "HIDE
+
+-- Password for 'Emulation' user  ...
+ACCEPT Emulation_password PROMPT "Provide the password for Emulation: "HIDE
 SQL
 observed_prompt_names="$(sqlplus_accept_prompt_names "$output_dir/passworddefinition.sql")"
 assert_contains "$observed_prompt_names" "tgt_AuditTrail_password"
 assert_contains "$observed_prompt_names" "tgt_landing_password"
-[[ "$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql")" == 2 ]]
+assert_contains "$observed_prompt_names" "tgt_MT_password"
+assert_contains "$observed_prompt_names" "tgt_dbo_password"
+assert_contains "$observed_prompt_names" "Emulation_password"
+assert_not_contains "$observed_prompt_names" "ignored_comment_password"
+[[ "$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql")" == 5 ]]
+
+cecrealm_runtime_dir="$tmpdir/cecrealm-password-defines"
+mkdir -p "$cecrealm_runtime_dir"
+cecrealm_defines_file="$(create_sqlplus_password_defines "$output_dir/passworddefinition.sql" "$schema_password" "$cecrealm_runtime_dir")"
+[[ "$(grep -c '^DEFINE ' "$cecrealm_defines_file")" == 5 ]]
+assert_contains "$(cat "$cecrealm_defines_file")" 'DEFINE tgt_AuditTrail_password = "Sch@ma Safe;R""8"'
+assert_contains "$(cat "$cecrealm_defines_file")" 'DEFINE Emulation_password = "Sch@ma Safe;R""8"'
+assert_not_contains "$(cat "$cecrealm_defines_file")" "ignored_comment_password"
+
+# An unclosed block comment anywhere in the file keeps later ACCEPT text
+# inactive and must fail rather than silently produce partial definitions.
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+SET TERMOUT OFF /* missing close
+ACCEPT commented_password PROMPT "Ignore this" HIDE
+SQL
+assert_password_definition_rejected "unterminated block comment"
+
+# Comment recognition decides whether an ACCEPT prefix is active. It must
+# handle multiple block comments, comments after an unrelated directive, and
+# comment markers inside a quoted prompt without interpreting prompt syntax.
+cat > "$output_dir/passworddefinition.sql" <<'SQL'
+/* header */ /* more header
+ACCEPT commented_first_password PROMPT "Ignore this" HIDE
+*/
+SET TERMOUT OFF /* another header
+ACCEPT commented_second_password PROMPT "Ignore this too" HIDE
+*/
+/* header */ ACCEPT active_password PROMPT "Prompt contains /* and -- literally"HIDE
+ACCEPT quoted_marker_password PROMPT "A quote escape: "" /* still prompt text" HIDE
+ACC/* comment */EPT unintended_password PROMPT "This is not an ACCEPT command" HIDE
+ACCEPT real_password/* comment */PROMPT "Comment boundaries preserve tokens" HIDE
+SQL
+observed_prompt_names="$(sqlplus_accept_prompt_names "$output_dir/passworddefinition.sql")"
+[[ "$observed_prompt_names" == $'active_password\nquoted_marker_password\nreal_password' ]]
+[[ "$(count_sqlplus_accept_prompts "$output_dir/passworddefinition.sql")" == 3 ]]
