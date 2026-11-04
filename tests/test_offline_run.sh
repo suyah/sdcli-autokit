@@ -62,6 +62,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo new-program' > "$source_dir/migrate.sh
 printf '%s\n' 'new report renderer' > "$source_dir/lib/generate_validation_report.py"
 printf '%s\n' 'new deploy library' > "$source_dir/lib/sqlplus_deploy.sh"
 printf '%s\n' 'new profile library' > "$source_dir/lib/sdcli_profile.sh"
+printf '%s\n' 'new schema mapping library' > "$source_dir/lib/schema_mapping.sh"
 printf '%s\n' 'new wrapper' > "$source_dir/lib/sqlplus"
 printf '%s\n' 'new template' > "$source_dir/templates/product-preferences.xml"
 printf '%s\n' 'defaults:' '  driver_file: /u01/app/jtds-1.3.1.jar' > "$source_dir/config.example.yaml"

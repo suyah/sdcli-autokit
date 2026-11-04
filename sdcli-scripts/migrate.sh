@@ -54,6 +54,7 @@ declare -a DATATYPE_MAPPING_TEMP_DIRS=()
 declare -a SQLPLUS_RUNTIME_TEMP_DIRS=()
 
 source "$SCRIPT_DIR/lib/sdcli_profile.sh"
+source "$SCRIPT_DIR/lib/schema_mapping.sh"
 
 # --- CLI and logging helpers -------------------------------------------------
 usage() {
@@ -813,15 +814,20 @@ sdcli_output_has_diagnostics() {
 
 run_sdcli() {
   local cmd=("$@")
-  local printable output_file rc arg action="" is_convert=false is_help=false completed_successfully=false timeout_seconds errexit_enabled=false
+  local printable output_file rc arg action="" requested_action is_convert=false is_help=false completed_successfully=false timeout_seconds errexit_enabled=false
+  local -a requested_actions=()
   for arg in "${cmd[@]}"; do
     [[ "$arg" == -help=* || "$arg" == -h=* ]] && is_help=true
     if [[ "$arg" == -actions=* ]]; then
       action="${arg#-actions=}"
-      [[ "$action" == "convert" ]] && is_convert=true
+      IFS=',' read -r -a requested_actions <<< "$action"
     fi
   done
-  SDCLI_LAST_ACTION="$action"
+  SDCLI_LAST_ACTION=""
+  for requested_action in "${requested_actions[@]+"${requested_actions[@]}"}"; do
+    [[ "$requested_action" == convert ]] && is_convert=true
+    SDCLI_LAST_ACTION="$requested_action"
+  done
   SDCLI_LAST_SUCCESS_MARKER=false
   [[ -n "$SDCLI_PROFILE_DIR" ]] || { log_error 'No SQL Developer project profile selected'; return 1; }
   register_environment_secrets
@@ -848,9 +854,9 @@ run_sdcli() {
   [[ "$-" == *e* ]] && errexit_enabled=true
   set +e
   if (( timeout_seconds > 0 )) && command -v timeout >/dev/null 2>&1; then
-    timeout "$timeout_seconds" env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
+    (cd "${SDCLI_WORKING_DIR:-$PWD}" && timeout "$timeout_seconds" env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}") 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
   else
-    env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}" 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
+    (cd "${SDCLI_WORKING_DIR:-$PWD}" && env "IDE_USER_DIR=$SDCLI_PROFILE_DIR" "${cmd[@]}") 2>&1 | tee "$output_file" | redact_sdcli_output | tee -a "$RUN_LOG_FILE" | filter_sdcli_console_output
   fi
   rc=${PIPESTATUS[0]}
 
@@ -860,10 +866,14 @@ run_sdcli() {
 
   # Some SDCLI releases report a fatal diagnostic on standard output while
   # returning zero. Only an exact, understood init diagnostic is benign.
-  if [[ -n "$action" ]] && grep -Eqi "^[[:space:]]*${action}[[:space:]]+completed successfully[[:space:]]*$" "$output_file"; then
-    completed_successfully=true
-    SDCLI_LAST_SUCCESS_MARKER=true
-  fi
+  completed_successfully=true
+  [[ -n "$action" ]] || completed_successfully=false
+  for requested_action in "${requested_actions[@]+"${requested_actions[@]}"}"; do
+    if ! grep -Eqi "^[[:space:]]*${requested_action}[[:space:]]+completed successfully[[:space:]]*$" "$output_file"; then
+      completed_successfully=false
+    fi
+  done
+  SDCLI_LAST_SUCCESS_MARKER="$completed_successfully"
   if sdcli_output_has_diagnostics "$output_file"; then
     if ! sdcli_has_only_benign_diagnostics "$action" "$completed_successfully" "$output_file"; then
       rc=1
@@ -1069,6 +1079,7 @@ validate_migration_config() {
   validate_migration_secret_placeholder "$idx" target password
   validate_migration_secret_placeholder "$idx" target default_schema_password
   validate_load_preferences ".migrations[$idx].load_preferences" "migrations[$idx].load_preferences"
+  validate_schema_mapping_config "$idx" || fail "Invalid schema mapping for migrations[$idx]"
 }
 
 validate_config() {
@@ -3240,8 +3251,22 @@ run_phase() {
         || fail "Capture failed for migration '$project_name'"
       ;;
     convert)
-      run_sdcli sdcli migration -actions=convert -model="$model_name" -output="$output_dir" \
-        || fail "Convert failed for migration '$project_name'"
+      if has_schema_mapping "$idx"; then
+        if ! $DRY_RUN; then
+          # Bind a manual --model/latest selection to this run before changing
+          # repository identifiers. Reuse the existing 26.2 model-list parser.
+          lookup_sdcli_model_index capture "$(expected_run_model_name "$project_name")" \
+            || fail 'Cannot resolve the captured model for schema mapping'
+          [[ "$model_name" == latest || "$model_name" == "$SDCLI_VERIFIED_MODEL_INDEX" ]] \
+            || fail "--model $model_name does not belong to the selected run"
+          model_name="$SDCLI_VERIFIED_MODEL_INDEX"
+        fi
+        run_schema_mapped_conversion "$idx" "$model_name" \
+          || fail "Mapped conversion failed for migration '$project_name'"
+      else
+        run_sdcli sdcli migration -actions=convert -model="$model_name" -output="$output_dir" \
+          || fail "Convert failed for migration '$project_name'"
+      fi
       ;;
     generate)
       run_sdcli sdcli migration -actions=generate -model="$model_name" -dest="$target_name" -output="$output_dir" \
@@ -3583,6 +3608,7 @@ main() {
 
   [[ -f "$CONFIG_FILE" ]] || fail "Config file not found: $CONFIG_FILE"
   require_command yq
+  require_command jq
 
   local migration_idx=""
   local init_migration_was_explicit=true

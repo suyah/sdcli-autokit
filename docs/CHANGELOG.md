@@ -5,6 +5,13 @@ into the customer offline bundle.
 
 ## Unreleased
 
+### Added
+
+- Optional per-migration `schema_mapping` for one-to-one SQL Server schema to
+  Oracle owner names. Autokit exports native identifier XML, updates schema
+  attributes with existing yq/jq, and runs idmap,convert in the same process.
+  No manual XML editing, DDL parsing or new runtime dependency is required.
+
 ### Fixed
 
 - Treat object-level conversion diagnostics as warnings after successful SDCLI
@@ -14,6 +21,8 @@ into the customer offline bundle.
   scripts during deployment, including schema post/rebuild.sql.
 - Hide repeated SQL Developer banners and known Java startup deprecation
   messages in the terminal; retain the full redacted output in migrate.log.
+- Check every action completion marker for combined SDCLI commands and reject
+  vendor error output even when a later action reports success.
 
 ## 1.2.1 - 2026-10-22
 

@@ -46,6 +46,11 @@ migration_repository:
 
 migrations:
   - name: example_migration
+    # Optional one-to-one owner mapping, applied automatically during convert.
+    # Keys are exact captured source schema names. Omitted schemas keep defaults.
+    # schema_mapping:
+    #   dbo: APP
+    #   audit: APP_AUDIT
     source:
       conn: sqlserver.example.internal:1433:example_database
       user: migration_user
