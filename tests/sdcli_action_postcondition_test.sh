@@ -82,6 +82,13 @@ if [[ "${FAKE_MODEL_LOOKUP_HAS_MODEL:-false}" == "true" ]]; then
       printf '(2) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
       printf '(3) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
       ;;
+    converted_prefix)
+      printf '(1) --> Model Name : Converted:%s\n' "${FAKE_EXPECTED_MODEL:?}"
+      ;;
+    converted_ambiguous)
+      printf '(1) --> Model Name : Converted:%s\n' "${FAKE_EXPECTED_MODEL:?}"
+      printf '(2) --> Model Name : %s\n' "${FAKE_EXPECTED_MODEL:?}"
+      ;;
     *)
       printf 'Unsupported fake model-list style: %s\n' "$FAKE_MODEL_LIST_STYLE" >&2
       exit 2
@@ -238,6 +245,17 @@ verify_phase_postcondition convert latest "$project_name" "$output_dir"
   || fail_test "converted model lookup did not return the fixture index"
 grep -Fx -- "$SDCLI_PROFILE_DIR" "$SDCLI_ARGS_FILE" >/dev/null \
   || fail_test "converted model lookup did not use the selected profile"
+FAKE_MODEL_LIST_STYLE=converted_prefix
+export FAKE_MODEL_LIST_STYLE
+set_sdcli_postcondition_state convert
+verify_phase_postcondition convert latest "$project_name" "$output_dir"
+[[ "$SDCLI_VERIFIED_MODEL_INDEX" == 1 ]] \
+  || fail_test 'converted model prefix from real 26.2 output was not recognized'
+set_sdcli_postcondition_state capture
+expect_model_lookup_failure 'converted prefix cannot match a captured model' verify_phase_postcondition capture "$expected_model" "$project_name" "$output_dir"
+FAKE_MODEL_LIST_STYLE=converted_ambiguous
+set_sdcli_postcondition_state convert
+expect_model_lookup_failure 'ambiguous converted names' verify_phase_postcondition convert latest "$project_name" "$output_dir"
 FAKE_MODEL_LIST_STYLE=legacy
 export FAKE_MODEL_LIST_STYLE
 set_sdcli_postcondition_state capture

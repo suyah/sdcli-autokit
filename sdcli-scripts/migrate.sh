@@ -2929,7 +2929,7 @@ lookup_sdcli_model_index() {
   SDCLI_CAPTURE_OUTPUT_FILE="$output_file"
   if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action"; then
     rc=1
-  elif ! model_index="$(LC_ALL=C awk -v expected="$expected_model" '
+  elif ! model_index="$(LC_ALL=C awk -v expected="$expected_model" -v phase="$phase" '
     {
       line=$0
       gsub(/\r/, "", line)
@@ -2945,7 +2945,10 @@ lookup_sdcli_model_index() {
         if (model_index ~ /^\([0-9]+$/) {
           sub(/^\(/, "", model_index)
           gsub(/^[[:space:]]+|[[:space:]]+$/, "", model_name)
-          if (model_name == expected) {
+          # Native conversion names observed in SQL Developer 26.2 carry
+          # "Converted:". Compare literal names, scoped to converted models;
+          # still reject two matching entries rather than guessing an index.
+          if (model_name == expected || (phase == "convert" && model_name == "Converted:" expected)) {
             matches++
             matched_index=model_index
           }
