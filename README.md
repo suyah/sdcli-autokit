@@ -1049,6 +1049,31 @@ Important files:
 
 If you rerun a phase with `--run`, the new output is appended to the existing run log.
 
+### Collect a support evidence bundle
+
+After a run, collect its logs and structured evidence without copying customer
+data, configuration, wallets, profiles, passwords, generated DDL, loader
+control files, or rejected-row payloads:
+
+```bash
+cd ~/sdcli-scripts
+./collect-run-evidence.sh cecrealm --run 20261104_093119
+```
+
+The default destination is `/u01/data/sdcli-autokit/support-bundles/`. The
+script prints the `.tar.gz` path and adjacent SHA-256 file. The archive includes
+the named runner logs and status evidence, deployment manifest, BCP/SQL*Loader
+status, reconciliation, validation report/evidence, schema-mapping TSV evidence,
+the SQL Developer error/output logs, and SQL*Loader log files. It uses a fixed
+allow-list for runner evidence and never treats arbitrary `.txt` or `.csv`
+files as logs. Use `--output /path/to/directory` to choose another destination.
+Verify the archive before sharing it (run the command from the bundle directory):
+
+```bash
+cd /u01/data/sdcli-autokit/support-bundles
+sha256sum -c <bundle>.tar.gz.sha256
+```
+
 The validation report uses only structured evidence collected by the autokit:
 
 - table export, load, and target row counts;
