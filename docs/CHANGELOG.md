@@ -5,6 +5,8 @@ into the customer offline bundle.
 
 ## Unreleased
 
+## 1.3.0 - 2026-11-04
+
 ### Added
 
 - Optional per-migration `schema_mapping` for one-to-one SQL Server schema to
@@ -23,6 +25,14 @@ into the customer offline bundle.
   messages in the terminal; retain the full redacted output in migrate.log.
 - Check every action completion marker for combined SDCLI commands and reject
   vendor error output even when a later action reports success.
+
+### Compatibility
+
+- Supports SQL Developer 26.2, SQL Server sources and Oracle targets only.
+- Existing configuration remains valid. Optional schema_mapping applies during
+  convert; existing 1.2.x profiles, repositories and run artifacts are retained
+  on upgrade. Runs already remapped/generated with native SDCLI can resume at
+  datamove without repeating capture or conversion.
 
 ## 1.2.1 - 2026-10-22
 
