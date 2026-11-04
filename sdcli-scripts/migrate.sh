@@ -2847,6 +2847,7 @@ run_offload() {
     export SQLSERVER_BCP_TLS_MODE_EFFECTIVE="$bcp_tls_mode"
     export SQLSERVER_BCP_PACKET_SIZE="$bcp_packet_size"
     export SQLSERVER_BCP_PASSWORD="${source_password}"
+    export SQLSERVER_BCP_SOURCE_DATABASE="$source_db"
     export SQLSERVER_BCP_STATUS_FILE="$bcp_status_file"
     export PATH="$SCRIPT_DIR/lib:$PATH"
     local script_dir script_name script_rc
