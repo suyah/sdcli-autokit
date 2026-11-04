@@ -43,6 +43,7 @@ sdcli-scripts/**/*.pyc
 !docs/superpowers/plans/2026-10-19-reliability-hardening.md
 !docs/tech-debt-multi-source-adapters.md
 !docs/CHANGELOG.md
+!docs/hotfix-bcp-queryout.md
 !docs/release-process.md
 !docs/licenses/
 !docs/licenses/ORACLE-FUTC.txt

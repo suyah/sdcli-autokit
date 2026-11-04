@@ -26,6 +26,8 @@ PACKET_SIZE="${SQLSERVER_BCP_PACKET_SIZE:-}"
 BCP_PASSWORD="${SQLSERVER_BCP_PASSWORD:-}"
 BCP_STATUS_FILE="${SQLSERVER_BCP_STATUS_FILE:-}"
 BCP_SOURCE_DATABASE="${SQLSERVER_BCP_SOURCE_DATABASE:-}"
+BCP_TABLE_CATALOG_FILE="${SQLSERVER_BCP_TABLE_CATALOG_FILE:-}"
+BCP_ADJUSTMENTS_FILE="${SQLSERVER_BCP_ADJUSTMENTS_FILE:-}"
 
 bcp_option_value() {
   local option="$1"
@@ -45,38 +47,18 @@ bcp_option_value() {
   return 1
 }
 
-sqlserver_bracket_identifier() {
-  local identifier="$1"
-  identifier="${identifier//]/]]}"
-  printf '[%s]' "$identifier"
-}
-
 bcp_ascii_lower() {
   LC_ALL=C tr '[:upper:]' '[:lower:]'
 }
 
-resolve_dotted_bcp_table() {
-  local source_object="$1"
-  local mode
-  local source_prefix source_database_name source_suffix source_object_folded source_prefix_folded lookup_key sql_literal server username lookup_output rc
-  local -a matches=()
+load_bcp_table_catalog() {
+  local server username raw_file
   local -a sqlcmd_tls_args=()
-  local resolved_schema resolved_table extra
-
-  # queryout already receives SQL text. Only an unquoted table export can be
-  # repaired here. SQL Developer emits local source tables as
-  # database.schema.table; a dot inside schema/table makes that flat form
-  # ambiguous to bcp, so resolve it from SQL Server metadata rather than guess.
-  mode="$(printf '%s' "${args[1]:-}" | bcp_ascii_lower)"
-  [[ "$mode" == out && -n "$BCP_SOURCE_DATABASE" ]] || return 0
-  source_prefix="${BCP_SOURCE_DATABASE}."
-  source_object_folded="$(printf '%s' "$source_object" | bcp_ascii_lower)"
-  source_prefix_folded="$(printf '%s' "$source_prefix" | bcp_ascii_lower)"
-  [[ "$source_object_folded" == "$source_prefix_folded"* ]] || return 0
-  source_database_name="${source_object:0:${#BCP_SOURCE_DATABASE}}"
-  source_suffix="${source_object:${#source_prefix}}"
-  [[ "$source_suffix" == *.*.* ]] || return 0
-
+  [[ -n "$BCP_TABLE_CATALOG_FILE" ]] || {
+    echo 'ERROR: source table catalog path is missing; install matching migrate.sh and lib/bcp' >&2
+    return 1
+  }
+  [[ ! -s "$BCP_TABLE_CATALOG_FILE" ]] || return 0
   server="$(bcp_option_value -S)" || {
     echo 'ERROR: cannot resolve a dotted SQL Server table name: bcp server option is missing' >&2
     return 1
@@ -100,35 +82,68 @@ resolve_dotted_bcp_table() {
       ;;
   esac
 
-  lookup_key="$source_suffix"
-  sql_literal="$(printf '%s' "$lookup_key" | sed "s/'/''/g")"
-  set +e
-  lookup_output="$(SQLCMDPASSWORD="$BCP_PASSWORD" sqlcmd \
+  raw_file="$(mktemp "${BCP_TABLE_CATALOG_FILE}.XXXXXX")" || return 1
+  # One catalog query per offload attempt, on first ambiguous export only.
+  # QUOTENAME supplies escaped SQL identifiers; no identifier is split on dots.
+  # Unlimited column width and an end marker preserve long/trailing-space names.
+  if ! SQLCMDPASSWORD="$BCP_PASSWORD" sqlcmd \
     -S "$server" -U "$username" -d "$BCP_SOURCE_DATABASE" \
-    -h -1 -W -s $'\t' -b "${sqlcmd_tls_args[@]}" \
-    -Q "SET NOCOUNT ON; SELECT s.name, t.name FROM sys.tables AS t INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id WHERE s.name + N'.' + t.name = N'$sql_literal';")"
-  rc=$?
-  set -e
-  if (( rc != 0 )); then
-    echo "ERROR: SQL Server metadata lookup failed while resolving dotted table name: $source_object" >&2
+    -h -1 -y 0 -w 65535 -f 65001 -b -r 1 -x "${sqlcmd_tls_args[@]}" \
+    -Q "SET NOCOUNT ON;
+SELECT CAST(N'SDCLI_BCP_TABLE' AS nvarchar(max)) + NCHAR(9)
+     + s.name + N'.' + o.name + NCHAR(9)
+     + QUOTENAME(DB_NAME()) + N'.' + QUOTENAME(s.name) + N'.' + QUOTENAME(o.name)
+     + NCHAR(9) + N'SDCLI_END'
+FROM sys.objects AS o JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0;" > "$raw_file"; then
+    rm -f "$raw_file"
+    echo 'ERROR: SQL Server source table catalog query failed' >&2
     return 1
   fi
+  if ! awk -F '\t' -v OFS='\t' '
+    /^[[:space:]]*$/ { next }
+    { sub(/\r$/, "") }
+    NF != 4 || $1 != "SDCLI_BCP_TABLE" || $2 == "" || $3 == "" || $4 !~ /^SDCLI_END *$/ { invalid=1; next }
+    { print $2, $3; rows++ }
+    END { if (invalid || rows == 0) exit 1 }
+  ' "$raw_file" > "$raw_file.parsed"; then
+    rm -f "$raw_file" "$raw_file.parsed"
+    echo 'ERROR: source table catalog is empty or malformed; names with tab/newline characters are unsupported' >&2
+    return 1
+  fi
+  mv "$raw_file.parsed" "$BCP_TABLE_CATALOG_FILE" || { rm -f "$raw_file" "$raw_file.parsed"; return 1; }
+  rm -f "$raw_file"
+}
 
-  while IFS= read -r lookup_output; do
-    [[ -n "$lookup_output" ]] && matches+=("$lookup_output")
-  done <<< "$lookup_output"
-  if (( ${#matches[@]} != 1 )); then
-    echo "ERROR: dotted SQL Server table name must resolve to exactly one schema/table: $source_object (matches=${#matches[@]})" >&2
-    return 1
-  fi
-  IFS=$'\t' read -r resolved_schema resolved_table extra <<< "${matches[0]}"
-  if [[ -z "$resolved_schema" || -z "$resolved_table" || -n "$extra" \
-      || "$resolved_schema$resolved_table" == *$'\t'* || "$resolved_schema$resolved_table" == *$'\r'* || "$resolved_schema$resolved_table" == *$'\n'* ]]; then
-    echo "ERROR: SQL Server metadata lookup returned malformed identifier evidence for: $source_object" >&2
-    return 1
-  fi
+resolve_dotted_bcp_table() {
+  local source_object="$1" mode source_prefix source_suffix
+  local source_object_folded source_prefix_folded key qualified resolved="" count=0
+  mode="$(printf '%s' "${args[1]:-}" | bcp_ascii_lower)"
+  [[ "$mode" == out && -n "$BCP_SOURCE_DATABASE" ]] || return 0
+  source_prefix="${BCP_SOURCE_DATABASE}."
+  source_object_folded="$(printf '%s' "$source_object" | bcp_ascii_lower)"
+  source_prefix_folded="$(printf '%s' "$source_prefix" | bcp_ascii_lower)"
+  [[ "$source_object_folded" == "$source_prefix_folded"* ]] || return 0
+  source_suffix="${source_object:${#source_prefix}}"
+  [[ "$BCP_SOURCE_DATABASE" == *.* || "$source_suffix" == *.*.* ]] || return 0
 
-  args[0]="$(sqlserver_bracket_identifier "$source_database_name").$(sqlserver_bracket_identifier "$resolved_schema").$(sqlserver_bracket_identifier "$resolved_table")"
+  load_bcp_table_catalog || return 1
+  while IFS=$'\t' read -r key qualified; do
+    if [[ "$key" == "$source_suffix" ]]; then
+      resolved="$qualified"
+      count=$((count + 1))
+    fi
+  done < "$BCP_TABLE_CATALOG_FILE"
+  if (( count != 1 )); then
+    echo "ERROR: dotted SQL Server table name must resolve to exactly one schema/table: $source_object (matches=$count)" >&2
+    return 1
+  fi
+  args[0]="SELECT * FROM $resolved"
+  args[1]=queryout
+  printf '[SDCLI-BCP-ADAPT] runtime out -> queryout: %s -> %s; generated scripts unchanged\n' "$source_object" "${args[0]}"
+  if [[ -n "$BCP_ADJUSTMENTS_FILE" ]]; then
+    printf '%s\t%s\t%s\n' "$source_object" "$bcp_data_file" "${args[0]}" >> "$BCP_ADJUSTMENTS_FILE" || return 1
+  fi
 }
 
 args=()

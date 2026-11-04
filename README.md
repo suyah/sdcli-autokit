@@ -852,6 +852,24 @@ directory containing `user.sql`. Therefore, if SQL Developer generated an
 also been regenerated without references to `EMULATION.UTILS`. If no
 `Emulation/` directory is generated, the runner has nothing to deploy for it.
 
+### SQL Server exports with dots in object names
+
+SQL Developer can emit an ambiguous BCP name such as `demo.landing.Report.csv`.
+For these local source objects, Autokit resolves the schema/table from a lazy
+source catalog and executes `SELECT * FROM [demo].[landing].[Report.csv]` using
+BCP `queryout`. The catalog is read once on the first affected export and shared
+by subsequent exports in that offload attempt. Ordinary table exports and
+existing query exports keep their original commands. The source account needs
+visibility of the tables/views being exported; zero or multiple matches fail
+explicitly. Catalog names containing tab/newline characters are unsupported.
+
+The generated `.sh` and `.ctl` files are never rewritten. Each adjustment is
+printed as `runtime out -> queryout` in the console and `migrate.log`, and
+recorded in `autokit/bcp_queryout_adjustments.tsv`. The source-name catalog is
+`autokit/bcp_source_tables.tsv`. Both files are refreshed on each offload attempt;
+`bcp_status.tsv` retains the original source object and actual data-file path for
+reconciliation. Encoding, field/row terminators and other BCP options are kept.
+
 ### Model and run behavior
 
 For normal use:

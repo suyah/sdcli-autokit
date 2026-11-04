@@ -14,50 +14,50 @@ mkdir -p "$AUTOKIT_DIR" "$datamove_dir/control"
 
 cat > "$datamove_dir/MicrosoftSQLServer_data.sh" <<'SH'
 #!/usr/bin/env bash
-bcp CEC_REALM.landing.NorthCanberraHospital_AHC.csv out data/ahc-csv.dat -c -S"$1" -U"$2" -P"$3"
+bcp 'demo.landing.Report.csv' out data/report.dat -q -c -CRAW -t '<EOFD>' -r '<EORD>' -S"$1" -U"$2" -P"$3"
+bcp 'demo.sales.region.Order] data.csv' out data/orders.dat -q -c -CRAW -t '<EOFD>' -r '<EORD>' -S"$1" -U"$2" -P"$3"
 SH
-chmod +x "$datamove_dir/MicrosoftSQLServer_data.sh"
-cat > "$datamove_dir/control/ahc-csv.ctl" <<'CTL'
-load data
-infile 'data/ahc-csv.dat'
-into table TGT_LANDING.NORTHCANBERRAHOSPITAL_AHC_CSV
-CTL
+for table in report orders; do
+  printf "load data\ninfile 'data/%s.dat'\ninto table TARGET.%s\n" "$table" "$table" > "$datamove_dir/control/$table.ctl"
+done
 
 cat > "$tmpdir/real-bcp" <<'SH'
 #!/usr/bin/env bash
-IFS= read -r _ || true
-[[ "$1" == '[CEC_REALM].[landing].[NorthCanberraHospital_AHC.csv]' ]] || {
-  printf 'BCP object was not safely quoted: %s\n' "$1" >&2
-  exit 42
+set -eu
+IFS= read -r password
+[[ "$password" == SourcePass1 ]] || exit 41
+case "$3" in
+  data/report.dat) expected='SELECT * FROM [demo].[landing].[Report.csv]' ;;
+  data/orders.dat) expected='SELECT * FROM [demo].[sales.region].[Order]] data.csv]' ;;
+  *) exit 42 ;;
+esac
+[[ "$1" == "$expected" && "$2" == queryout ]] || {
+  echo 'Expected the real-world verified queryout form, not bracketed table out' >&2
+  exit 43
 }
-[[ "$2" == out && "$3" == 'data/ahc-csv.dat' ]] || exit 43
-mkdir -p "$(dirname "$3")"
-: > "$3"
+[[ "$4" == -q && "$5" == -c && "$6" == -CRAW && "$7" == -t && "$8" == '<EOFD>' && "$9" == -r && "${10}" == '<EORD>' ]] || exit 44
+mkdir -p data
+printf 'example<EOFD><EORD>' > "$3"
 printf '1 rows copied.\n'
 SH
-chmod +x "$tmpdir/real-bcp"
-
 cat > "$tmpdir/sqlcmd" <<'SH'
 #!/usr/bin/env bash
-[[ "$*" == *"landing.NorthCanberraHospital_AHC.csv"* ]] || {
-  printf 'Unexpected metadata lookup: %s\n' "$*" >&2
-  exit 44
-}
-[[ " $* " == *' -No '* ]] || {
-  printf 'SQLCMD did not receive the optional TLS mode: %s\n' "$*" >&2
-  exit 45
-}
-printf 'landing\tNorthCanberraHospital_AHC.csv\n'
+set -eu
+[[ "$SQLCMDPASSWORD" == SourcePass1 ]] || exit 45
+[[ " $* " == *' -No '* && " $* " == *' -y 0 '* ]] || exit 46
+printf 'query\n' >> "$METADATA_CALLS"
+printf 'SDCLI_BCP_TABLE\tlanding.Report.csv\t[demo].[landing].[Report.csv]\tSDCLI_END\n'
+printf 'SDCLI_BCP_TABLE\tsales.region.Order] data.csv\t[demo].[sales.region].[Order]] data.csv]\tSDCLI_END   \n'
 SH
-chmod +x "$tmpdir/sqlcmd"
-
+chmod +x "$tmpdir/real-bcp" "$tmpdir/sqlcmd"
 export SQLSERVER_REAL_BCP="$tmpdir/real-bcp"
+export METADATA_CALLS="$tmpdir/metadata-calls"
 export PATH="$tmpdir:$PATH"
 
 get_required_value() {
   case "$1" in
-    '.migrations[0].source.conn') printf '10.141.1.97:1433:cec_realm\n' ;;
-    '.migrations[0].source.user') printf 'eHOracle-pilot\n' ;;
+    '.migrations[0].source.conn') printf 'source.example:1433:demo\n' ;;
+    '.migrations[0].source.user') printf 'migration_reader\n' ;;
     '.defaults.source.bcp_tls_mode') printf 'optional\n' ;;
     *) return 1 ;;
   esac
@@ -72,10 +72,25 @@ get_secret_value() {
 RUN_LOG_FILE="$tmpdir/run.log"
 touch "$RUN_LOG_FILE"
 DRY_RUN=false
-
+original_scripts="$(cksum "$datamove_dir/MicrosoftSQLServer_data.sh" "$datamove_dir"/control/*.ctl)"
 run_offload 0 "$output_dir"
+[[ "$(cksum "$datamove_dir/MicrosoftSQLServer_data.sh" "$datamove_dir"/control/*.ctl)" == "$original_scripts" ]]
+[[ "$(wc -l < "$METADATA_CALLS" | tr -d '[:space:]')" == 1 ]]
+[[ -f "$datamove_dir/data/report.dat" && -f "$datamove_dir/data/orders.dat" ]]
+grep -F $'0\tdemo.landing.Report.csv\t' "$AUTOKIT_DIR/bcp_status.tsv" >/dev/null
+grep -F 'runtime out -> queryout' "$RUN_LOG_FILE" >/dev/null
 
-[[ -f "$datamove_dir/data/ahc-csv.dat" ]]
-grep -F $'0\tCEC_REALM.landing.NorthCanberraHospital_AHC.csv\t' "$AUTOKIT_DIR/bcp_status.tsv" >/dev/null
+# A flattened name can refer to two different schema/table pairs. Never choose
+# one arbitrarily, and never pass an unverified query to real bcp.
+catalog="$AUTOKIT_DIR/bcp_source_tables.tsv"
+printf 'sales.region.Order] data.csv\t[demo].[sales].[region.Order]] data.csv]\n' >> "$catalog"
+set +e
+SQLSERVER_BCP_SOURCE_DATABASE=demo SQLSERVER_BCP_TABLE_CATALOG_FILE="$catalog" \
+  "$REPO_ROOT/sdcli-scripts/lib/bcp" 'demo.sales.region.Order] data.csv' out "$tmpdir/ambiguous.dat" \
+  > "$tmpdir/ambiguous.log" 2>&1
+rc=$?
+set -e
+[[ "$rc" == 2 && ! -e "$tmpdir/ambiguous.dat" ]]
+grep -F 'matches=2' "$tmpdir/ambiguous.log" >/dev/null
 
-echo 'SQL Server dotted identifier BCP test passed'
+echo 'SQL Server dotted identifier BCP test passed (external tools stubbed; real queryout verified by customer)'
