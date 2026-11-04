@@ -45,7 +45,14 @@ cat > "$tmpdir/sqlcmd" <<'SH'
 set -eu
 [[ "$SQLCMDPASSWORD" == SourcePass1 ]] || exit 45
 [[ " $* " == *' -No '* && " $* " == *' -y 0 '* ]] || exit 46
+# sqlcmd rejects -h together with -y 0.  The catalog parser deliberately
+# ignores the column heading and separator that sqlcmd emits without -h.
+for arg in "$@"; do
+  [[ "$arg" != -h ]] || exit 47
+done
 printf 'query\n' >> "$METADATA_CALLS"
+printf 'SDCLI_BCP_TABLE_RECORD\n'
+printf '%s\n' '----------------------'
 printf 'SDCLI_BCP_TABLE\tlanding.Report.csv\t[demo].[landing].[Report.csv]\tSDCLI_END\n'
 printf 'SDCLI_BCP_TABLE\tsales.region.Order] data.csv\t[demo].[sales.region].[Order]] data.csv]\tSDCLI_END   \n'
 SH

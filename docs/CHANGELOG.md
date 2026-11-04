@@ -13,6 +13,10 @@ into the customer offline bundle.
   Query the source catalog lazily once per offload attempt, preserve generated
   scripts byte-for-byte, and log/persist runtime adjustments. This replaces the
   unsuccessful bracket-only hotfix, without an image rebuild or new dependency.
+- Correct the source-catalog `sqlcmd` options used by that hotfix: `sqlcmd`
+  rejects `-h` together with `-y 0`. The catalog reader now retains unlimited
+  column width, explicitly accepts its named heading/separator, and continues
+  to reject malformed data rows.
 
 ## 1.3.0 - 2026-11-04
 

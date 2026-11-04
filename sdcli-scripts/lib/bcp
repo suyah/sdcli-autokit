@@ -86,14 +86,16 @@ load_bcp_table_catalog() {
   # One catalog query per offload attempt, on first ambiguous export only.
   # QUOTENAME supplies escaped SQL identifiers; no identifier is split on dots.
   # Unlimited column width and an end marker preserve long/trailing-space names.
+  # sqlcmd rejects -h when -y 0 is used; the named one-column heading and its
+  # separator are explicitly ignored by the parser below.
   if ! SQLCMDPASSWORD="$BCP_PASSWORD" sqlcmd \
     -S "$server" -U "$username" -d "$BCP_SOURCE_DATABASE" \
-    -h -1 -y 0 -w 65535 -f 65001 -b -r 1 -x "${sqlcmd_tls_args[@]}" \
+    -y 0 -w 65535 -f 65001 -b -r 1 -x "${sqlcmd_tls_args[@]}" \
     -Q "SET NOCOUNT ON;
 SELECT CAST(N'SDCLI_BCP_TABLE' AS nvarchar(max)) + NCHAR(9)
      + s.name + N'.' + o.name + NCHAR(9)
      + QUOTENAME(DB_NAME()) + N'.' + QUOTENAME(s.name) + N'.' + QUOTENAME(o.name)
-     + NCHAR(9) + N'SDCLI_END'
+     + NCHAR(9) + N'SDCLI_END' AS [SDCLI_BCP_TABLE_RECORD]
 FROM sys.objects AS o JOIN sys.schemas AS s ON s.schema_id = o.schema_id
 WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0;" > "$raw_file"; then
     rm -f "$raw_file"
@@ -103,6 +105,8 @@ WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0;" > "$raw_file"; then
   if ! awk -F '\t' -v OFS='\t' '
     /^[[:space:]]*$/ { next }
     { sub(/\r$/, "") }
+    /^[[:space:]]*SDCLI_BCP_TABLE_RECORD[[:space:]]*$/ { next }
+    /^[[:space:]]*-+[[:space:]]*$/ { next }
     NF != 4 || $1 != "SDCLI_BCP_TABLE" || $2 == "" || $3 == "" || $4 !~ /^SDCLI_END *$/ { invalid=1; next }
     { print $2, $3; rows++ }
     END { if (invalid || rows == 0) exit 1 }
