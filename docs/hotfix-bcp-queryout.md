@@ -11,6 +11,9 @@ The fix uses that tested form. It changes process arguments, not generated files
 - `lib/bcp` reads a table/view catalog through SQLCMD only on the first ambiguous
   local export. SQL Server `QUOTENAME` produces the escaped qualified identifiers;
   names are never split into schema/table by guessing dot positions.
+- The catalog query keeps unlimited output width and parses the SQLCMD heading
+  explicitly; SQLCMD 18 rejects its header-suppression (`-h`) option together
+  with unlimited-width output (`-y 0`).
 - The catalog is shared across sequential BCP processes for this attempt and
   refreshed on retry. No new repository schema dependency or runtime package.
 - Zero/multiple matches stop the export. Existing queryout and ordinary out
