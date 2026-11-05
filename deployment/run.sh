@@ -31,14 +31,17 @@ SDCLI_SCRIPTS_SRC="$ROOT_DIR/../sdcli-scripts"
 SDCLI_SCRIPTS_DEST="${HOME_DIR%/}/sdcli-scripts"
 INSTALLER_SRC="$ROOT_DIR/install-vendor.sh"
 BUNDLE_VERSION=""
+SQLPACKAGE_ARCHIVE_NAME="sqlpackage-linux-x64-en-170.4.83.3.zip"
 
 usage() {
   cat <<'USAGE'
-Usage: run.sh --vendor-dir /absolute/path/to/rpms --accept-microsoft-eula
+Usage: run.sh --vendor-dir /absolute/path/to/artifacts --accept-microsoft-eula \
+  --accept-sqlpackage-license
 
 The RPM directory must contain SQL Developer 26.2, Oracle Instant Client Basic,
 SQL*Plus, and Tools, plus msodbcsql18 and mssql-tools18 RPMs. It may also
-contain their offline dependencies.
+contain their offline dependencies. It must also contain the customer-provided
+SqlPackage Linux ZIP listed in README.
 USAGE
 }
 
@@ -57,6 +60,7 @@ require_value() {
 
 VENDOR_DIR=""
 ACCEPT_MICROSOFT_EULA=false
+ACCEPT_SQLPACKAGE_LICENSE=false
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
@@ -68,6 +72,10 @@ parse_args() {
         ;;
       --accept-microsoft-eula)
         ACCEPT_MICROSOFT_EULA=true
+        shift
+        ;;
+      --accept-sqlpackage-license)
+        ACCEPT_SQLPACKAGE_LICENSE=true
         shift
         ;;
       -h|--help)
@@ -83,6 +91,7 @@ parse_args() {
   [[ -n "$VENDOR_DIR" ]] || fail "--vendor-dir is required"
   [[ "$VENDOR_DIR" == /* ]] || fail "--vendor-dir must be an absolute path"
   [[ "$ACCEPT_MICROSOFT_EULA" == true ]] || fail "--accept-microsoft-eula is required"
+  [[ "$ACCEPT_SQLPACKAGE_LICENSE" == true ]] || fail "--accept-sqlpackage-license is required"
 }
 
 require_vendor_rpm() {
@@ -98,6 +107,14 @@ require_vendor_rpm() {
   [[ -f "${matches[0]}" && ! -L "${matches[0]}" ]] || fail "$label RPM must be a regular file: ${matches[0]}"
 }
 
+require_vendor_file() {
+  local label="$1"
+  local filename="$2"
+  local file="$VENDOR_DIR/$filename"
+
+  [[ -f "$file" && ! -L "$file" ]] || fail "$label must be a regular file named $filename in $VENDOR_DIR"
+}
+
 validate_vendor_dir() {
   [[ -d "$VENDOR_DIR" ]] || fail "vendor RPM directory does not exist: $VENDOR_DIR"
   require_vendor_rpm "SQL Developer" 'sqldeveloper-*.noarch.rpm'
@@ -106,6 +123,7 @@ validate_vendor_dir() {
   require_vendor_rpm "Instant Client Tools" 'oracle-instantclient*-tools-*.x86_64.rpm'
   require_vendor_rpm "Microsoft ODBC Driver 18" 'msodbcsql18-*.x86_64.rpm'
   require_vendor_rpm "Microsoft SQL Server tools" 'mssql-tools18-*.x86_64.rpm'
+  require_vendor_file "Microsoft SqlPackage Linux archive" "$SQLPACKAGE_ARCHIVE_NAME"
 }
 
 load_bundle_version() {
@@ -197,10 +215,12 @@ install_vendor_packages() {
       --env "APP_GROUP=$APP_GROUP" \
       --env "HOME_DIR=$HOME_DIR" \
       --env "SD_HOME=$SD_HOME" \
+      --env "TOOL_DATA=$TOOL_DATA" \
       "$CONTAINER_NAME" \
       bash /tmp/install-vendor.sh \
         --vendor-dir /vendor-rpms \
-        --accept-microsoft-eula; then
+        --accept-microsoft-eula \
+        --accept-sqlpackage-license; then
     echo "Vendor package installation failed; stopping '$CONTAINER_NAME'." >&2
     container_engine stop --time 5 "$CONTAINER_NAME" >/dev/null || true
     exit 1
@@ -295,6 +315,8 @@ sync_sdcli_scripts() {
   local required_file stage_dir
   local -a required_files=(
     migrate.sh
+    export-source-schema.sh
+    collect-run-logs.sh
     config.example.yaml
     lib/generate_validation_report.py
     lib/sqlplus_deploy.sh
@@ -323,6 +345,8 @@ sync_sdcli_scripts() {
     --env "STAGE_DIR=$stage_dir" \
     "$CONTAINER_NAME" bash -lc 'rm -rf -- "$STAGE_DIR" && mkdir -p "$STAGE_DIR/lib" "$STAGE_DIR/templates"'
   container_engine cp "$SDCLI_SCRIPTS_SRC/migrate.sh" "$CONTAINER_NAME:$stage_dir/migrate.sh"
+  container_engine cp "$SDCLI_SCRIPTS_SRC/export-source-schema.sh" "$CONTAINER_NAME:$stage_dir/export-source-schema.sh"
+  container_engine cp "$SDCLI_SCRIPTS_SRC/collect-run-logs.sh" "$CONTAINER_NAME:$stage_dir/collect-run-logs.sh"
   container_engine cp "$SDCLI_SCRIPTS_SRC/config.example.yaml" "$CONTAINER_NAME:$stage_dir/config.example.yaml"
   container_engine cp "$SDCLI_SCRIPTS_SRC/lib/." "$CONTAINER_NAME:$stage_dir/lib"
   container_engine cp "$SDCLI_SCRIPTS_SRC/templates/." "$CONTAINER_NAME:$stage_dir/templates"
@@ -340,6 +364,8 @@ sync_sdcli_scripts() {
 
       for required_file in \
         migrate.sh \
+        export-source-schema.sh \
+        collect-run-logs.sh \
         config.example.yaml \
         lib/generate_validation_report.py \
         lib/sqlplus_deploy.sh \
@@ -357,15 +383,21 @@ sync_sdcli_scripts() {
       mv "$STAGE_DIR/lib" "$DEST_DIR/lib.next"
       mv "$STAGE_DIR/templates" "$DEST_DIR/templates.next"
       install -m 0755 "$STAGE_DIR/migrate.sh" "$DEST_DIR/migrate.sh.next"
+      install -m 0755 "$STAGE_DIR/export-source-schema.sh" "$DEST_DIR/export-source-schema.sh.next"
+      install -m 0755 "$STAGE_DIR/collect-run-logs.sh" "$DEST_DIR/collect-run-logs.sh.next"
       install -m 0644 "$STAGE_DIR/config.example.yaml" "$DEST_DIR/config.example.yaml.next"
 
       rm -rf -- "$DEST_DIR/lib" "$DEST_DIR/templates"
       mv "$DEST_DIR/lib.next" "$DEST_DIR/lib"
       mv "$DEST_DIR/templates.next" "$DEST_DIR/templates"
       mv "$DEST_DIR/migrate.sh.next" "$DEST_DIR/migrate.sh"
+      mv "$DEST_DIR/export-source-schema.sh.next" "$DEST_DIR/export-source-schema.sh"
+      mv "$DEST_DIR/collect-run-logs.sh.next" "$DEST_DIR/collect-run-logs.sh"
       mv "$DEST_DIR/config.example.yaml.next" "$DEST_DIR/config.example.yaml"
 
       chmod 0755 "$DEST_DIR/migrate.sh"
+      chmod 0755 "$DEST_DIR/export-source-schema.sh"
+      chmod 0755 "$DEST_DIR/collect-run-logs.sh"
       find "$DEST_DIR/lib" "$DEST_DIR/templates" -type f -exec chmod 0644 {} +
       for executable in bcp load_wrappers.sh sqlldr sqlplus; do
         [[ ! -f "$DEST_DIR/lib/$executable" ]] || chmod 0755 "$DEST_DIR/lib/$executable"
@@ -393,7 +425,7 @@ sync_sdcli_scripts() {
 
       printf "%s\n" "$SCRIPT_BUNDLE_VERSION" > "$DEST_DIR/.autokit-script-version.next"
       mv "$DEST_DIR/.autokit-script-version.next" "$DEST_DIR/.autokit-script-version"
-      chown "$APP_USER:$APP_GROUP" "$DEST_DIR/migrate.sh" "$DEST_DIR/config.example.yaml" "$DEST_DIR/.autokit-script-version"
+      chown "$APP_USER:$APP_GROUP" "$DEST_DIR/migrate.sh" "$DEST_DIR/export-source-schema.sh" "$DEST_DIR/collect-run-logs.sh" "$DEST_DIR/config.example.yaml" "$DEST_DIR/.autokit-script-version"
       chown -R "$APP_USER:$APP_GROUP" "$DEST_DIR/lib" "$DEST_DIR/templates" "$persistent_config_dir"
       chown -h "$APP_USER:$APP_GROUP" "$DEST_DIR/config.yaml"
       chmod 0600 "$persistent_config"
@@ -403,7 +435,7 @@ sync_sdcli_scripts() {
 
 check_tools() {
   local tool
-  for tool in sdcli sql sqlcmd bcp sqlplus sqlldr jq yq python3 strace; do
+  for tool in sdcli sql sqlcmd bcp sqlplus sqlldr sqlpackage jq yq python3 strace; do
     container_engine exec "$CONTAINER_NAME" bash -lc "command -v '$tool' >/dev/null" || {
       echo "Error: $tool is missing after installation" >&2
       return 1
@@ -413,10 +445,13 @@ check_tools() {
   container_engine exec "$CONTAINER_NAME" bash -lc 'bcp -v >/dev/null 2>&1' || { echo "Error: bcp did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'sqlplus -version >/dev/null 2>&1' || { echo "Error: sqlplus did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'sql -version >/dev/null 2>&1' || { echo "Error: SQLcl did not start" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc 'sqlpackage /Version >/dev/null 2>&1' || { echo "Error: SqlPackage did not start" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc 'sqlldr -help >/dev/null 2>&1' || { echo "Error: sqlldr did not start" >&2; return 1; }
   check_sdcli_startup || return 1
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$JTDS_TARGET_FILE'" || { echo "Error: jTDS jar is missing: $JTDS_TARGET_FILE" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/migrate.sh'" || { echo "Error: migration scripts are missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -x '$SDCLI_SCRIPTS_DEST/export-source-schema.sh'" || { echo "Error: source schema export script is missing" >&2; return 1; }
+  container_engine exec "$CONTAINER_NAME" bash -lc "test -x '$SDCLI_SCRIPTS_DEST/collect-run-logs.sh'" || { echo "Error: run log collection script is missing" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh'" || { echo "Error: SQL*Plus deploy helper library is missing" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/lib/sdcli_profile.sh'" || { echo "Error: SQL Developer profile helper library is missing" >&2; return 1; }
   container_engine exec "$CONTAINER_NAME" bash -lc "test -f '$SDCLI_SCRIPTS_DEST/templates/product-preferences.xml'" || { echo "Error: SQL Developer preferences template is missing" >&2; return 1; }

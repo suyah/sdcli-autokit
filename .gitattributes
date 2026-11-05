@@ -1,0 +1,2 @@
+# Preserve the vendor-supplied SqlPackage license exactly as published.
+docs/licenses/SQLPACKAGE-LICENSE.txt -text -diff

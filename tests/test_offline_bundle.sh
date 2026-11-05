@@ -227,9 +227,12 @@ tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/image.tar' >/dev/
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/VERSION' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/IMAGE_ID' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/licenses/ORACLE-FUTC.txt' >/dev/null
+tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/licenses/SQLPACKAGE-LICENSE.txt' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/run.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/deployment/install-vendor.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/migrate.sh' >/dev/null
+tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/export-source-schema.sh' >/dev/null
+tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/collect-run-logs.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/lib/sdcli_profile.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/lib/schema_mapping.sh' >/dev/null
 tar -tzf "$bundle" | grep -Fx 'sdcli-autokit-1.2.3-linux-amd64/sdcli-scripts/lib/generate_validation_report.py' >/dev/null
@@ -253,6 +256,7 @@ tar -xzf "$bundle" -C "$extracted_bundle"
 extracted_root="$extracted_bundle/sdcli-autokit-1.2.3-linux-amd64"
 grep -F 'This release supports Oracle SQL Developer 26.2 only.' "$extracted_root/README.md" >/dev/null
 assert_mode "$extracted_root/sdcli-scripts/migrate.sh" 755
+assert_mode "$extracted_root/sdcli-scripts/collect-run-logs.sh" 755
 assert_mode "$extracted_root/sdcli-scripts/lib/sqlplus_deploy.sh" 644
 
 expected_hash="$(awk '{print $1}' "$checksum")"

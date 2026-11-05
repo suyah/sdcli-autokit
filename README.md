@@ -87,7 +87,7 @@ separate data/log volume, and user/path settings; it has no package download URL
 
 ### Customer-provided proprietary artifacts for offline installation
 
-The offline bundle does not distribute Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver, or Microsoft SQL Server command-line tool binaries. The customer obtains the required packages through its approved vendor account or internal software repository, accepts the applicable terms, and transfers them separately to the isolated environment.
+The offline bundle does not distribute Oracle SQL Developer, Oracle Instant Client, Microsoft ODBC Driver, Microsoft SQL Server command-line tool, or Microsoft SqlPackage binaries. The customer obtains the required packages through its approved vendor account or internal software repository, accepts the applicable terms, and transfers them separately to the isolated environment.
 
 The image does include Oracle SQLcl 26.2.2 for DBA connectivity and diagnostic
 work; migration orchestration continues to use SQL Developer CLI 26.2. SQLcl is
@@ -101,6 +101,7 @@ also preserves SQLcl's `LICENSE.txt` and `NOTICES.txt` under
 | Oracle SQL Developer 26.2 | [Oracle SQL Developer downloads](https://www.oracle.com/database/sqldeveloper/technologies/download/) | SQL Developer 26.2 Linux `noarch` RPM. |
 | Oracle Instant Client | [Oracle Instant Client for Linux x86-64 downloads](https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html) | Matching Oracle Linux 9 `x86_64` RPMs: Basic, SQL*Plus, and Tools. |
 | Microsoft ODBC Driver 18 and SQL Server command-line tools | [Microsoft offline installation guidance for `mssql-tools18` and `msodbcsql18`](https://learn.microsoft.com/en-us/sql/linux/install-upgrade/setup-tools?view=fabric#offline-installation) | Matching `x86_64` RPMs for `msodbcsql18` and `mssql-tools18`, plus any documented dependencies. The customer must accept the Microsoft EULA. |
+| Microsoft SqlPackage | [SqlPackage Linux x64 170.4.83.3 ZIP](https://download.microsoft.com/download/18a5e51e-8332-4cbe-bb50-6d3a50c704c5/sqlpackage-linux-x64-en-170.4.83.3.zip) | Exact file name: `sqlpackage-linux-x64-en-170.4.83.3.zip`; SHA-256: `e81ede2429f3a15d9e752845c8928569c7706b3a911fad2d1717c0f03e0fc7c3`. This is used only for source-schema export and must remain unmodified. |
 
 Place these files, plus any RPM dependencies reported by the offline install, in a customer-controlled directory such as:
 
@@ -111,16 +112,18 @@ customer-artifacts/
 ├── oracle-instantclient<major>-sqlplus-<version>.el9.x86_64.rpm
 ├── oracle-instantclient<major>-tools-<version>.el9.x86_64.rpm
 ├── msodbcsql18-<version>.x86_64.rpm
-└── mssql-tools18-<version>.x86_64.rpm
+├── mssql-tools18-<version>.x86_64.rpm
+└── sqlpackage-linux-x64-en-170.4.83.3.zip
 ```
 
-`run.sh` checks that the six expected files are present before creating a container. The container then checks RPM names and CPU architecture before installing only from the read-only mount with DNF repositories disabled. This verifies technical compatibility only; it does not establish legal entitlement.
+`run.sh` checks that the six required RPMs and the exact SqlPackage ZIP are present before creating a container. The container then checks RPM names, CPU architecture, and the ZIP checksum before installing only from the read-only mount with DNF repositories disabled. SqlPackage is extracted into the persistent data volume at `/u01/data/sdcli-autokit/tools/sqlpackage-170.4.83.3`; it is not copied into the release image. This verifies technical compatibility only; it does not establish legal entitlement.
 
 The following set was smoke-tested on Oracle Linux 9 x86_64 on 2026-10-09. These are direct vendor links for convenience; customers may instead use their approved internal mirror.
 
 - [SQL Developer 26.2 RPM](https://download.oracle.com/otn_software/java/sqldeveloper/sqldeveloper-26.2.0-186.2220.noarch.rpm)
 - [Instant Client 23.26 Basic RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-basic-23.26.3.0.0-1.el9.x86_64.rpm), [SQL*Plus RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-sqlplus-23.26.3.0.0-1.el9.x86_64.rpm), and [Tools RPM](https://download.oracle.com/otn_software/linux/instantclient/2326300/oracle-instantclient-tools-23.26.3.0.0-1.el9.x86_64.rpm)
 - [Microsoft ODBC Driver 18 18.7.1.1 RPM](https://packages.microsoft.com/rhel/9.0/prod/Packages/m/msodbcsql18-18.7.1.1-1.x86_64.rpm) and [mssql-tools18 18.7.1.1 RPM](https://packages.microsoft.com/rhel/9.0/prod/Packages/m/mssql-tools18-18.7.1.1-1.x86_64.rpm)
+- [Microsoft SqlPackage Linux x64 170.4.83.3 ZIP](https://download.microsoft.com/download/18a5e51e-8332-4cbe-bb50-6d3a50c704c5/sqlpackage-linux-x64-en-170.4.83.3.zip). Read and accept the archive's `LICENSE.TXT`; a verbatim reference copy is retained at [`docs/licenses/SQLPACKAGE-LICENSE.txt`](docs/licenses/SQLPACKAGE-LICENSE.txt).
 
 ### Offline handoff
 
@@ -159,10 +162,10 @@ sha256sum -c sdcli-autokit-1.1.0-linux-amd64.tar.gz.sha256
 tar -xzf sdcli-autokit-1.1.0-linux-amd64.tar.gz
 cd sdcli-autokit-1.1.0-linux-amd64
 podman load -i image.tar
-./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula --accept-sqlpackage-license
 ~~~
 
-The EULA flag records the operator's acknowledgement required for the Microsoft packages; it does not replace the vendor terms. On a system where SELinux labels are not applicable, remove `,Z` from the three `-v` options in `deployment/run.sh`.
+The two acceptance flags record the operator's acknowledgement of the Microsoft RPM EULA and the separately supplied SqlPackage licence; neither flag replaces the vendor terms. On a system where SELinux labels are not applicable, remove `,Z` from the three `-v` options in `deployment/run.sh`.
 
 Every successful `run.sh` invocation refreshes the bundled program files but
 preserves an existing customer configuration byte-for-byte. The durable file
@@ -227,7 +230,7 @@ Run the **new bundle's** `run.sh` once, using the same customer artifact
 directory as the existing installation:
 
 ```bash
-./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula --accept-sqlpackage-license
 ```
 
 When an old `sdcli-autokit` container exists, this first invocation deliberately
@@ -243,7 +246,7 @@ bundle directory:
 podman stop sdcli-autokit
 podman rm sdcli-autokit
 
-./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+./deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula --accept-sqlpackage-license
 ```
 
 Do **not** remove Podman volumes and do not run a broad pruning command such
@@ -517,7 +520,7 @@ From the `deployment/` directory:
 For an offline customer VM, use the bundle workflow above instead. After loading the offline image, run:
 
 ```bash
-./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula --accept-sqlpackage-license
 ```
 
 `run.sh` creates the separate data/log volumes, mounts the RPM directory read-only, and prepares the SQL Developer CLI environment without network downloads.
@@ -735,6 +738,57 @@ rename Oracle objects or replace old generated/data artifacts. Start a new run
 if changing a mapping after generation or deployment. A run already remapped
 and generated successfully using native SDCLI can resume at datamove; it does
 not need capture/convert repeated just because Autokit was upgraded.
+
+## Export SQL Server source schema and routines
+
+SqlPackage is the supported way to collect source DDL for migration analysis.
+It exports tables, constraints, indexes, views, procedures, functions, and
+triggers as SQL Server definitions. There is no separate routine-export
+script: routines are included in the same source schema export.
+
+First stage the exact customer-provided SqlPackage ZIP and run the deployment
+command with `--accept-sqlpackage-license` as described above. Then, inside the
+container, export a selected migration's configured SQL Server source:
+
+```bash
+cd ~/sdcli-scripts
+export SOURCE_PASSWORD='your SQL Server password'
+./export-source-schema.sh cecrealm
+```
+
+The command uses `migrations[].source.conn`, `user`, `password`, and
+`defaults.source.bcp_tls_mode` from the existing `config.yaml`. It only reads
+the source database and runs SqlPackage Extract with
+`ExtractAllTableData=False`; it does not create a BACPAC and does not export
+table data. By default it creates:
+
+```text
+/u01/data/sdcli-autokit/projects/cecrealm/source-schema/<UTC timestamp>/
+├── manifest.txt
+├── sqlpackage-extract.log
+└── sql/
+    └── <schema>/<object type>/*.sql
+```
+
+Use an explicit new directory when an operator needs a controlled location:
+
+```bash
+./export-source-schema.sh cecrealm \
+  --output /u01/data/sdcli-autokit/projects/cecrealm/source-schema/before-repair
+```
+
+The command refuses an existing output directory. Exported DDL can contain
+business logic and literals, so the directory is owner-only by default and
+should be handled as customer-sensitive material. For LLM-assisted repair,
+give the model only the failed source routine file, its relevant source table
+definitions, and the failed converted Oracle routine; do not automatically
+upload the entire export or any migration credentials.
+
+For SQL authentication, SqlPackage accepts the source password as a command
+parameter. Autokit does not write it to the manifest or diagnostic log, but an
+untrusted process running as the same `sduser` account could inspect a live
+process argument. Run this only in the existing single-user migration container
+trust boundary.
 
 ## Run a single phase
 
@@ -1049,6 +1103,31 @@ Important files:
 
 If you rerun a phase with `--run`, the new output is appended to the existing run log.
 
+### Collect a run log bundle
+
+After a run, collect its selected logs and run-status files without copying
+customer data, configuration, wallets, profiles, passwords, generated DDL,
+loader control files, or rejected-row payloads:
+
+```bash
+cd ~/sdcli-scripts
+./collect-run-logs.sh cecrealm --run 20261104_093119
+```
+
+The default destination is `/u01/data/sdcli-autokit/run-log-bundles/`. The
+script prints the `.tar.gz` path and adjacent SHA-256 file. The archive includes
+the named run logs and status files, deployment manifest, BCP/SQL*Loader
+status, reconciliation, validation reports, schema-mapping TSV files, SQL
+Developer error/output logs, and SQL*Loader logs. It uses a fixed allow-list
+and never treats arbitrary `.txt` or `.csv` files as logs. Use
+`--output /path/to/directory` to choose another destination.
+Verify the archive before sharing it (run the command from the bundle directory):
+
+```bash
+cd /u01/data/sdcli-autokit/run-log-bundles
+sha256sum -c <bundle>.tar.gz.sha256
+```
+
 The validation report uses only structured evidence collected by the autokit:
 
 - table export, load, and target row counts;
@@ -1073,7 +1152,7 @@ Run deployment commands from `deployment/`:
 
 ```bash
 ./build.sh          # Build image on a connected development machine
-./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula
+./run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula --accept-sqlpackage-license
                     # Create/reuse container and install staged RPMs locally
 ./start.sh          # Start existing container
 ./stop.sh           # Stop running container
@@ -1121,7 +1200,7 @@ Run migration commands from `sdcli-scripts/`:
 - Use `--dry-run` to confirm config and command construction before a real run.
 - Run `--conn-setup` again if source or target connection details changed.
 - Use `--run <run_id>` when rerunning a later phase against files from an existing run.
-- If the container does not exist, run `deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula` before `deployment/start.sh`.
+- If the container does not exist, run `deployment/run.sh --vendor-dir /absolute/path/to/customer-artifacts --accept-microsoft-eula --accept-sqlpackage-license` before `deployment/start.sh`.
 
 ## Notes for maintainers
 

@@ -157,7 +157,12 @@ cp "$ROOT_DIR/README.md" "$bundle_dir/README.md"
   echo "Error: required SQLcl license file not found: $ROOT_DIR/docs/licenses/ORACLE-FUTC.txt" >&2
   exit 1
 }
+[[ -f "$ROOT_DIR/docs/licenses/SQLPACKAGE-LICENSE.txt" ]] || {
+  echo "Error: required SqlPackage license file not found: $ROOT_DIR/docs/licenses/SQLPACKAGE-LICENSE.txt" >&2
+  exit 1
+}
 cp "$ROOT_DIR/docs/licenses/ORACLE-FUTC.txt" "$bundle_dir/licenses/ORACLE-FUTC.txt"
+cp "$ROOT_DIR/docs/licenses/SQLPACKAGE-LICENSE.txt" "$bundle_dir/licenses/SQLPACKAGE-LICENSE.txt"
 for deployment_file in .env run.sh start.sh stop.sh install-vendor.sh; do
   cp "$ROOT_DIR/deployment/$deployment_file" "$bundle_dir/deployment/$deployment_file"
 done
@@ -165,6 +170,8 @@ chmod 0755 "$bundle_dir/deployment/"*.sh
 
 script_files=(
   sdcli-scripts/migrate.sh
+  sdcli-scripts/export-source-schema.sh
+  sdcli-scripts/collect-run-logs.sh
   sdcli-scripts/config.example.yaml
   sdcli-scripts/lib/bcp
   sdcli-scripts/lib/generate_validation_report.py
@@ -187,7 +194,7 @@ for script_file in "${script_files[@]}"; do
 done
 find "$bundle_dir/sdcli-scripts/lib" "$bundle_dir/sdcli-scripts/templates" -type f -exec chmod 0644 {} +
 chmod 0644 "$bundle_dir/sdcli-scripts/config.example.yaml"
-chmod 0755 "$bundle_dir/sdcli-scripts/migrate.sh" "$bundle_dir/sdcli-scripts/lib/bcp" "$bundle_dir/sdcli-scripts/lib/load_wrappers.sh" "$bundle_dir/sdcli-scripts/lib/sqlldr" "$bundle_dir/sdcli-scripts/lib/sqlplus"
+chmod 0755 "$bundle_dir/sdcli-scripts/migrate.sh" "$bundle_dir/sdcli-scripts/export-source-schema.sh" "$bundle_dir/sdcli-scripts/collect-run-logs.sh" "$bundle_dir/sdcli-scripts/lib/bcp" "$bundle_dir/sdcli-scripts/lib/load_wrappers.sh" "$bundle_dir/sdcli-scripts/lib/sqlldr" "$bundle_dir/sdcli-scripts/lib/sqlplus"
 
 # macOS attaches Finder/provenance extended attributes to copied files. Excluding
 # them keeps Linux GNU tar output clean when customers unpack the bundle.
