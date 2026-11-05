@@ -5,6 +5,18 @@ into the customer offline bundle.
 
 ## Unreleased
 
+## 1.4.0 - 2026-11-05
+
+### Added
+
+- Add `collect-run-logs.sh`, which creates a checksummed, allow-listed support
+  bundle for one migration run. It includes selected run logs and status files
+  while excluding configuration, wallets, generated DDL, exported data, loader
+  controls, and rejected-row payloads.
+- Add `export-source-schema.sh` for SQL Server source DDL collection. It uses
+  SqlPackage Extract with `ExtractAllTableData=False`, so routines and schema
+  objects can be reviewed without exporting table data.
+
 ### Fixed
 
 - Export SQL Server local objects with embedded dots using metadata-resolved
@@ -22,6 +34,18 @@ into the customer offline bundle.
   comments and treats the remaining SQL Developer prompt syntax as opaque.
   Generated files remain immutable; invalid identifiers and unterminated block
   comments still fail, while repeated variables are safely de-duplicated.
+
+### Changed
+
+- Offline deployment now requires the customer to stage Microsoft SqlPackage
+  Linux x64 170.4.83.3 beside the existing RPM artifacts and acknowledge its
+  separate license. Autokit verifies its SHA-256 and installs it to persistent
+  tool storage; the release image and bundle do not redistribute the binary.
+
+### Compatibility
+
+- Supports Oracle SQL Developer 26.2, SQL Server sources, and Oracle targets
+  only. Existing migration configuration and run data remain unchanged.
 
 ## 1.3.0 - 2026-11-04
 
