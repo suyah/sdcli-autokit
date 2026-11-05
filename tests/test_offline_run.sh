@@ -26,7 +26,8 @@ touch \
   "$vendor_dir/oracle-instantclient23.9-sqlplus-23.9.x86_64.rpm" \
   "$vendor_dir/oracle-instantclient23.9-tools-23.9.x86_64.rpm" \
   "$vendor_dir/msodbcsql18-18.5.x86_64.rpm" \
-  "$vendor_dir/mssql-tools18-18.4.x86_64.rpm"
+  "$vendor_dir/mssql-tools18-18.4.x86_64.rpm" \
+  "$vendor_dir/sqlpackage-linux-x64-en-170.4.83.3.zip"
 
 VENDOR_DIR="$vendor_dir"
 validate_vendor_dir
@@ -48,7 +49,8 @@ grep -F -- 'vendor_mount="${VENDOR_DIR}:/vendor-rpms:ro"' "$REPO_ROOT/deployment
 grep -F -- 'vendor_mount+=",Z"' "$REPO_ROOT/deployment/run.sh" >/dev/null
 grep -F -- '--disablerepo=' "$REPO_ROOT/deployment/install-vendor.sh" >/dev/null
 grep -F -- '--accept-microsoft-eula' "$REPO_ROOT/deployment/run.sh" >/dev/null
-grep -F -- 'for tool in sdcli sql sqlcmd bcp sqlplus sqlldr jq yq python3 strace; do' "$REPO_ROOT/deployment/run.sh" >/dev/null
+grep -F -- '--accept-sqlpackage-license' "$REPO_ROOT/deployment/run.sh" >/dev/null
+grep -F -- 'for tool in sdcli sql sqlcmd bcp sqlplus sqlldr sqlpackage jq yq python3 strace; do' "$REPO_ROOT/deployment/run.sh" >/dev/null
 grep -F -- "test -f '\$SDCLI_SCRIPTS_DEST/lib/generate_validation_report.py'" "$REPO_ROOT/deployment/run.sh" >/dev/null
 ! grep -qE '\b(wget|curl)\b' "$REPO_ROOT/deployment/run.sh"
 ! grep -q 'podman pull' "$REPO_ROOT/deployment/run.sh"
@@ -59,6 +61,8 @@ source_dir="$tmpdir/source-scripts"
 container_root="$tmpdir/container"
 mkdir -p "$source_dir/lib" "$source_dir/templates" "$container_root/home/sduser/sdcli-scripts/lib"
 printf '%s\n' '#!/usr/bin/env bash' 'echo new-program' > "$source_dir/migrate.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'echo source-schema-export' > "$source_dir/export-source-schema.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'echo run-log-collection' > "$source_dir/collect-run-logs.sh"
 printf '%s\n' 'new report renderer' > "$source_dir/lib/generate_validation_report.py"
 printf '%s\n' 'new deploy library' > "$source_dir/lib/sqlplus_deploy.sh"
 printf '%s\n' 'new profile library' > "$source_dir/lib/sdcli_profile.sh"
@@ -67,6 +71,8 @@ printf '%s\n' 'new wrapper' > "$source_dir/lib/sqlplus"
 printf '%s\n' 'new template' > "$source_dir/templates/product-preferences.xml"
 printf '%s\n' 'defaults:' '  driver_file: /u01/app/jtds-1.3.1.jar' > "$source_dir/config.example.yaml"
 chmod 0700 "$source_dir/migrate.sh"
+chmod 0700 "$source_dir/export-source-schema.sh"
+chmod 0700 "$source_dir/collect-run-logs.sh"
 chmod 0600 "$source_dir/lib/sqlplus_deploy.sh"
 
 SDCLI_SCRIPTS_SRC="$source_dir"
@@ -148,8 +154,12 @@ sync_sdcli_scripts
 [[ -d "$TOOL_LOG" && -w "$TOOL_LOG" ]]
 
 grep -F 'new-program' "$SDCLI_SCRIPTS_DEST/migrate.sh" >/dev/null
+grep -F 'source-schema-export' "$SDCLI_SCRIPTS_DEST/export-source-schema.sh" >/dev/null
+grep -F 'run-log-collection' "$SDCLI_SCRIPTS_DEST/collect-run-logs.sh" >/dev/null
 [[ ! -e "$SDCLI_SCRIPTS_DEST/lib/stale.sh" ]]
 assert_mode "$SDCLI_SCRIPTS_DEST/migrate.sh" 755
+assert_mode "$SDCLI_SCRIPTS_DEST/export-source-schema.sh" 755
+assert_mode "$SDCLI_SCRIPTS_DEST/collect-run-logs.sh" 755
 assert_mode "$SDCLI_SCRIPTS_DEST/lib/sqlplus_deploy.sh" 644
 [[ "$(cksum "$SDCLI_SCRIPTS_DEST/config.yaml")" == "$customer_config_checksum" ]]
 [[ -L "$SDCLI_SCRIPTS_DEST/config.yaml" ]]

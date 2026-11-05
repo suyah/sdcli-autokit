@@ -40,6 +40,8 @@ ENV PATH="${HOME_DIR}/.local/bin:${HOME_DIR}:${SD_HOME}/sqldeveloper/bin:/opt/sq
 
 USER root
 
+# SqlPackage 170.4.83.3 starts on Oracle Linux 9 with libicu. Oracle Linux 9
+# does not publish a libunwind package, so do not add it to this dependency list.
 RUN dnf -y install \
       java-17-openjdk \
       python3 \
@@ -58,6 +60,7 @@ RUN dnf -y install \
       openssl \
       ca-certificates \
       unixODBC \
+      libicu \
       libaio \
       libnsl \
       iproute \
