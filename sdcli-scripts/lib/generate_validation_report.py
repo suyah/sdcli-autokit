@@ -329,6 +329,8 @@ def _read_deploy_manifest(path: Path) -> tuple[DeploymentRecord, ...]:
                 allowed_statuses = set()
             if status not in allowed_statuses:
                 raise EvidenceError(f"invalid deploy manifest state: {path}:{line_number}")
+            if phase == "plan" or row["path"] == "__phase_complete__":
+                continue
             record = DeploymentRecord(
                 phase, row["path"], status, row["note"]
             )
@@ -338,6 +340,22 @@ def _read_deploy_manifest(path: Path) -> tuple[DeploymentRecord, ...]:
     return tuple(
         sorted(latest.values(), key=lambda row: (row.phase, row.path.casefold()))
     )
+
+
+def _read_phase_states(path: Path) -> dict[str, str]:
+    """Return the latest state; a later interrupted attempt supersedes success."""
+    required = ("timestamp", "phase", "state", "exit_code", "attempt", "note")
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != required:
+            raise EvidenceError(f"invalid phase status header: {path}")
+        latest = {}
+        for line_number, row in enumerate(reader, start=2):
+            _require_complete_tsv_row(path, line_number, row, required)
+            if not row["phase"] or row["state"] not in {"started", "succeeded", "failed"}:
+                raise EvidenceError(f"invalid phase status: {path}:{line_number}")
+            latest[row["phase"]] = row["state"]
+    return latest
 
 
 def _line_and_position(record: ObjectRecord) -> tuple[str, str]:
@@ -462,6 +480,11 @@ def _build_report_data(
         lambda: _read_deploy_manifest(evidence_dir / "deploy_manifest.tsv"),
         (),
     )
+    phase_states = collect(
+        "phase status",
+        lambda: _read_phase_states(evidence_dir / "phase_status.tsv"),
+        {},
+    )
     source = collect(
         "source inventory",
         lambda: load_inventory(evidence_dir / "source_object_inventory.tsv"),
@@ -480,18 +503,8 @@ def _build_report_data(
         row.status in INCOMPLETE_DEPLOY_STATUSES for row in deployments
     )
     deploy_record_count = sum(row.phase == "deploy" for row in deployments)
-    postdeploy_complete = any(
-        row.phase == "postdeploy"
-        and row.path == "__phase_complete__"
-        and row.status == "executed"
-        for row in deployments
-    )
-    deployment_issue_count = (
-        failed_deployments
-        + incomplete_deployments
-        + int(deploy_record_count == 0)
-        + int(not postdeploy_complete)
-    )
+    postdeploy_complete = phase_states.get("postdeploy") == "succeeded"
+    deployment_issue_count = failed_deployments
     invalid_keys = {
         (row.owner, row.name, row.object_type)
         for row in invalid_objects
@@ -500,11 +513,14 @@ def _build_report_data(
         record.category == "COMPILER_ERRORS" and record.status == "INVALID"
         for record in target
     )
-    if failed_deployments:
+    if failed_deployments or any(
+        phase_states.get(phase) == "failed" for phase in ("deploy", "postdeploy")
+    ):
         deployment_status = "FAIL"
     elif (
         not deployments
         or not deploy_record_count
+        or phase_states.get("deploy") != "succeeded"
         or not postdeploy_complete
         or incomplete_deployments
     ):
@@ -528,6 +544,8 @@ def _build_report_data(
                 deployment_issue_count,
                 (
                     f"records={len(deployments)} deploy_records={deploy_record_count} "
+                    f"deploy_state={phase_states.get('deploy', 'unknown')} "
+                    f"postdeploy_state={phase_states.get('postdeploy', 'unknown')} "
                     f"postdeploy_complete={int(postdeploy_complete)} "
                     f"failed={failed_deployments} "
                     f"not_run={incomplete_deployments}"

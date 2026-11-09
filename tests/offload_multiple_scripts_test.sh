@@ -50,6 +50,7 @@ for ((i = 0; i + 1 < ${#args[@]}; i++)); do
   fi
 done
 printf '%s\n' '1 rows copied.'
+printf '%s\n' 'Warning: vendor advisory' 'Native BCP detail'
 SH
 chmod +x "$tmpdir/real/bcp"
 export SQLSERVER_REAL_BCP="$tmpdir/real/bcp"
@@ -73,7 +74,13 @@ RUN_LOG_FILE="$tmpdir/run.log"
 touch "$RUN_LOG_FILE"
 DRY_RUN=false
 
-run_offload 0 "$output_dir"
+run_offload 0 "$output_dir" > "$tmpdir/console.log"
+[[ "$(grep -Fxc 'Warning: vendor advisory' "$tmpdir/console.log")" == 2 ]] || {
+  echo 'Native BCP warning was hidden from the console' >&2; exit 1
+}
+[[ "$(grep -Fc 'Native BCP detail' "$RUN_LOG_FILE")" == 2 ]] || {
+  echo 'Native BCP output was logged more than once' >&2; exit 1
+}
 [[ "$(wc -l < "$AUTOKIT_DIR/bcp_status.tsv" | tr -d '[:space:]')" == "2" ]]
 grep -F $'demo.dbo.order history\t' "$AUTOKIT_DIR/bcp_status.tsv" >/dev/null
 grep -F $'SELECT id FROM demo.dbo.table_b\t' "$AUTOKIT_DIR/bcp_status.tsv" >/dev/null
@@ -82,11 +89,10 @@ grep -F $'SELECT id FROM demo.dbo.table_b\t' "$AUTOKIT_DIR/bcp_status.tsv" >/dev
 grep -F 'BCP command scripts: 1' "$RUN_LOG_FILE" >/dev/null
 grep -F 'BCP table 01 demo.dbo.order history rows=1' "$RUN_LOG_FILE" >/dev/null
 grep -F 'BCP table 02 SELECT id FROM demo.dbo.table_b rows=1' "$RUN_LOG_FILE" >/dev/null
-verify_offload_evidence "$output_dir"
 
 touch "$datamove_dir/b/control/unexported.ctl"
 set +e
-verify_offload_evidence "$output_dir" >/dev/null 2>&1
+run_offload 0 "$output_dir" >/dev/null 2>&1
 coverage_rc=$?
 set -e
 [[ $coverage_rc -ne 0 ]] || {

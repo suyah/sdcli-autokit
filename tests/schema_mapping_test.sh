@@ -63,8 +63,6 @@ run_sdcli() {
     *-actions=idmap,convert*)
       [[ "$*" == *-input=* && "$*" != *-output=* && "$*" != *-repository=* ]]
       [[ "$SDCLI_WORKING_DIR" == "$AUTOKIT_DIR/idmap" ]]
-      SDCLI_LAST_ACTION=convert
-      SDCLI_LAST_SUCCESS_MARKER=true
       ;;
     *) echo 'Unexpected action' >&2; return 1 ;;
   esac

@@ -45,6 +45,12 @@ class ReportEvidenceTests(unittest.TestCase):
             "postdeploy\t__phase_complete__\texecuted\tpostdeploy phase completed\n",
             encoding="utf-8",
         )
+        (self.evidence_dir / "phase_status.tsv").write_text(
+            "timestamp\tphase\tstate\texit_code\tattempt\tnote\n"
+            "t\tdeploy\tsucceeded\t0\t1\t\n"
+            "t\tpostdeploy\tsucceeded\t0\t1\t\n",
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -62,7 +68,7 @@ class ReportEvidenceTests(unittest.TestCase):
 
         self.assertEqual("PASS", data.status)
         self.assertEqual(2, len(data.reconciliation))
-        self.assertEqual(5, len(data.deployment_records))
+        self.assertEqual(3, len(data.deployment_records))
         metadata = next(row for row in data.summary if row.check == "metadata_coverage")
         self.assertEqual("NOT_EVALUATED", metadata.status)
         self.assertIn("structured source-to-converted object mapping", metadata.detail)
@@ -110,6 +116,8 @@ class ReportEvidenceTests(unittest.TestCase):
         self.assertEqual("INCOMPLETE", deployment.status)
 
     def test_deploy_without_completed_postdeploy_is_incomplete(self) -> None:
+        with (self.evidence_dir / "phase_status.tsv").open("a", encoding="utf-8") as handle:
+            handle.write("t\tpostdeploy\tstarted\t\t2\tinterrupted\n")
         (self.evidence_dir / "deploy_manifest.tsv").write_text(
             "phase\tpath\tstatus\tnote\n"
             "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n"
@@ -229,6 +237,26 @@ class ReportEvidenceTests(unittest.TestCase):
         deployment = next(row for row in data.summary if row.check == "deployment_scripts")
         self.assertEqual("FAIL", deployment.status)
         self.assertEqual(1, deployment.issues)
+
+    def test_phase_completion_uses_latest_state_without_scoring_markers(self) -> None:
+        with (self.evidence_dir / "phase_status.tsv").open("a", encoding="utf-8") as handle:
+            handle.write("t\tpostdeploy\tfailed\t1\t2\tSQL errors\n")
+        with (self.evidence_dir / "deploy_manifest.tsv").open("a", encoding="utf-8") as handle:
+            handle.write("postdeploy\t__phase_complete__\tpending\tlegacy marker\n")
+            handle.write("postdeploy\tsdcli/APP/routines.sql\tfailed\tSQL errors\n")
+        data = self.build()
+        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
+        self.assertEqual("FAIL", deployment.status)
+        self.assertEqual(1, deployment.issues)
+        self.assertNotIn("__phase_complete__", [row.path for row in data.deployment_records])
+
+    def test_completion_needs_no_manifest_sentinel(self) -> None:
+        manifest = self.evidence_dir / "deploy_manifest.tsv"
+        manifest.write_text("\n".join(
+            line for line in manifest.read_text(encoding="utf-8").splitlines()
+            if "__phase_complete__" not in line
+        ) + "\n", encoding="utf-8")
+        self.assertEqual("PASS", self.build().status)
 
     def test_reports_share_sections_escape_html_and_omit_ddl_comparison(self) -> None:
         data = report._build_report_data(

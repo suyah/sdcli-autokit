@@ -451,15 +451,6 @@ schema_dirs() {
   done | LC_ALL=C sort
 }
 
-generated_sql_files() {
-  local output_dir="$1"
-
-  # SQL Developer versions can emit either a per-schema hierarchy or a set of
-  # generated scripts below gen/. Only use this fallback when the hierarchy is
-  # absent; it avoids applying the same DDL twice.
-  find "$output_dir/gen" -type f -name '*.sql' ! -name 'passworddefinition.sql' 2>/dev/null | LC_ALL=C sort
-}
-
 master_include_paths() {
   local master_file="$1"
   LC_ALL=C awk '
@@ -569,7 +560,10 @@ schema_post_files() {
   local include_path foreign_keys_rel include_file foreign_keys_included=false
 
   include_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_schema_post_XXXXXX")" || return 1
-  schema_master_includes "$output_dir" "$schema_dir" > "$include_file"
+  if ! schema_master_includes "$output_dir" "$schema_dir" > "$include_file"; then
+    rm -f "$include_file"
+    return 1
+  fi
   foreign_keys_rel="${schema_dir#$output_dir/}/foreignkeys.sql"
   while IFS= read -r include_path; do
     [[ "$include_path" == "$foreign_keys_rel" ]] && foreign_keys_included=true
@@ -592,7 +586,7 @@ check_deploy_inputs() {
   # reports errors itself. Do not infer SQL correctness from directory layout.
   while IFS= read -r schema_dir; do
     found_schema=true
-    schema_master_includes "$output_dir" "$schema_dir" >/dev/null
+    schema_master_includes "$output_dir" "$schema_dir" >/dev/null || return 1
   done < <(schema_dirs "$output_dir")
 
   if $found_schema; then
@@ -600,54 +594,6 @@ check_deploy_inputs() {
   fi
 
   fail "Unsupported generated SQL layout: deploy requires <schema>/user.sql and <schema>/master.sql; monolithic gen/*.sql deployment is not supported"
-}
-
-record_root_sql_inventory() {
-  local output_dir="$1"
-  local sql_file
-  while IFS= read -r sql_file; do
-    case "$(basename "$sql_file")" in
-      role.sql) ;;
-      passworddefinition.sql)
-        record_deploy_manifest "plan" "$sql_file" "control" "temporary schema password definitions"
-        ;;
-      dropallschemas.sql)
-        record_deploy_manifest "plan" "$sql_file" "excluded" "destructive cleanup script"
-        ;;
-      reportallstatus.sql)
-        record_deploy_manifest "plan" "$sql_file" "excluded" "manual status utility"
-        ;;
-    esac
-  done < <(find "$output_dir" -mindepth 1 -maxdepth 1 -type f -name '*.sql' | LC_ALL=C sort)
-}
-
-record_schema_inventory() {
-  local output_dir="$1"
-  local schema_dir="$2"
-  local schema_rel sql_file rel_path include_path
-  schema_rel="${schema_dir#$output_dir/}"
-
-  record_deploy_manifest "plan" "$schema_dir/master.sql" "control" "ordered include source"
-  while IFS= read -r sql_file; do
-    rel_path="${sql_file#$output_dir/}"
-    case "$rel_path" in
-      "$schema_rel/user.sql"|"$schema_rel/master.sql") ;;
-      "$schema_rel/post.sql") ;;
-      "$schema_rel/dropobjects.sql"|"$schema_rel/dropobjecttypes.sql")
-        record_deploy_manifest "plan" "$sql_file" "excluded" "destructive cleanup script"
-        ;;
-      "$schema_rel/disable.sql"|"$schema_rel/enable.sql")
-        record_deploy_manifest "plan" "$sql_file" "excluded" "not needed without generated disable step"
-        ;;
-      "$schema_rel/reportallstatus.sql"|"$schema_rel/reportinvalidstatus.sql")
-        record_deploy_manifest "plan" "$sql_file" "covered" "status utility or post.sql include"
-        ;;
-      "$schema_rel/foreignkeys.sql")
-        :
-        ;;
-      *) : ;;
-    esac
-  done < <(find "$schema_dir" -type f -name '*.sql' | LC_ALL=C sort)
 }
 
 run_deploy() {
@@ -680,12 +626,11 @@ run_deploy() {
     return 0
   fi
 
-  check_deploy_inputs "$output_dir"
+  check_deploy_inputs "$output_dir" || return 1
   if [[ -f "$output_dir/role.sql" ]]; then
     prepare_role_scripts "$output_dir"
   fi
   init_deploy_manifest
-  record_root_sql_inventory "$output_dir"
 
   if [[ -f "$output_dir/role.sql" ]]; then
     if run_sqlplus_file "$(role_setup_dir)" "role_setup.sql" "$target_conn" "$target_user" "$target_password" "" 0 "" false "$output_dir"; then
@@ -696,9 +641,8 @@ run_deploy() {
     fi
   fi
 
-  local schema_dir schema_name rel_user_sql include_path generated_sql
+  local schema_dir schema_name rel_user_sql include_path include_paths
   while IFS= read -r schema_dir; do
-    record_schema_inventory "$output_dir" "$schema_dir"
     rel_user_sql="${schema_dir#$output_dir/}/user.sql"
     if run_sqlplus_file "$output_dir" "$rel_user_sql" "$target_conn" "$target_user" "$target_password" "$schema_password" "$prompt_count"; then
       record_deploy_manifest "deploy" "$schema_dir/user.sql" "executed"
@@ -710,7 +654,9 @@ run_deploy() {
 
   while IFS= read -r schema_dir; do
     schema_name="$(basename "$schema_dir")"
+    include_paths="$(schema_master_includes "$output_dir" "$schema_dir")" || return 1
     while IFS= read -r include_path; do
+      [[ -n "$include_path" ]] || continue
       is_predata_sql "$include_path" || continue
       if run_sqlplus_file "$output_dir" "$include_path" "$target_conn" "$target_user" "$target_password" "" 0 "$schema_name"; then
         record_deploy_manifest "deploy" "$output_dir/$include_path" "executed" "pre-data master include"
@@ -718,12 +664,8 @@ run_deploy() {
         record_deploy_manifest "deploy" "$output_dir/$include_path" "failed" "pre-data SQL*Plus failure"
         fail "Pre-data generated SQL failed: $include_path"
       fi
-    done < <(schema_master_includes "$output_dir" "$schema_dir")
+    done <<< "$include_paths"
   done < <(schema_dirs "$output_dir")
-
-  while IFS= read -r generated_sql; do
-    record_deploy_manifest "plan" "$generated_sql" "excluded" "duplicate monolithic output; schema hierarchy selected"
-  done < <(generated_sql_files "$output_dir")
 
   log_info "Deploy manifest: $(deploy_manifest_file)"
 }
@@ -785,13 +727,14 @@ run_postdeploy() {
   fi
 
   ensure_deploy_manifest
-  record_deploy_manifest "postdeploy" "__phase_complete__" "pending" "postdeploy phase started"
-  check_deploy_inputs "$output_dir"
+  check_deploy_inputs "$output_dir" || return 1
 
-  local schema_dir schema_name rel_script include_path failures=0 attempted=0 skipped=0
+  local schema_dir schema_name rel_script include_path include_paths failures=0 attempted=0 skipped=0
   while IFS= read -r schema_dir; do
     schema_name="$(basename "$schema_dir")"
+    include_paths="$(schema_post_files "$output_dir" "$schema_dir")" || return 1
     while IFS= read -r include_path; do
+      [[ -n "$include_path" ]] || continue
       if postdeploy_script_succeeded "$output_dir/$include_path"; then
         skipped=$((skipped + 1))
         log_info "Skipping successful postdeploy script: $include_path"
@@ -809,7 +752,7 @@ run_postdeploy() {
         record_deploy_manifest "postdeploy" "$output_dir/$include_path" "failed" "post-data SQL errors"
         log_error "Post-data generated SQL failed: $include_path"
       fi
-    done < <(schema_post_files "$output_dir" "$schema_dir")
+    done <<< "$include_paths"
 
     if [[ -f "$schema_dir/post.sql" ]]; then
       rel_script="${schema_dir#$output_dir/}/post.sql"
@@ -833,7 +776,6 @@ run_postdeploy() {
     log_error "Postdeploy completed with $failures failed script(s)"
     return 1
   fi
-  record_deploy_manifest "postdeploy" "__phase_complete__" "executed" "postdeploy phase completed"
   log_info "Deploy manifest: $(deploy_manifest_file)"
 }
 

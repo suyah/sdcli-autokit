@@ -5,6 +5,22 @@ into the customer offline bundle.
 
 ## Unreleased
 
+### Changed
+
+- Simplify phase orchestration by removing duplicate postcondition dispatch and
+  plan-only deployment manifest records. Keep exact model lookup and transfer
+  coverage at their execution boundaries; report completion from phase status.
+- Show native BCP and SQL*Loader warnings and diagnostics verbatim on the
+  console, with one copy in the raw run log.
+
+### Fixed
+
+- Use the latest phase state for retry protection, so a failed or interrupted
+  rerun cannot inherit an earlier successful result.
+- Propagate generated include-list discovery failures to deployment callers.
+- Preserve exact loader control-file coverage, including physical paths when
+  accessing a run through a symbolic link.
+
 ## 1.4.0 - 2026-11-05
 
 ### Added
