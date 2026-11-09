@@ -1,1 +1,0 @@
-CREATE USER APP IDENTIFIED BY "fixture-only";

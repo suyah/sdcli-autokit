@@ -1,373 +1,130 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
-import io
-import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = REPO_ROOT / "sdcli-scripts" / "lib" / "generate_validation_report.py"
-SPEC = importlib.util.spec_from_file_location("validation_report", MODULE_PATH)
-assert SPEC and SPEC.loader
-report = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = report
-SPEC.loader.exec_module(report)
-
-FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "validation" / "base"
-INVENTORY_HEADER = (
-    "schema\tcategory\tobject_name\tparent_schema\tparent_name\tsubtype\t"
-    "ordinal\tattribute_name\tattribute_value\tstatus\tdetail\torigin\n"
-)
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("report", ROOT / "sdcli-scripts/lib/generate_validation_report.py")
+report = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = report
+spec.loader.exec_module(report)
 
 
-class ReportEvidenceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.evidence_dir = Path(self.temporary.name)
-        for name in (
-            "validation_checks.tsv",
-            "reconciliation.tsv",
-            "source_object_inventory.tsv",
-            "target_object_inventory.tsv",
-        ):
-            shutil.copy(FIXTURE_DIR / name, self.evidence_dir / name)
-        (self.evidence_dir / "deploy_manifest.tsv").write_text(
+class ReportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup)
+        self.phases = self.root / "phase_status.tsv"
+        self.phases.write_text("timestamp\tphase\tstate\texit_code\tattempt\tnote\n" + "".join(
+            f"t\t{phase}\tsucceeded\t0\t1\t\n" for phase in
+            ("capture", "convert", "generate", "datamove", "offload", "deploy", "load", "postdeploy")
+        ))
+        (self.root / "deploy_manifest.tsv").write_text(
             "phase\tpath\tstatus\tnote\n"
-            "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n"
-            "deploy\tsdcli/APP/user.sql\texecuted\t\n"
-            "deploy\tsdcli/APP/tables.sql\texecuted\tpre-data master include\n"
-            "postdeploy\tsdcli/APP/indexes.sql\texecuted\tpost-data master include\n"
-            "postdeploy\t__phase_complete__\texecuted\tpostdeploy phase completed\n",
-            encoding="utf-8",
+            "deploy\tsdcli/APP/tables.sql\texecuted\t\n"
+            "postdeploy\tsdcli/APP/procedures.sql\texecuted\t\n"
         )
-        (self.evidence_dir / "phase_status.tsv").write_text(
-            "timestamp\tphase\tstate\texit_code\tattempt\tnote\n"
-            "t\tdeploy\tsucceeded\t0\t1\t\n"
-            "t\tpostdeploy\tsucceeded\t0\t1\t\n",
-            encoding="utf-8",
+        (self.root / "reconciliation.tsv").write_text(
+            "source_object\ttarget_object\tdata_file\texported_rows\tloaded_rows\trejected_rows\tdiscarded_rows\ttarget_rows\tstatus\treason\n"
+            "demo.sales.orders\tAPP.ORDERS\tdata/orders.dat\t2\t2\t0\t0\t2\tPASS\t\n"
         )
+        self.diagnostics = self.root / "target_object_diagnostics.csv"
+        self.write_diagnostics([])
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    def write_diagnostics(self, rows):
+        with self.diagnostics.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle, quoting=csv.QUOTE_ALL)
+            writer.writerow(("owner", "object_name", "object_type", "status", "error_line", "error_position", "error_message"))
+            writer.writerows(rows)
 
     def build(self):
-        return report._build_report_data(
-            self.evidence_dir,
-            "demo",
-            "20261019_120000",
-            "2026-10-19T01:00:00Z",
-        )
+        return report.build_report(self.root, "demo", "sample-run")
 
-    def test_report_uses_only_direct_evidence(self) -> None:
-        data = self.build()
+    def test_pass_needs_no_inventory_or_log_scan(self):
+        (self.root / "migrate.log").write_text("historical ERROR\nSQL*Loader-292: informational\n")
+        self.assertEqual("PASS", self.build().status)
+        self.assertFalse(hasattr(report, "load_inventory"))
 
-        self.assertEqual("PASS", data.status)
-        self.assertEqual(2, len(data.reconciliation))
-        self.assertEqual(3, len(data.deployment_records))
-        metadata = next(row for row in data.summary if row.check == "metadata_coverage")
-        self.assertEqual("NOT_EVALUATED", metadata.status)
-        self.assertIn("structured source-to-converted object mapping", metadata.detail)
-        self.assertFalse(hasattr(report, "parse_generated_inventory"))
-        self.assertFalse(hasattr(report, "compare_objects"))
-        self.assertFalse(hasattr(report, "_strip_sql_comments"))
-
-    def test_missing_target_inventory_is_incomplete_without_invented_findings(self) -> None:
-        (self.evidence_dir / "target_object_inventory.tsv").unlink()
-
-        data = self.build()
-        output = self.evidence_dir / "migration_report.txt"
-        report.render_text_report(data, output)
-        text = output.read_text(encoding="utf-8")
-
-        self.assertEqual("INCOMPLETE", data.status)
-        invalid_summary = next(
-            row for row in data.summary if row.check == "invalid_target_objects"
-        )
-        self.assertEqual("INCOMPLETE", invalid_summary.status)
-        self.assertIn("target inventory", text)
-        self.assertNotIn("MISSING_IN_TARGET", text)
-        self.assertNotIn("EXTRA_IN_TARGET", text)
-
-    def test_missing_deployment_manifest_is_not_reported_as_pass(self) -> None:
-        (self.evidence_dir / "deploy_manifest.tsv").unlink()
-
-        data = self.build()
-        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
-
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertEqual("INCOMPLETE", deployment.status)
-
-    def test_plan_only_deployment_manifest_is_incomplete(self) -> None:
-        (self.evidence_dir / "deploy_manifest.tsv").write_text(
-            "phase\tpath\tstatus\tnote\n"
-            "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n",
-            encoding="utf-8",
-        )
-
-        data = self.build()
-        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
-
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertEqual("INCOMPLETE", deployment.status)
-
-    def test_deploy_without_completed_postdeploy_is_incomplete(self) -> None:
-        with (self.evidence_dir / "phase_status.tsv").open("a", encoding="utf-8") as handle:
-            handle.write("t\tpostdeploy\tstarted\t\t2\tinterrupted\n")
-        (self.evidence_dir / "deploy_manifest.tsv").write_text(
-            "phase\tpath\tstatus\tnote\n"
-            "plan\tsdcli/APP/master.sql\tcontrol\tordered include source\n"
-            "deploy\tsdcli/APP/user.sql\texecuted\t\n"
-            "deploy\tsdcli/APP/tables.sql\texecuted\tpre-data master include\n",
-            encoding="utf-8",
-        )
-
-        data = self.build()
-        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
-
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertEqual("INCOMPLETE", deployment.status)
-        self.assertIn("postdeploy_complete=0", deployment.detail)
-
-    def test_not_run_deployment_is_incomplete(self) -> None:
-        manifest = self.evidence_dir / "deploy_manifest.tsv"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8")
-            + "postdeploy\tsdcli/APP/routines.sql\tnot_run\tawaiting manual correction\n",
-            encoding="utf-8",
-        )
-
-        data = self.build()
-        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
-
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertEqual("INCOMPLETE", deployment.status)
-
-    def test_unknown_deployment_status_is_incomplete_evidence(self) -> None:
-        manifest = self.evidence_dir / "deploy_manifest.tsv"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8")
-            + "postdeploy\tsdcli/APP/routines.sql\tmaybe\tunknown state\n",
-            encoding="utf-8",
-        )
-
-        data = self.build()
-
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertTrue(
-            any(row.section == "deployment manifest" for row in data.evidence_health)
-        )
-
-    def test_invalid_objects_include_structured_compiler_diagnostics(self) -> None:
-        target = self.evidence_dir / "target_object_inventory.tsv"
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(
-                "APP\tROUTINES\tBROKEN_PROC\t\t\tPROCEDURE\t\t\t\tINVALID\t\toracle\n"
-                "APP\tCOMPILER_ERRORS\tBROKEN_PROC\tAPP\tBROKEN_PROC\tPROCEDURE\t1\tline_position\t10:7\tINVALID\tPLS-00103: bad token\toracle\n"
-                "APP\tCOMPILER_ERRORS\tBROKEN_PROC\tAPP\tBROKEN_PROC\tPROCEDURE\t2\tline_position\t11:2\tINVALID\tPLS-00103: bad token\toracle\n"
-            )
-        checks = self.evidence_dir / "validation_checks.tsv"
-        checks.write_text(
-            checks.read_text(encoding="utf-8").replace(
-                "target_objects\tPASS\t0\tno issues",
-                "target_objects\tFAIL\t1\tOracle invalid objects or compiler errors",
-            ),
-            encoding="utf-8",
-        )
-
-        data = self.build()
-
-        self.assertEqual("FAIL", data.status)
-        self.assertEqual(2, len(data.invalid_objects))
-        self.assertEqual("10", data.invalid_objects[0].line)
-        self.assertEqual("7", data.invalid_objects[0].position)
-        self.assertEqual("PLS-00103: bad token", data.invalid_objects[0].message)
-        invalid_summary = next(
-            row for row in data.summary if row.check == "invalid_target_objects"
-        )
-        self.assertEqual(1, invalid_summary.issues)
-        self.assertIn("compiler_errors=2", invalid_summary.detail)
-
-    def test_quoted_case_sensitive_objects_keep_separate_diagnostics(self) -> None:
-        target = self.evidence_dir / "target_object_inventory.tsv"
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(
-                "APP\tROUTINES\tCalc\t\t\tPROCEDURE\t\t\t\tINVALID\tfirst error\toracle\n"
-                "APP\tROUTINES\tCALC\t\t\tPROCEDURE\t\t\t\tINVALID\tsecond error\toracle\n"
-            )
-
-        data = self.build()
-
-        self.assertEqual(["CALC", "Calc"], sorted(row.name for row in data.invalid_objects))
-
-    def test_latest_deployment_outcome_supersedes_an_earlier_failure(self) -> None:
-        manifest = self.evidence_dir / "deploy_manifest.tsv"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8")
-            + "postdeploy\tsdcli/APP/routines.sql\tfailed\tSQL errors\n"
-            + "postdeploy\tsdcli/APP/routines.sql\texecuted\tmanual fix rerun\n",
-            encoding="utf-8",
-        )
-
-        data = self.build()
-        routine = next(
-            row
-            for row in data.deployment_records
-            if row.path == "sdcli/APP/routines.sql"
-        )
-
-        self.assertEqual("executed", routine.status)
-        self.assertEqual("PASS", data.status)
-
-    def test_current_failed_deployment_is_a_concrete_failure(self) -> None:
-        manifest = self.evidence_dir / "deploy_manifest.tsv"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8")
-            + "postdeploy\tsdcli/APP/routines.sql\tfailed\tpost-data SQL errors\n",
-            encoding="utf-8",
-        )
-
-        data = self.build()
-
-        self.assertEqual("FAIL", data.status)
-        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
-        self.assertEqual("FAIL", deployment.status)
-        self.assertEqual(1, deployment.issues)
-
-    def test_phase_completion_uses_latest_state_without_scoring_markers(self) -> None:
-        with (self.evidence_dir / "phase_status.tsv").open("a", encoding="utf-8") as handle:
-            handle.write("t\tpostdeploy\tfailed\t1\t2\tSQL errors\n")
-        with (self.evidence_dir / "deploy_manifest.tsv").open("a", encoding="utf-8") as handle:
-            handle.write("postdeploy\t__phase_complete__\tpending\tlegacy marker\n")
-            handle.write("postdeploy\tsdcli/APP/routines.sql\tfailed\tSQL errors\n")
-        data = self.build()
-        deployment = next(row for row in data.summary if row.check == "deployment_scripts")
-        self.assertEqual("FAIL", deployment.status)
-        self.assertEqual(1, deployment.issues)
-        self.assertNotIn("__phase_complete__", [row.path for row in data.deployment_records])
-
-    def test_completion_needs_no_manifest_sentinel(self) -> None:
-        manifest = self.evidence_dir / "deploy_manifest.tsv"
-        manifest.write_text("\n".join(
-            line for line in manifest.read_text(encoding="utf-8").splitlines()
-            if "__phase_complete__" not in line
-        ) + "\n", encoding="utf-8")
+    def test_latest_retry_and_current_validation_do_not_preserve_old_failure(self):
+        with self.phases.open("a") as handle:
+            handle.write("t\tpostdeploy\tfailed\t1\t2\terror\n")
+            handle.write("t\tpostdeploy\tsucceeded\t0\t3\t\n")
+            handle.write("t\tvalidate\tfailed\t1\t1\told result\n")
+            handle.write("t\tvalidate\tstarted\t\t2\t\n")
         self.assertEqual("PASS", self.build().status)
 
-    def test_reports_share_sections_escape_html_and_omit_ddl_comparison(self) -> None:
-        data = report._build_report_data(
-            self.evidence_dir,
-            "demo<script>",
-            "20261019_120000",
-            "2026-10-19T01:00:00Z",
-        )
-        html_output = self.evidence_dir / "migration_report.html"
-        text_output = self.evidence_dir / "migration_report.txt"
-
-        report.render_report(data, html_output)
-        report.render_text_report(data, text_output)
-        html_text = html_output.read_text(encoding="utf-8")
-        terminal_text = text_output.read_text(encoding="utf-8")
-
-        for heading in (
-            "Validation Summary",
-            "Data Reconciliation",
-            "Deployment Script Outcomes",
-            "Invalid Oracle Objects and Compiler Diagnostics",
-            "Metadata Coverage",
-            "Inventory Counts",
-            "Evidence Health",
-        ):
-            self.assertIn(heading, html_text)
-            self.assertIn(heading, terminal_text)
-        self.assertIn("demo&lt;script&gt;", html_text)
-        self.assertNotIn("demo<script>", html_text)
-        self.assertIn("demo<script>", terminal_text)
-        for obsolete in ("DIFFERENT", "MISSING_IN_CONVERSION", "EXTRA_IN_TARGET"):
-            self.assertNotIn(obsolete, html_text)
-            self.assertNotIn(obsolete, terminal_text)
-
-    def test_empty_inventory_is_incomplete_evidence(self) -> None:
-        (self.evidence_dir / "source_object_inventory.tsv").write_text(
-            INVENTORY_HEADER, encoding="utf-8"
-        )
-
+    def test_failed_phase_wins_over_missing_diagnostics(self):
+        with self.phases.open("a") as handle:
+            handle.write("t\tload\tfailed\t1\t2\tSQL error\n")
+        self.diagnostics.unlink()
         data = self.build()
+        self.assertEqual("FAIL", data.status)
+        self.assertTrue(data.incomplete)
 
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertTrue(
-            any(row.section == "source inventory" for row in data.evidence_health)
-        )
+    def test_interrupted_rerun_is_incomplete(self):
+        with self.phases.open("a") as handle:
+            handle.write("t\tpostdeploy\tstarted\t\t2\t\n")
+        self.assertEqual("INCOMPLETE", self.build().status)
 
-    def test_truncated_inventory_row_is_incomplete_without_crashing(self) -> None:
-        (self.evidence_dir / "target_object_inventory.tsv").write_text(
-            INVENTORY_HEADER + "APP\tTABLES\tCUSTOMER\n", encoding="utf-8"
-        )
-
+    def test_one_script_failure_counts_once_and_retry_recovers(self):
+        manifest = self.root / "deploy_manifest.tsv"
+        with manifest.open("a") as handle:
+            handle.write("plan\tsdcli/APP/master.sql\tcontrol\tlegacy\n")
+            handle.write("postdeploy\t__phase_complete__\tpending\tlegacy\n")
+            handle.write("postdeploy\tsdcli/APP/procedures.sql\tfailed\tSQL error\n")
         data = self.build()
+        self.assertEqual("FAIL", data.status)
+        self.assertEqual(1, data.failed_scripts)
+        with manifest.open("a") as handle:
+            handle.write("postdeploy\tsdcli/APP/procedures.sql\texecuted\t\n")
+        self.assertEqual("PASS", self.build().status)
 
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertTrue(
-            any(row.section == "target inventory" for row in data.evidence_health)
-        )
-
-    def test_validation_checks_require_the_complete_contract(self) -> None:
-        (self.evidence_dir / "validation_checks.tsv").write_text(
-            "check\tstatus\tissues\tdetail\nrun_log\tPASS\t0\tno issues\n",
-            encoding="utf-8",
-        )
-
+    def test_quoted_multiline_compiler_message_and_invalid_without_message(self):
+        message = 'PLS-00103: found "token", expected expression\nsecond\tline <tag>'
+        self.write_diagnostics([
+            ("APP", "SEARCH", "PROCEDURE", "INVALID", 12, 4, message),
+            ("APP", "OTHER", "VIEW", "INVALID", "", "", ""),
+        ])
+        (self.root / "reconciliation.tsv").unlink()
         data = self.build()
+        self.assertEqual("FAIL", data.status)
+        self.assertEqual(2, data.invalid_objects)
+        self.assertEqual(1, data.compiler_errors)
+        self.assertEqual(message, data.diagnostics[0]["error_message"])
 
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertTrue(
-            any(row.section == "validation checks" for row in data.evidence_health)
-        )
+    def test_header_only_is_zero_but_missing_or_malformed_is_incomplete(self):
+        self.assertEqual("PASS", self.build().status)
+        for bad in ("", '"owner",broken\n', '"unterminated\n'):
+            self.diagnostics.write_text(bad)
+            self.assertEqual("INCOMPLETE", self.build().status)
 
-    def test_pass_reconciliation_requires_valid_row_counts(self) -> None:
-        reconciliation = self.evidence_dir / "reconciliation.tsv"
-        reconciliation.write_text(
-            reconciliation.read_text(encoding="utf-8").replace(
-                "demo.sales.customer\tAPP.CUSTOMER\tdata/sales/customer.dat\t2\t2\t0\t0\t2\tPASS",
-                "demo.sales.customer\tAPP.CUSTOMER\tdata/sales/customer.dat\tNaN\t2\t0\t0\t2\tPASS",
-            ),
-            encoding="utf-8",
-        )
+    def test_inconsistent_pass_row_is_not_accepted(self):
+        path = self.root / "reconciliation.tsv"
+        path.write_text(path.read_text().replace("\t2\t2\t0\t0\t2\tPASS", "\t2\t1\t0\t0\t1\tPASS"))
+        self.assertEqual("INCOMPLETE", self.build().status)
 
-        data = self.build()
-
-        self.assertEqual("INCOMPLETE", data.status)
-        self.assertTrue(
-            any(row.section == "data reconciliation" for row in data.evidence_health)
-        )
-
-    def test_cli_writes_both_reports_without_sdcli_directory(self) -> None:
-        output = self.evidence_dir / "migration_report.html"
-        stdout = io.StringIO()
-
-        with redirect_stdout(stdout):
-            rc = report.main(
-                (
-                    "--evidence-dir",
-                    str(self.evidence_dir),
-                    "--output",
-                    str(output),
-                    "--migration",
-                    "demo",
-                    "--run-id",
-                    "20261019_120000",
-                )
-            )
-
-        self.assertEqual(0, rc)
-        self.assertTrue(output.is_file())
-        self.assertTrue(output.with_suffix(".txt").is_file())
-        self.assertIn("REPORT_RESULT status=PASS", stdout.getvalue())
-        self.assertIn("not_evaluated_sections=1", stdout.getvalue())
+    def test_outputs_share_result_and_show_readable_diagnostics(self):
+        self.write_diagnostics([("APP", "SEARCH", "PROCEDURE", "INVALID", 1, 2, 'bad "token"\nnext <tag>')])
+        (self.root / "idmap").mkdir()
+        (self.root / "idmap/schema_mapping.tsv").write_text("source_schema\ttarget_schema\nsales\tAPP\n")
+        output = self.root / "migration_report.html"
+        rc = report.main(["--evidence-dir", str(self.root), "--output", str(output), "--migration", "demo<script>", "--run-id", "sample-run"])
+        self.assertEqual(2, rc)
+        html = output.read_text()
+        text = output.with_suffix(".txt").read_text()
+        for heading in ("Migration Summary", "Schema Mapping", "Table Data Transfer", "Scripts Requiring Attention", "Objects Requiring Repair"):
+            self.assertIn(heading, html)
+            self.assertIn(heading, text)
+        for removed in ("Evidence Health", "Metadata Coverage", "Inventory Counts", "total_issues"):
+            self.assertNotIn(removed, html + text)
+        self.assertIn("demo&lt;script&gt;", html)
+        self.assertIn("Line 1:2", text)
+        self.assertIn("status=FAIL", (self.root / "validation_summary.txt").read_text())
 
 
 if __name__ == "__main__":
