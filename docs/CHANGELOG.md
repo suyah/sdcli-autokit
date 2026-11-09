@@ -13,6 +13,9 @@ into the customer offline bundle.
 
 ### Changed
 
+- Document the safe distinction between a new migration run with new mapped
+  target owners and recovery of an existing run. Make explicit that repository
+  models are retained and target schema/data cleanup remains a DBA action.
 - Replace full source/target inventories and validation log scoring with direct
   Oracle invalid-object/compiler-error CSV diagnostics, phase/script outcomes,
   and row reconciliation. Produce matching HTML, terminal, and summary results;

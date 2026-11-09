@@ -680,9 +680,9 @@ In plain language, this captures SQL Server metadata, converts it for Oracle,
 generates scripts, exports data, deploys the Oracle schema objects needed before
 load, loads data, attempts each independent post-load object script listed by
 SQL Developer's generated `master.sql` files, and validates logs, per-table row
-counts, and source/generated/target object coverage. Postdeploy continues after
-individual SQL errors but stops on a SQL*Plus runtime failure. Validation also
-creates self-contained HTML and plain-text comparison reports.
+counts, phase/script outcomes, and Oracle invalid objects/compiler errors.
+Postdeploy continues after individual SQL errors but stops on a SQL*Plus runtime
+failure. Validation also creates self-contained HTML and plain-text reports.
 
 Each SDCLI workflow locks its project profile. Repository work also creates
 an atomic lock under `<project_root>/.locks`, keyed by configured endpoint and
@@ -738,6 +738,63 @@ rename Oracle objects or replace old generated/data artifacts. Start a new run
 if changing a mapping after generation or deployment. A run already remapped
 and generated successfully using native SDCLI can resume at datamove; it does
 not need capture/convert repeated just because Autokit was upgraded.
+
+### Run the same source migration again
+
+Use a **new run** when you want another complete migration of the same source
+database. This can be appropriate after changing `migrations[].schema_mapping`
+so the mapped Oracle owners are new and do not collide with an earlier target.
+Mapping avoids collisions for those mapped source schemas only; it does not
+rename every generated target object.
+
+1. Update `schema_mapping` before conversion. Each source schema must still map
+   one-to-one, and every new target owner must be different from an existing
+   target owner that the new deployment could create or load.
+2. Keep the same migration name, source/target connection details, project
+   profile, and repository. Do **not** run `--init` again and do not delete old
+   captured or converted models; they are historical repository evidence.
+3. Before using a full workflow, confirm that the target is isolated for this
+   new attempt. In addition to mapped owners, review generated compatibility
+   schemas (such as an optional `Emulation` schema), roles, and any other
+   database-level objects. They can be shared across mappings and conflict with
+   objects from an earlier migration in the same target database.
+4. If all target objects are confirmed to be new or intentionally isolated,
+   start a new full workflow. Do not provide `--run`; Autokit creates a new run
+   directory and captures a new model for this attempt.
+
+   ```bash
+   cd ~/sdcli-scripts
+   ./migrate.sh example_migration --migrate
+   ```
+
+   Omitting `--migrate` has the same full-workflow behaviour:
+
+   ```bash
+   ./migrate.sh example_migration
+   ```
+
+5. Record the new run ID printed at startup. Its generated files, exported
+   data, logs, phase history, and validation report remain separate from prior
+   runs under `<project_root>/example_migration/run_<run_id>/`.
+
+No target cleanup is required solely because a new run is created. It is safe
+only when every generated target object is intended to be new. If the target
+scope has not yet been reviewed, use the documented single-phase sequence
+through `generate`, inspect the new run's schema directories and deploy input,
+then continue with `datamove` and later phases only after the DBA approves the
+scope.
+
+If the new migration must reuse the **same** Oracle schemas or tables, do not
+start another full workflow against them without preparing the target first.
+Autokit deliberately does not drop schemas, tables, or data. Ask the DBA to
+perform and record a migration-scoped cleanup, or use a different target owner.
+`--cleanup` removes only generated roles; it is not schema cleanup. Preserve the
+previous run directory and collect its logs before any destructive DBA action.
+
+This is different from recovering an interrupted run: keep its original run ID
+and rerun only the required phase. Use `--rerun-completed` only when a completed
+mutating phase is intentionally being repeated after the DBA has made the
+target safe.
 
 ## Export SQL Server source schema and routines
 
