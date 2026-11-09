@@ -1785,7 +1785,7 @@ run_target_sql_capture() {
     printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE' 'WHENEVER SQLERROR EXIT FAILURE'
     printf 'connect %s/"%s"@%s\n' "$target_user" "$connect_password" "$target_conn"
     cat "$sql_file"
-  } | sqlplus -S -L /nolog > "$output_file" 2>&1
+  } | NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -S -L /nolog > "$output_file" 2>&1
   rc=${PIPESTATUS[1]}
   $errexit_enabled && set -e
 

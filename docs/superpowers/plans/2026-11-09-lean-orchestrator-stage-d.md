@@ -16,4 +16,5 @@ No database connection is required for grouping tests. No vendor binary or new d
 - The existing image already provides system iconv; no image package change was needed.
 - All 35 runtime shell regression scripts passed on Linux. Final review added focused regressions for unavailable totals, quoted Oracle identifiers in raw runner TSV, and renderer failures that leave older reports. The report suite now has 11 Python cases; affected tests were rerun after these fixes.
 - Native diagnostics remain visible and redacted. No new image/release archive was built and no live database migration was performed.
+- Final review also scopes AL32UTF8 to read-only Oracle report subprocesses, keeping diagnostic encoding independent of data-loading character sets. The collector test verifies the environment passed to SQL*Plus.
 - Connected Oracle CSV and complete LOB migration remain unverified because the authorised test ADB connection timed out. The required native LOB helper is an explicit DBA preparation step rather than a generated-SQL rewrite.

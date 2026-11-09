@@ -31,6 +31,8 @@ into the customer offline bundle.
   potentially stale after a renderer failure.
 - Preserve quoted Oracle identifiers when reading runner TSV artifacts while
   retaining native CSV quoting for compiler diagnostics.
+- Select UTF-8 explicitly for read-only Oracle report queries, independently
+  of any character set selected for data loading.
 
 - Fail load on SQL*Plus SQL/OS failures and native command errors. Enforce the
   load error policy before CONNECT and in streamed WHENEVER directives, keeping
