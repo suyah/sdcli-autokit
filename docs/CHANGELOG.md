@@ -5,6 +5,12 @@ into the customer offline bundle.
 
 ## Unreleased
 
+### Added
+
+- Add `export-source-schema.sh --layout type` to group a database's native
+  SqlPackage files by category and schema order. Preserve the original tree,
+  source-path comments, and complete SQL batches without parsing DDL.
+
 ### Changed
 
 - Replace full source/target inventories and validation log scoring with direct
@@ -13,7 +19,6 @@ into the customer offline bundle.
   a confirmed failure takes precedence over an unavailable check.
 - Remove obsolete report sections and inventory fixtures. Collect the new
   diagnostic CSV in run-log bundles while preserving existing data exclusions.
-
 - Simplify phase orchestration by removing duplicate postcondition dispatch and
   plan-only deployment manifest records. Keep exact model lookup and transfer
   coverage at their execution boundaries; report completion from phase status.
@@ -22,11 +27,15 @@ into the customer offline bundle.
 
 ### Fixed
 
+- Keep unavailable row totals distinct from zero and identify older reports as
+  potentially stale after a renderer failure.
+- Preserve quoted Oracle identifiers when reading runner TSV artifacts while
+  retaining native CSV quoting for compiler diagnostics.
+
 - Fail load on SQL*Plus SQL/OS failures and native command errors. Enforce the
   load error policy before CONNECT and in streamed WHENEVER directives, keeping
   generated files unchanged. Preserve native diagnostics and prevent subsequent
   generated-shell steps after a failed SQL*Plus call.
-
 - Use the latest phase state for retry protection, so a failed or interrupted
   rerun cannot inherit an earlier successful result.
 - Propagate generated include-list discovery failures to deployment callers.

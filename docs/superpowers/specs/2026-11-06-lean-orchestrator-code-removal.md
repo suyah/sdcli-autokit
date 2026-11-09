@@ -2,7 +2,7 @@
 
 Date: 2026-11-06
 
-Status: approved inventory; Stage A is implemented on its feature branch
+Status: approved inventory; implementation history and verification are recorded in stage plans
 Baseline: `v1.4.0` / `db94c41`
 
 Companion: [lean orchestrator design](2026-11-06-lean-orchestrator-design.md)

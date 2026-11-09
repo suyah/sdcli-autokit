@@ -20,8 +20,14 @@ SCOPE = "Scope: row counts and execution/object diagnostics only; no value-by-va
 
 
 def read_records(path, header, delimiter="\t"):
-    with Path(path).open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle, delimiter=delimiter, strict=True)
+    path = Path(path)
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        # Runner TSV contains literal identifiers, not CSV-escaped fields.
+        # Oracle native CSV separately requires normal quote/multiline handling.
+        reader = csv.DictReader(
+            handle, delimiter=delimiter, strict=True,
+            quoting=csv.QUOTE_NONE if delimiter == "\t" else csv.QUOTE_MINIMAL,
+        )
         if tuple(reader.fieldnames or ()) != header:
             raise ValueError(f"Invalid header: {path.name}")
         rows = list(reader)
@@ -161,7 +167,12 @@ def build_report(directory, migration, run_id):
 
 
 def totals(data):
-    return {key: sum(int(row[key]) for row in data.reconciliation if row[key]) for key in COUNT_FIELDS}
+    return {
+        key: sum(int(row[key]) for row in data.reconciliation)
+        if data.reconciliation and all(row[key] for row in data.reconciliation)
+        else "unavailable"
+        for key in COUNT_FIELDS
+    }
 
 
 def text_report(data):

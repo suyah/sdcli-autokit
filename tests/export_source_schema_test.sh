@@ -51,6 +51,18 @@ fi
 
 mkdir -p "$target/dbo/Stored Procedures"
 printf 'CREATE PROCEDURE [dbo].[example] AS SELECT 1;\n' > "$target/dbo/Stored Procedures/example.sql"
+if [[ "${TEST_TYPE_LAYOUT:-false}" == true ]]; then
+  mkdir -p "$target/dbo/Tables" "$target/other/Tables" "$target/dbo/Functions" "$target/Security"
+  printf 'CREATE TABLE [dbo].[first table] (id int);\nGO\nCREATE INDEX ix ON [dbo].[first table](id);\nGO\n' > "$target/dbo/Tables/first table.sql"
+  printf 'CREATE TABLE [other].[last] (id int);\nGO\n' > "$target/other/Tables/last.sql"
+  printf '\357\273\277CREATE FUNCTION example() RETURNS int AS BEGIN RETURN 1 END;\nGO\n' > "$target/dbo/Functions/example.sql"
+  printf 'CREATE USER [reader] WITHOUT LOGIN;\nGO\n' | iconv -f UTF-8 -t UTF-16 > "$target/Security/reader.sql"
+  printf 'ALTER DATABASE CURRENT SET READ_WRITE;\nGO\n' > "$target/Database.sql"
+fi
+if [[ "${TEST_BAD_LAYOUT:-false}" == true ]]; then
+  mkdir -p "$target/dbo/Tables/nested"
+  printf 'SELECT 1;\n' > "$target/dbo/Tables/nested/unsupported.sql"
+fi
 SH
 chmod +x "$tmpdir/bin/yq" "$tmpdir/bin/sqlpackage"
 
@@ -125,10 +137,34 @@ if FAKE_SQLPACKAGE_FAIL=true run_export trust "$failure_dir" > "$tmpdir/failure.
 fi
 [[ -f "$failure_dir/sqlpackage-extract.log" ]]
 grep -F 'diagnostic password=***' "$failure_dir/sqlpackage-extract.log" >/dev/null
+grep -F 'diagnostic password=***' "$tmpdir/failure.stderr" >/dev/null
 if grep -F "$SOURCE_PASSWORD" "$tmpdir/failure.stderr" "$failure_dir/sqlpackage-extract.log"; then
   echo 'source password leaked after SqlPackage failure' >&2
   exit 1
 fi
 [[ ! -f "$failure_dir/manifest.txt" ]]
+
+type_dir="$tmpdir/type-output"
+TEST_TYPE_LAYOUT=true TEST_TLS_MODE=trust "$EXPORT_SCRIPT" demo --layout type --output "$type_dir" > "$tmpdir/type.stdout"
+[[ -f "$type_dir/by-type/Tables.sql" && -f "$type_dir/by-type/Stored Procedures.sql" && -f "$type_dir/by-type/Security.sql" && -f "$type_dir/by-type/Database.sql" ]]
+grep -F 'CREATE INDEX ix' "$type_dir/by-type/Tables.sql" >/dev/null
+grep -F 'CREATE FUNCTION example' "$type_dir/by-type/Functions.sql" >/dev/null
+grep -F 'CREATE USER [reader]' "$type_dir/by-type/Security.sql" >/dev/null
+[[ "$(head -c 3 "$type_dir/sql/dbo/Functions/example.sql" | od -An -tx1 | tr -d ' \n')" == efbbbf ]]
+if LC_ALL=C grep -Fq $'\357\273\277' "$type_dir/by-type/Functions.sql"; then
+  echo 'Embedded BOM remained in grouped UTF-8 SQL' >&2; exit 1
+fi
+[[ "$(grep -Rh '^-- Source: ' "$type_dir/by-type" | wc -l | tr -d ' ')" == 6 ]]
+first_line="$(grep -n '^-- Source: dbo/Tables/' "$type_dir/by-type/Tables.sql" | cut -d: -f1)"
+last_line="$(grep -n '^-- Source: other/Tables/' "$type_dir/by-type/Tables.sql" | cut -d: -f1)"
+(( first_line < last_line ))
+grep -Fx 'Layout: type' "$type_dir/manifest.txt" >/dev/null
+[[ ! -e "$success_dir/by-type" ]]
+
+bad_layout_dir="$tmpdir/unsupported-layout"
+if TEST_BAD_LAYOUT=true TEST_TLS_MODE=trust "$EXPORT_SCRIPT" demo --layout type --output "$bad_layout_dir" > "$tmpdir/bad-layout.out" 2>&1; then
+  echo 'Unsupported native layout was silently omitted' >&2; exit 1
+fi
+[[ -f "$bad_layout_dir/sql/dbo/Tables/nested/unsupported.sql" && ! -e "$bad_layout_dir/manifest.txt" ]]
 
 echo 'source schema export test passed'

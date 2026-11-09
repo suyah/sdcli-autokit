@@ -2023,6 +2023,10 @@ run_validate() {
     rm -f "$AUTOKIT_DIR/target_object_diagnostics.csv"
   fi
   run_validation_report "$output_dir" "$idx" || rc=$?
+  if [[ "$rc" != 0 && "$rc" != 2 ]]; then
+    log_error "Report generation failed; existing reports may be from an earlier validation"
+    return "$rc"
+  fi
   log_info "Migration report: $AUTOKIT_DIR/migration_report.html"
   log_info "Terminal report: $AUTOKIT_DIR/migration_report.txt"
   return "$rc"
