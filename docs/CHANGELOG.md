@@ -7,6 +7,13 @@ into the customer offline bundle.
 
 ### Changed
 
+- Replace full source/target inventories and validation log scoring with direct
+  Oracle invalid-object/compiler-error CSV diagnostics, phase/script outcomes,
+  and row reconciliation. Produce matching HTML, terminal, and summary results;
+  a confirmed failure takes precedence over an unavailable check.
+- Remove obsolete report sections and inventory fixtures. Collect the new
+  diagnostic CSV in run-log bundles while preserving existing data exclusions.
+
 - Simplify phase orchestration by removing duplicate postcondition dispatch and
   plan-only deployment manifest records. Keep exact model lookup and transfer
   coverage at their execution boundaries; report completion from phase status.

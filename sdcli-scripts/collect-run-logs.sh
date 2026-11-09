@@ -141,6 +141,7 @@ allowed_run_files=(
   bcp_queryout_adjustments.tsv
   sqlldr_status.tsv
   target_row_counts.tsv
+  target_object_diagnostics.csv
   reconciliation.tsv
   source_object_inventory.tsv
   target_object_inventory.tsv

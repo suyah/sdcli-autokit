@@ -69,7 +69,7 @@ Use this directory inside the migration working area/container to configure and 
 | `config.example.yaml` | Neutral configuration template shipped in source and offline bundles. |
 | `config.yaml` | Compatibility link to the customer configuration stored on the persistent `/u01/data` volume; it is intentionally not tracked or bundled. |
 | `migrate.sh` | Main migration command. It validates config, initializes the repository, creates connections, runs phases, and writes run logs. |
-| `lib/` | Helper programs used internally for BCP, SQL*Plus, SQL*Loader, and validation-report generation. Bash owns database execution; the existing Python standard-library renderer only converts validation TSV evidence into HTML/text reports. |
+| `lib/` | Internal BCP, SQL*Plus, SQL*Loader, and report helpers. Bash executes database tools; the standard-library Python renderer reads runner artifacts and native Oracle CSV to produce HTML/text reports. |
 
 ## Prerequisites
 
@@ -837,7 +837,7 @@ Supported phases:
 | `cleanup` | Explicitly remove only roles listed in the generated `role.sql`; it does not remove schemas, tables, or data. |
 | `load` | Run SQL*Loader using the exported data and generated control files. |
 | `postdeploy` | Attempt all non-predata scripts in generated master order, then run each schema's `post.sql`. Continue after individual SQL errors, but stop on a SQL*Plus runtime failure. |
-| `validate` | Reconcile row counts, collect source and target object metadata, compare source/generated/actual objects, and create HTML and plain-text validation reports. |
+| `validate` | Reconcile row counts, report phase/script outcomes and Oracle invalid objects/compiler errors, and write matching HTML/text reports. |
 
 ### Data movement mode
 
@@ -1011,49 +1011,43 @@ run, use:
 ./migrate.sh tpcc --phase validate --run 20260427_014117
 ```
 
-The SQL Server source and Oracle target must both be reachable from the
-container while validation runs. The collector queries read-only system catalog
-views. The SQL Server password is supplied to `sqlcmd` through
-`SQLCMDPASSWORD`, and the Oracle password uses the existing SQL*Plus `/nolog`
-connection path; neither password is written to report evidence or process
-arguments.
+Validation queries the Oracle target only. Source row counts come from this
+run's actual BCP exports, matched to SQL*Loader records by data-file path. It
+compares exported, loaded, rejected/discarded, and final target row counts.
+The Oracle password uses the existing SQL*Plus stdin connection path.
 
-When `--run` resumes an existing run directory, validation evaluates the
-current generated, load, and target evidence. Earlier failed attempts remain in
-`autokit/migrate.log` for audit but do not by themselves make a later, successful
-retry fail validation. Errors produced by the current command and any failing
-validation evidence still fail the command.
+Reports read the latest phase/script outcomes. A successful retry supersedes
+its earlier failed attempt; historical log messages are retained for diagnosis
+and are not scored again. No source/target DDL parsing or complete object
+inventory is required.
 
-No manual row-count SQL or schema-mapping file is required. Table mappings are
-derived from this run's BCP and SQL*Loader data-file evidence. Row comparison
-uses the BCP exported count, SQL*Loader loaded/rejected/discarded counts, and the
-final Oracle table count. This is preferable to recounting a live SQL Server
-database later, when its data may have changed.
+The self-contained `migration_report.html` and Linux-readable
+`migration_report.txt` contain:
 
-The offline `migration_report.html` and `migration_report.txt` contain the same
-direct-evidence sections:
+- Migration Summary: latest phase outcomes and script totals;
+- Schema Mapping, when a native mapping summary exists;
+- Table Data Transfer: per-table row counts and reject/discard results;
+- Scripts Requiring Attention: failed/incomplete actual scripts;
+- Objects Requiring Repair: Oracle invalid objects and native compiler errors;
+- Checks Not Completed, only when a required result is unavailable.
 
-- validation summary and evidence health;
-- table data reconciliation;
-- deploy, postdeploy, and cleanup script outcomes;
-- Oracle invalid objects and compiler errors;
-- source and target inventory counts; and
-- metadata coverage status.
+`FAIL` means a confirmed failed phase/script, row mismatch, rejected/discarded
+rows, invalid object, or compiler error. It takes precedence over unavailable
+checks. `INCOMPLETE` means no confirmed failure exists but a required check could
+not complete. `PASS` applies only to the listed checks; it does not prove
+value-by-value data correctness, business behaviour, or complete metadata
+conversion. Compiler warnings alone are not failures.
 
-`PASS` means all required evidence was collected and every evaluated check
-passed. `FAIL` means a concrete mismatch, failed deployment script, or invalid
-target object was found. Missing, malformed, not-run, or plan-only execution
-evidence is reported as `INCOMPLETE` and causes the validate phase to fail.
-Oracle compiler diagnostics count `ERROR` records; compiler warnings alone do
-not make an object invalid.
+Oracle object diagnostics use native SQL*Plus CSV quoting. An empty successful
+query produces a header-only CSV; a missing or malformed artifact is reported
+as unavailable rather than zero problems. Validate regenerates current
+diagnostics and reconciliation, preventing stale successful query results from
+being reused after connection/query failures.
 
-The HTML report is a single local file with embedded styling; it does not load
-internet resources. View the terminal-readable companion on the migration host
-with `less autokit/migration_report.txt`. Reports can contain customer schema
-names, object names, and compiler messages, so handle them as migration
-evidence. A rerun atomically replaces completed reports rather than appending
-duplicate rows. If rendering is interrupted, an existing complete report is
-preserved, but the current validate command still fails.
+Reports can contain schema/object names and compiler messages; handle them as
+migration logs. View the terminal report with
+`less autokit/migration_report.txt`. Native tool warnings/errors remain in
+`migrate.log` and their own logs for DBA investigation.
 
 The run id can be provided with or without the `run_` prefix:
 
@@ -1098,14 +1092,12 @@ Important files:
 | `autokit/sdcli_commands_summary.txt` | Short command summary printed at the end of SDCLI runs. |
 | `autokit/migration_summary.csv` | Append-only high-level migration result summary. |
 | `autokit/phase_status.tsv` | Append-only phase attempts and their final status. |
-| `autokit/deploy_manifest.tsv` | Generated SQL inventory and scripts executed during deploy, postdeploy, and explicit cleanup. |
+| `autokit/deploy_manifest.tsv` | Actual script attempts and outcomes for deploy, postdeploy, and explicit cleanup. |
 | `autokit/bcp_status.tsv` | Per-export SQL Server status written from the BCP wrapper's actual argv, data file, exit code, and exported row count. |
 | `autokit/sqlldr_status.tsv` | Per-table Oracle load status, loaded/rejected/discarded counts, and paths. |
 | `autokit/reconciliation.tsv` | Source-to-target per-table row reconciliation. Every row must be `PASS`. |
-| `autokit/source_object_inventory.tsv` | Read-only SQL Server user-object inventory collected during validation. |
-| `autokit/target_object_inventory.tsv` | Read-only Oracle inventory for generated target owners. |
-| `autokit/validation_checks.tsv` | Normalized log, reconciliation, target-object, and metadata findings consumed by the validation reports. |
-| `autokit/validation_summary.txt` | Final `PASS` or `FAIL` and issue totals. |
+| `autokit/target_object_diagnostics.csv` | Native CSV containing invalid Oracle objects and compiler errors for generated owners. |
+| `autokit/validation_summary.txt` | Final status and explicit row/script/object totals. |
 | `autokit/migration_report.html` | Self-contained direct-evidence report, also written for failed or incomplete validation. |
 | `autokit/migration_report.txt` | Terminal-readable companion report with the same sections and findings. |
 | `sdcli/` | SDCLI-generated scripts, logs, and data movement files. |
@@ -1137,23 +1129,10 @@ cd /u01/data/sdcli-autokit/run-log-bundles
 sha256sum -c <bundle>.tar.gz.sha256
 ```
 
-The validation report uses only structured evidence collected by the autokit:
-
-- table export, load, and target row counts;
-- deploy and postdeploy outcomes from `deploy_manifest.tsv`;
-- Oracle invalid objects and compiler diagnostics from catalog queries;
-- SQL Server and Oracle inventory counts; and
-- evidence-health status for missing or malformed artifacts.
-
-The report does not parse generated SQL to compare SQL Server and Oracle DDL.
-Expected cross-database syntax differences are therefore not reported as
-`DIFFERENT`, and object omissions are not guessed by matching generated file
-text. Until a supported structured SQL Developer repository query provides an
-object-level source-to-converted mapping, metadata conversion coverage is
-shown as `NOT_EVALUATED`. This limitation is informational and is not by
-itself a validation failure. SQL Server is the only source database supported
-by the current validation collectors; additional source RDBMS adapters are
-planned separately.
+Validation uses recorded execution outcomes, row reconciliation, and direct
+Oracle diagnostics. It does not report cross-database DDL differences or guess
+missing converted objects. SQL Server to Oracle is the supported migration
+path; other source RDBMS support remains planned separately.
 
 ## Command reference
 
