@@ -92,6 +92,12 @@ rewrite_connect_stdin() {
       logon="${BASH_REMATCH[3]}"
       rest="${BASH_REMATCH[4]}"
       command_lower="$(printf '%s\n' "$command" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$command_lower" == whenever ]]; then
+        case "$(printf '%s' "$logon" | tr '[:upper:]' '[:lower:]')" in
+          sqlerror) printf '%s\n' 'WHENEVER SQLERROR EXIT FAILURE'; continue ;;
+          oserror) printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE'; continue ;;
+        esac
+      fi
       if [[ "$command_lower" == "connect" || "$command_lower" == "conn" ]]; then
         if parse_logon "$logon"; then
           printf '%s%s %s/"%s"@%s%s\n' "$prefix" "$command" "$SQLPLUS_USER" "$escaped_password" "$SQLPLUS_CONN" "$rest"
@@ -126,21 +132,29 @@ fi
 password="$(load_password)"
 escaped_password="${password//\"/\"\"}"
 
-if [[ -z "$logon" ]]; then
-  if [[ -t 0 ]]; then
-    exec "$REAL_SQLPLUS" "${options[@]+"${options[@]}"}"
-  fi
-  rewrite_connect_stdin "$password" | "$REAL_SQLPLUS" "${options[@]+"${options[@]}"}"
-else
-  {
+# Native directives must precede CONNECT in both generated invocation forms.
+# Keep this scoped to the load password wrapper; normal SQL*Plus is exec'd above.
+output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_load_sqlplus_XXXXXX")"
+trap 'rm -f "$output_file"' EXIT
+set +e
+{
+  printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE' 'WHENEVER SQLERROR EXIT FAILURE'
+  if [[ -n "$logon" ]]; then
     printf 'connect %s/"%s"@%s\n' "$SQLPLUS_USER" "$escaped_password" "$SQLPLUS_CONN"
     if [[ ${#script_args[@]} -gt 0 ]]; then
       printf '%s\n' "${script_args[*]}"
-      printf '%s\n' 'exit'
-    elif [[ -t 0 ]]; then
-      printf '%s\n' 'exit'
-    else
+    elif [[ ! -t 0 ]]; then
       rewrite_connect_stdin "$password"
     fi
-  } | "$REAL_SQLPLUS" "${options[@]+"${options[@]}"}" /nolog
+    printf '%s\n' 'exit'
+  elif [[ ! -t 0 ]]; then
+    rewrite_connect_stdin "$password"
+  fi
+} | "$REAL_SQLPLUS" -L "${options[@]+"${options[@]}"}" ${logon:+/nolog} 2>&1 | tee "$output_file"
+sqlplus_rc=${PIPESTATUS[1]}
+# SQL*Plus command errors are not covered by WHENEVER SQLERROR. Nested vendor
+# scripts may also change error policy: retain their explicit error headings.
+if grep -Eq '^[[:space:]]*(SP2-[0-9]{4,5}:|ERROR at line [0-9]+:|ERROR:)' "$output_file"; then
+  sqlplus_rc=1
 fi
+exit "$sqlplus_rc"
