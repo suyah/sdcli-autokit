@@ -935,6 +935,15 @@ For normal use:
 
 Use `--run` when rerunning phases that depend on files already generated in a previous run, such as `deploy`, `load`, `postdeploy`, or `validate`.
 
+For LOB loads, SQL Developer may place its `CLOBTOBLOB_sqldeveloper` helper in
+the generated `procedures.sql` while calling it from `control/post_load.sql`.
+Have the DBA review and install the required native helper before load when
+this applies. Autokit does not automatically move a mixed business-procedure
+file before load. A missing helper or other SQL*Plus load error now fails the
+phase; streamed SQL*Plus error-control directives are enforced at runtime and
+the generated files remain unchanged. A failed load can leave partially loaded
+data, so review the error and target state before repeating it.
+
 If `postdeploy` finds generated SQL errors, it continues with independent
 post-data scripts and runs `post.sql` so Oracle can compile and report object
 status. It still exits nonzero and records each outcome in

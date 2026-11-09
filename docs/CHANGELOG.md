@@ -15,6 +15,11 @@ into the customer offline bundle.
 
 ### Fixed
 
+- Fail load on SQL*Plus SQL/OS failures and native command errors. Enforce the
+  load error policy before CONNECT and in streamed WHENEVER directives, keeping
+  generated files unchanged. Preserve native diagnostics and prevent subsequent
+  generated-shell steps after a failed SQL*Plus call.
+
 - Use the latest phase state for retry protection, so a failed or interrupted
   rerun cannot inherit an earlier successful result.
 - Propagate generated include-list discovery failures to deployment callers.

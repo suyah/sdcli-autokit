@@ -73,6 +73,8 @@ The observed load failure shows that a helper was absent when called and present
 
 Stage B may fix error propagation independently, but it must not claim a complete LOB migration is verified until a small authorised test proves helper creation, invocation, and outcome. Existing false-success history is not rewritten or replayed automatically; affected BLOB data remains a DBA check.
 
+Native artifact inspection confirmed that the generated post-load stream sets `WHENEVER SQLERROR CONTINUE`. The load adapter must enforce its failure policy on these streamed SQL*Plus directives as well as before CONNECT, without modifying generated files. The helper definition is in the native procedures output, which can also contain business routines; installing that mixed output automatically before load is outside this change. Operators must install/review the required native helper before LOB loads. A missing helper now fails load visibly. Nested scripts can set their own SQL*Plus policy, so explicit native error headings must still produce a failed call even when SQL*Plus returns zero.
+
 ## Stage C: lean validation and report
 
 Remove complete source/target inventories, wide TSV generation, log scoring, and duplicate count-only object queries. Retain `run_target_sql_capture`, target row counts, and reconciliation. `sqlcmd` and the lazy BCP metadata query remain execution support for SQL Server special table names, not report inventory.

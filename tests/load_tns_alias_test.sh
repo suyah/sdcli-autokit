@@ -63,6 +63,7 @@ echo "TNS_ADMIN=${TNS_ADMIN:-}"
 PATH="$BAD_LOAD_PATH:$PATH"
 sqlplus $username/$password@$servername @control/pre_load.sql
 sqlplus $username/$password@$servername <<'SQL'
+WHENEVER SQLERROR CONTINUE;
 prompt HEREDOC_PRE_LOAD
 SQL
 sqlplus /nolog <<SQL
@@ -79,6 +80,16 @@ mkdir -p "$badbin"
 cat > "$fakebin/sqlplus" <<'SH'
 #!/usr/bin/env bash
 stdin="$(cat)"
+if [[ "${TEST_SQLPLUS_FAILURE:-}" == sql || ( "${TEST_SQLPLUS_FAILURE:-}" == late_sql && "$stdin" == *HEREDOC_PRE_LOAD* ) ]]; then
+  if [[ "$stdin" == WHENEVER\ OSERROR\ EXIT\ FAILURE* && "$stdin" == *'WHENEVER SQLERROR EXIT FAILURE'* && "$stdin" != *'WHENEVER SQLERROR CONTINUE'* ]]; then
+    echo 'ORA-00942: table or view does not exist'
+    exit 1
+  fi
+fi
+if [[ "${TEST_SQLPLUS_FAILURE:-}" == command ]]; then
+  echo 'SP2-0310: unable to open file "missing.sql"'
+  exit 0
+fi
 if [[ "$stdin" == *'connect admin/"TargetPass1"@SDCLI_LOAD_20260427_121621'* ]]; then
   printf '%s\n' 'SQLPLUS_STDIN_PASSWORD_OK'
 else
@@ -210,6 +221,18 @@ assert_contains "$tns_text" "(HOST = adb.ap-hyderabad-1.oraclecloud.com)"
 assert_contains "$tns_text" "(PORT = 1521)"
 assert_contains "$tns_text" "(SERVICE_NAME = g207e55d6197742_test23atp_high.adb.oraclecloud.com)"
 assert_contains "$tns_text" "(SSL_SERVER_DN_MATCH = YES)"
+
+for TEST_SQLPLUS_FAILURE in sql late_sql command; do
+  export TEST_SQLPLUS_FAILURE
+  if run_load 0 "$output_dir" > "$tmpdir/sqlplus-failure.out" 2>&1; then
+    echo "Load ignored a SQL*Plus $TEST_SQLPLUS_FAILURE failure" >&2
+    exit 1
+  fi
+  [[ ! -s "$AUTOKIT_DIR/sqlldr_status.tsv" ]] || {
+    echo 'Generated shell continued into SQL*Loader after SQL*Plus failure' >&2; exit 1
+  }
+done
+unset TEST_SQLPLUS_FAILURE
 
 assert_control_rejected() {
   local expected="$1"
