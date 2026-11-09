@@ -16,8 +16,13 @@ collect_target_object_diagnostics() {
 run_validation_report() { return "${TEST_REPORT_RC:-0}"; }
 run_validate "$task_tmp/sdcli" 0
 for TEST_REPORT_RC in 2 1; do
-  if run_validate "$task_tmp/sdcli" 0; then
+  if run_validate "$task_tmp/sdcli" 0 > "$task_tmp/report.out" 2>&1; then
     echo 'Validation ignored the renderer result' >&2; exit 1
+  fi
+  if [[ "$TEST_REPORT_RC" == 1 ]]; then
+    grep -F 'Report generation failed' "$task_tmp/report.out" >/dev/null || {
+      echo 'Renderer failure did not warn about stale reports' >&2; exit 1
+    }
   fi
 done
 TEST_REPORT_RC=0

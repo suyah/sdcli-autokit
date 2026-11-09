@@ -1785,7 +1785,7 @@ run_target_sql_capture() {
     printf '%s\n' 'WHENEVER OSERROR EXIT FAILURE' 'WHENEVER SQLERROR EXIT FAILURE'
     printf 'connect %s/"%s"@%s\n' "$target_user" "$connect_password" "$target_conn"
     cat "$sql_file"
-  } | sqlplus -S -L /nolog > "$output_file" 2>&1
+  } | NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -S -L /nolog > "$output_file" 2>&1
   rc=${PIPESTATUS[1]}
   $errexit_enabled && set -e
 
@@ -2023,6 +2023,10 @@ run_validate() {
     rm -f "$AUTOKIT_DIR/target_object_diagnostics.csv"
   fi
   run_validation_report "$output_dir" "$idx" || rc=$?
+  if [[ "$rc" != 0 && "$rc" != 2 ]]; then
+    log_error "Report generation failed; existing reports may be from an earlier validation"
+    return "$rc"
+  fi
   log_info "Migration report: $AUTOKIT_DIR/migration_report.html"
   log_info "Terminal report: $AUTOKIT_DIR/migration_report.txt"
   return "$rc"

@@ -2,7 +2,7 @@
 
 Date: 2026-11-06
 
-Status: accepted for staged implementation; Stage A is implemented on its feature branch
+Status: accepted and implemented in stages; see stage plans for verification limits
 Baseline: `v1.4.0` / `db94c41ff3aa548aaf4e5c060eafa9f9ea06ff7f`
 
 ## Intent

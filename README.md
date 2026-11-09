@@ -753,7 +753,7 @@ container, export a selected migration's configured SQL Server source:
 ```bash
 cd ~/sdcli-scripts
 export SOURCE_PASSWORD='your SQL Server password'
-./export-source-schema.sh cecrealm
+./export-source-schema.sh demo
 ```
 
 The command uses `migrations[].source.conn`, `user`, `password`, and
@@ -763,7 +763,7 @@ the source database and runs SqlPackage Extract with
 table data. By default it creates:
 
 ```text
-/u01/data/sdcli-autokit/projects/cecrealm/source-schema/<UTC timestamp>/
+/u01/data/sdcli-autokit/projects/demo/source-schema/<UTC timestamp>/
 ├── manifest.txt
 ├── sqlpackage-extract.log
 └── sql/
@@ -773,9 +773,40 @@ table data. By default it creates:
 Use an explicit new directory when an operator needs a controlled location:
 
 ```bash
-./export-source-schema.sh cecrealm \
-  --output /u01/data/sdcli-autokit/projects/cecrealm/source-schema/before-repair
+./export-source-schema.sh demo \
+  --output /u01/data/sdcli-autokit/projects/demo/source-schema/before-repair
 ```
+
+For one database-wide reading file per native object category:
+
+```bash
+./export-source-schema.sh demo --layout type
+```
+
+This retains the original `sql/` tree and adds:
+
+```text
+by-type/
+├── Tables.sql
+├── StoredProcedures.sql
+├── Functions.sql
+└── Security.sql
+```
+
+Only categories present in the export are created; category names come directly
+from SqlPackage. Each file is ordered by schema and native filename. Every
+native SQL file is included once with its relative path as a comment. Native
+`GO`/`SET`, indexes, and constraints stay with their original file content;
+Autokit does not parse or split SQL definitions. Database-level Security files
+are grouped as Security, and root SQL files as Database. UTF-8 BOMs are removed
+from combined content; BOM-marked UTF-16 is converted to UTF-8 using the system
+`iconv`. Native originals are unchanged. Unsupported layouts/encodings fail
+visibly and keep the originals for inspection.
+
+Grouped files are intended for reading and LLM context, not dependency-ordered
+deployment. Use the default `--layout object` for individual object files.
+Redacted native SqlPackage output is displayed and retained in
+`sqlpackage-extract.log`, including failures.
 
 The command refuses an existing output directory. Exported DDL can contain
 business logic and literals, so the directory is owner-only by default and

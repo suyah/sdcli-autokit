@@ -108,6 +108,20 @@ class ReportTests(unittest.TestCase):
         path.write_text(path.read_text().replace("\t2\t2\t0\t0\t2\tPASS", "\t2\t1\t0\t0\t1\tPASS"))
         self.assertEqual("INCOMPLETE", self.build().status)
 
+    def test_unavailable_counts_are_not_summed_as_zero(self):
+        path = self.root / "reconciliation.tsv"
+        path.write_text(path.read_text().replace("\t2\t2\t0\t0\t2\tPASS\t", "\t2\t\t\t\t\tFAIL\tmissing load outcome"))
+        data = self.build()
+        self.assertEqual("FAIL", data.status)
+        self.assertEqual("unavailable", report.totals(data)["target_rows"])
+
+    def test_runner_tsv_preserves_quoted_oracle_identifiers(self):
+        path = self.root / "reconciliation.tsv"
+        path.write_text(path.read_text().replace("APP.ORDERS", '"APP"."Order History"'))
+        data = self.build()
+        self.assertEqual("PASS", data.status)
+        self.assertEqual('"APP"."Order History"', data.reconciliation[0]["target_object"])
+
     def test_outputs_share_result_and_show_readable_diagnostics(self):
         self.write_diagnostics([("APP", "SEARCH", "PROCEDURE", "INVALID", 1, 2, 'bad "token"\nnext <tag>')])
         (self.root / "idmap").mkdir()

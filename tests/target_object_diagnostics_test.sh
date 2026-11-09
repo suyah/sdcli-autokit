@@ -12,6 +12,9 @@ export QUERY_LOG="$task_tmp/query"
 cat > "$task_tmp/bin/sqlplus" <<'SH'
 #!/usr/bin/env bash
 cat > "$QUERY_LOG"
+[[ "${NLS_LANG:-}" == AMERICAN_AMERICA.AL32UTF8 ]] || {
+  echo 'Read-only report query did not select UTF-8 output' >&2; exit 21
+}
 if [[ "${TEST_QUERY_FAIL:-false}" == true ]]; then
   echo 'ORA-00942: diagnostic query failed'
   exit 1
