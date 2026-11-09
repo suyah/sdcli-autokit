@@ -16,6 +16,9 @@ into the customer offline bundle.
 - Document the safe distinction between a new migration run with new mapped
   target owners and recovery of an existing run. Make explicit that repository
   models are retained and target schema/data cleanup remains a DBA action.
+- Add a generated-identity pre-deployment checklist for repeat migrations,
+  including roles, compatibility schemas, partial deploy recovery, and the
+  post-deploy load/postdeploy/validate sequence.
 - Replace full source/target inventories and validation log scoring with direct
   Oracle invalid-object/compiler-error CSV diagnostics, phase/script outcomes,
   and row reconciliation. Produce matching HTML, terminal, and summary results;

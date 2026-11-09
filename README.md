@@ -784,6 +784,71 @@ through `generate`, inspect the new run's schema directories and deploy input,
 then continue with `datamove` and later phases only after the DBA approves the
 scope.
 
+#### Pre-deployment collision checklist
+
+Schema mapping changes only the mapped source-schema owners. Before a repeat
+migration is allowed to deploy into an existing Oracle database/PDB, inspect
+the generated output for **all** identities that may already exist:
+
+```bash
+export RUN=<new_run_id>
+OUT="/u01/data/sdcli-autokit/projects/example_migration/run_${RUN}/sdcli"
+
+# Generated schema/user entry points, including any compatibility schema.
+find "$OUT" -mindepth 2 -maxdepth 2 -name user.sql -print | sort
+
+# Generated database role definitions, when SQL Developer created them.
+test -f "$OUT/role.sql" && sed -n '1,240p' "$OUT/role.sql"
+```
+
+Review every `CREATE USER` and `CREATE ROLE` in those files. A generated
+compatibility owner, commonly named `Emulation`, is not changed by
+`schema_mapping`. It can therefore conflict even when every mapped business
+owner is new.
+
+For each generated owner or role that already exists, the DBA must establish
+what it is before any deletion. For example, substitute an identity copied
+from the generated files:
+
+```sql
+SELECT 'USER' AS principal_type, username AS principal_name, account_status
+FROM dba_users
+WHERE username = UPPER('<generated_identity>')
+UNION ALL
+SELECT 'ROLE' AS principal_type, role AS principal_name, NULL AS account_status
+FROM dba_roles
+WHERE role = UPPER('<generated_identity>');
+```
+
+- A conflicting **role** may be removed with the current run's
+  `--cleanup` command only after the DBA confirms that it is the old migration
+  role and is not shared by another target workload:
+
+  ```bash
+  ./migrate.sh example_migration --cleanup --run "$RUN"
+  ```
+
+  This removes only roles listed in the generated `role.sql` and is not a
+  substitute for schema cleanup.
+- A conflicting **user/schema**, including `Emulation`, must not be removed by
+  Autokit. The DBA must either approve migration-scoped cleanup, choose an
+  isolated target database/PDB, or retain the existing schema. The current
+  deployment flow has no automatic “reuse an existing Emulation schema” mode;
+  do not work around this by editing generated scripts.
+- If an earlier deploy in this same run already created some schemas or tables,
+  inspect `autokit/deploy_manifest.tsv` and the target state before retrying.
+  A simple rerun can collide with partially created objects. Fix or clean only
+  the DBA-approved scope first.
+
+After the target is approved and `deploy` finishes successfully, continue the
+same run without redoing offload:
+
+```bash
+./migrate.sh example_migration --phase load --run "$RUN"
+./migrate.sh example_migration --phase postdeploy --run "$RUN"
+./migrate.sh example_migration --phase validate --run "$RUN"
+```
+
 If the new migration must reuse the **same** Oracle schemas or tables, do not
 start another full workflow against them without preparing the target first.
 Autokit deliberately does not drop schemas, tables, or data. Ask the DBA to
