@@ -13,6 +13,8 @@ into the customer offline bundle.
 
 ### Changed
 
+- Add a post-migration operator checklist with per-phase log locations,
+  validation evidence, focused terminal commands, and support-bundle guidance.
 - Document the safe distinction between a new migration run with new mapped
   target owners and recovery of an existing run. Make explicit that repository
   models are retained and target schema/data cleanup remains a DBA action.
