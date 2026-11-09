@@ -40,4 +40,19 @@ begin_phase_status convert
 complete_phase_status convert
 grep -F $'convert\tstarted\t\t2\toperator requested rerun of completed phase' "$PHASE_STATUS_FILE" >/dev/null
 
+record_phase_status convert started '' 'interrupted rerun' 3
+if phase_succeeded convert; then
+  echo 'An interrupted rerun retained a stale successful phase state' >&2
+  exit 1
+fi
+record_phase_status convert failed 1 'failed rerun' 3
+if phase_succeeded convert; then
+  echo 'A failed rerun retained a stale successful phase state' >&2
+  exit 1
+fi
+RERUN_COMPLETED=false
+begin_phase_status convert
+complete_phase_status convert
+phase_succeeded convert
+
 echo "phase status resume test passed"

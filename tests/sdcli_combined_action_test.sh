@@ -19,7 +19,6 @@ RUN_LOG_FILE="$task_tmp/run.log"
 SDCLI_PROFILE_DIR="$task_tmp/profile"
 export TEST_COMBO_MODE=ok
 run_sdcli sdcli migration -actions=idmap,convert -model=1 -input=/example.xml
-[[ "$SDCLI_LAST_ACTION" == convert && "$SDCLI_LAST_SUCCESS_MARKER" == true ]]
 for TEST_COMBO_MODE in error missing; do
   export TEST_COMBO_MODE
   if run_sdcli sdcli migration -actions=idmap,convert -model=1 -input=/example.xml; then

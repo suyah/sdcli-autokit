@@ -212,7 +212,10 @@ assert_contains "${file_calls[*]}" "role_setup.sql||0|"
 assert_contains "${file_calls[*]}" "tpcc/user.sql|SchemaPass1|3|"
 assert_contains "${file_calls[*]}" "tpcc/tables.sql||0|tpcc"
 assert_not_contains "${file_calls[*]}" "gen/generated-1.sql"
-assert_contains "$(cat "$AUTOKIT_DIR/deploy_manifest.tsv")" $'plan\tsdcli/gen/generated-1.sql\texcluded\tduplicate monolithic output; schema hierarchy selected'
+if grep -q $'^plan\t' "$AUTOKIT_DIR/deploy_manifest.tsv"; then
+  echo 'Deployment manifest contains non-executed plan records' >&2
+  exit 1
+fi
 
 masked="$(printf '%s\n' \
   "CREATE USER tpcc IDENTIFIED BY ${schema_password} PASSWORD EXPIRE ACCOUNT LOCK;" \

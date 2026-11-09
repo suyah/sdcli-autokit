@@ -150,11 +150,12 @@ assert_line "$manifest" $'deploy\tsdcli/tpcc/user.sql\texecuted\t'
 assert_line "$manifest" $'deploy\tsdcli/tpcc/tables.sql\texecuted\tpre-data master include'
 assert_line "$manifest" $'deploy\tsdcli/tpcc_copy_tpcc/user.sql\texecuted\t'
 assert_line "$manifest" $'deploy\tsdcli/tpcc_copy_tpcc/tables.sql\texecuted\tpre-data master include'
-assert_line "$manifest" $'plan\tsdcli/gen/generated-1.sql\texcluded\tduplicate monolithic output; schema hierarchy selected'
+[[ "$(awk 'END {print NR-1}' "$manifest")" == "${#expected_deploy_calls[@]}" ]]
+assert_not_contains "$(cat "$manifest")" $'plan\t'
 
 calls=()
 run_postdeploy 0 "$output_dir"
-verify_deploy_manifest_phase postdeploy "$output_dir"
+assert_not_contains "$(cat "$manifest")" '__phase_complete__'
 
 post_calls="${calls[*]}"
 assert_contains "$post_calls" "Emulation/post.sql||0|Emulation"
@@ -223,11 +224,7 @@ set +e
 failed_rerun_rc=$?
 set -e
 [[ $failed_rerun_rc -ne 0 ]]
-latest_completion_status="$(awk -F '\t' '$1 == "postdeploy" && $2 == "__phase_complete__" { status=$3 } END { print status }' "$manifest")"
-[[ "$latest_completion_status" == "pending" ]] || {
-  echo "Failed postdeploy rerun retained stale completion status: $latest_completion_status" >&2
-  exit 1
-}
+assert_not_contains "$(cat "$manifest")" '__phase_complete__'
 
 mv "$output_dir/tpcc/master.sql.saved" "$output_dir/tpcc/master.sql"
 cat >> "$output_dir/tpcc/master.sql" <<'SQL'

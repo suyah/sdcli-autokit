@@ -43,8 +43,6 @@ ACTIVE_PHASE_ATTEMPT=""
 REPOSITORY_LOCK_DIR=""
 REPOSITORY_LOCK_HELD=false
 RERUN_COMPLETED=false
-SDCLI_LAST_ACTION=""
-SDCLI_LAST_SUCCESS_MARKER=false
 SDCLI_CAPTURE_OUTPUT_FILE=""
 SDCLI_VERIFIED_MODEL_INDEX=""
 
@@ -823,12 +821,9 @@ run_sdcli() {
       IFS=',' read -r -a requested_actions <<< "$action"
     fi
   done
-  SDCLI_LAST_ACTION=""
   for requested_action in "${requested_actions[@]+"${requested_actions[@]}"}"; do
     [[ "$requested_action" == convert ]] && is_convert=true
-    SDCLI_LAST_ACTION="$requested_action"
   done
-  SDCLI_LAST_SUCCESS_MARKER=false
   [[ -n "$SDCLI_PROFILE_DIR" ]] || { log_error 'No SQL Developer project profile selected'; return 1; }
   register_environment_secrets
   printable="$(mask_sensitive "${cmd[@]}")"
@@ -873,7 +868,6 @@ run_sdcli() {
       completed_successfully=false
     fi
   done
-  SDCLI_LAST_SUCCESS_MARKER="$completed_successfully"
   if sdcli_output_has_diagnostics "$output_file"; then
     if ! sdcli_has_only_benign_diagnostics "$action" "$completed_successfully" "$output_file"; then
       rc=1
@@ -945,7 +939,7 @@ record_phase_status() {
 phase_succeeded() {
   local phase="$1"
   [[ -s "${PHASE_STATUS_FILE:-}" ]] || return 1
-  awk -F '\t' -v phase="$phase" 'NR > 1 && $2 == phase && $3 == "succeeded" { found=1 } END { exit(found ? 0 : 1) }' "$PHASE_STATUS_FILE"
+  awk -F '\t' -v phase="$phase" 'NR > 1 && $2 == phase { state=$3 } END { exit(state == "succeeded" ? 0 : 1) }' "$PHASE_STATUS_FILE"
 }
 
 phase_attempt_number() {
@@ -1528,18 +1522,20 @@ summarize_bcp_output() {
     fi
     if [[ "$line" == *"Warning:"* ]]; then
       warnings=$((warnings + 1))
+      printf '%s\n' "$line"
       continue
     fi
     if [[ "$line" == SQLState* ]]; then
+      printf '%s\n' "$line"
       continue
     fi
     if [[ "$line" == Error* ]]; then
       diagnostics=$((diagnostics + 1))
-      log_warn "BCP diagnostic: $line"
+      printf '%s\n' "$line"
       continue
     fi
 
-    log_info "BCP output: $line"
+    printf '%s\n' "$line"
   done
 
   emit_bcp_table_summary
@@ -1637,14 +1633,14 @@ summarize_sqlldr_output() {
       continue
     fi
     if [[ "$line" == ORA-* || "$line" == SQL*Loader-* || "$line" == LRM-* ]]; then
-      log_warn "SQL*Loader diagnostic: $line"
+      printf '%s\n' "$line"
       continue
     fi
     if [[ "$line" =~ ^[[:space:]]*$ ]]; then
       continue
     fi
 
-    log_info "SQL*Loader output: $line"
+    printf '%s\n' "$line"
   done
 
   emit_sqlldr_table_summary
@@ -2674,6 +2670,9 @@ run_load() {
   fi
 
   [[ -d "$datamove_dir" ]] || fail "Datamove directory not found under $output_dir"
+  # The wrapper records physical paths. Use the same base when the run is
+  # reached through a symlink (including macOS /var -> /private/var).
+  datamove_dir="$(cd "$datamove_dir" && pwd -P)" || return 1
 
   local loader_scripts=() found_loader_script
   while IFS= read -r found_loader_script; do
@@ -2681,8 +2680,9 @@ run_load() {
   done < <(discover_generated_leaf_scripts "$datamove_dir" 'oracle_loader.sh')
   [[ ${#loader_scripts[@]} -gt 0 ]] || fail "Generated Oracle loader leaf script not found under $datamove_dir"
 
-  local expected_sqlldr_count
-  expected_sqlldr_count="$(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  local expected_sqlldr_count expected_sqlldr_controls
+  expected_sqlldr_controls="$(find "$datamove_dir" -type f -name '*.ctl' | LC_ALL=C sort)" || return 1
+  expected_sqlldr_count="$(printf '%s\n' "$expected_sqlldr_controls" | awk 'NF { count++ } END { print count+0 }')"
   (( expected_sqlldr_count > 0 )) || fail "No SQL*Loader control file found under $datamove_dir"
 
   local direct rows bindsize readsize
@@ -2758,24 +2758,26 @@ run_load() {
   rc=${PIPESTATUS[0]}
   $errexit_enabled && set -e
 
-  local sqlldr_exit_code target_table control_file data_file loaded_rows rejected_rows discarded_rows sqlldr_log_file
-  while IFS=$'\t' read -r sqlldr_exit_code target_table control_file data_file loaded_rows rejected_rows discarded_rows sqlldr_log_file; do
+  local sqlldr_exit_code target_table control_file data_file loaded_rows rejected_rows discarded_rows sqlldr_log_file extra_field
+  while IFS=$'\t' read -r sqlldr_exit_code target_table control_file data_file loaded_rows rejected_rows discarded_rows sqlldr_log_file extra_field; do
     [[ -n "$sqlldr_exit_code" ]] || continue
     sqlldr_status_count=$((sqlldr_status_count + 1))
-    if [[ "$sqlldr_exit_code" != "0" || -z "$target_table" || -z "$control_file" || -z "$data_file" || -z "$sqlldr_log_file" \
+    if [[ "$sqlldr_exit_code" != "0" || -z "$target_table" || ! -f "$control_file" || ! -f "$data_file" || -z "$sqlldr_log_file" \
         || ! "$loaded_rows" =~ ^[0-9]+$ || ! "$rejected_rows" =~ ^[0-9]+$ \
-        || ! "$discarded_rows" =~ ^[0-9]+$ ]]; then
+        || ! "$discarded_rows" =~ ^[0-9]+$ || -n "$extra_field" ]]; then
       sqlldr_status_issues=$((sqlldr_status_issues + 1))
       log_error "SQL*Loader status is incomplete or failed: target=${target_table:-unknown} control=${control_file:-unknown} exit_code=${sqlldr_exit_code:-unknown}"
     fi
   done < "$sqlldr_status_file"
 
-  local unique_sqlldr_control_count=0
+  local unique_sqlldr_control_count=0 actual_sqlldr_controls
+  actual_sqlldr_controls="$(cut -f3 "$sqlldr_status_file" | LC_ALL=C sort)"
   if (( sqlldr_status_count > 0 )); then
     unique_sqlldr_control_count="$(cut -f3 "$sqlldr_status_file" | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
   fi
   if (( sqlldr_status_count != expected_sqlldr_count \
-      || unique_sqlldr_control_count != sqlldr_status_count || sqlldr_status_issues > 0 )); then
+      || unique_sqlldr_control_count != sqlldr_status_count || sqlldr_status_issues > 0 )) \
+      || [[ "$actual_sqlldr_controls" != "$expected_sqlldr_controls" ]]; then
     log_error "SQL*Loader status verification failed: records=$sqlldr_status_count expected=$expected_sqlldr_count unique_controls=$unique_sqlldr_control_count issues=$sqlldr_status_issues"
     rc=1
   else
@@ -2905,7 +2907,7 @@ run_offload() {
   return "$rc"
 }
 
-# --- Phase postconditions ---------------------------------------------------
+# --- Exact model selection --------------------------------------------------
 expected_run_model_name() {
   local project_name="$1"
   local run_id="${RUN_NAME#run_}"
@@ -2916,7 +2918,7 @@ expected_run_model_name() {
 lookup_sdcli_model_index() {
   local phase="$1"
   local expected_model="$2"
-  local list_action output_file model_index="" rc=0 saved_action saved_marker
+  local list_action output_file model_index="" rc=0
 
   SDCLI_VERIFIED_MODEL_INDEX=""
 
@@ -2931,8 +2933,6 @@ lookup_sdcli_model_index() {
 
   output_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_model_lookup_XXXXXX")" || return 1
   require_active_repository_identity
-  saved_action="$SDCLI_LAST_ACTION"
-  saved_marker="$SDCLI_LAST_SUCCESS_MARKER"
   SDCLI_CAPTURE_OUTPUT_FILE="$output_file"
   if ! LC_ALL=C run_sdcli sdcli migration "-actions=$list_action"; then
     rc=1
@@ -2973,268 +2973,8 @@ lookup_sdcli_model_index() {
     SDCLI_VERIFIED_MODEL_INDEX="$model_index"
   fi
   SDCLI_CAPTURE_OUTPUT_FILE=""
-  SDCLI_LAST_ACTION="$saved_action"
-  SDCLI_LAST_SUCCESS_MARKER="$saved_marker"
   rm -f "$output_file"
   return "$rc"
-}
-
-verify_offload_evidence() {
-  local output_dir="$1"
-  local datamove_dir="$output_dir/datamove"
-  local status_file="$AUTOKIT_DIR/bcp_status.tsv"
-  local path expected_count actual_count unique_data_file_count rc=0
-
-  [[ -s "$status_file" ]] || {
-    log_error "Offload postcondition failed: BCP status evidence is missing or empty: $status_file"
-    return 1
-  }
-  expected_count="$(find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | wc -l | tr -d '[:space:]')"
-  actual_count="$(wc -l < "$status_file" | tr -d '[:space:]')"
-  if (( expected_count == 0 )); then
-    log_error "Offload postcondition failed: no SQL*Loader control file was found under $datamove_dir"
-    rc=1
-  elif ! LC_ALL=C awk -F '\t' '
-    NF != 4 || $1 != "0" || $2 == "" || $3 == "" || $3 == "-" || $4 !~ /^[0-9]+$/ { invalid=1; next }
-    END { if (invalid) exit 1 }
-  ' "$status_file"; then
-    log_error "Offload postcondition failed: BCP status evidence is malformed or contains a failed invocation"
-    rc=1
-  elif (( actual_count != expected_count )); then
-    log_error "Offload postcondition failed: BCP status count $actual_count does not match control-file count $expected_count"
-    rc=1
-  else
-    unique_data_file_count="$(cut -f3 "$status_file" | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
-    if (( unique_data_file_count != actual_count )); then
-      log_error "Offload postcondition failed: BCP status contains duplicate data-file records"
-      rc=1
-    fi
-  fi
-
-  if (( rc == 0 )); then
-    while IFS=$'\t' read -r _ _ path _; do
-      [[ -f "$path" ]] || {
-        log_error "Offload postcondition failed: exported data file is missing: $path"
-        rc=1
-      }
-    done < "$status_file"
-  fi
-  return "$rc"
-}
-
-verify_load_evidence() {
-  local output_dir="$1"
-  local datamove_dir="$output_dir/datamove"
-  local status_file="$AUTOKIT_DIR/sqlldr_status.tsv"
-  local expected_file actual_file control_file data_file rc=0
-
-  [[ -s "$status_file" ]] || {
-    log_error "Load postcondition failed: SQL*Loader status evidence is missing or empty: $status_file"
-    return 1
-  }
-  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlldr_expected_XXXXXX")" || return 1
-  actual_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_sqlldr_actual_XXXXXX")" || {
-    rm -f "$expected_file"
-    return 1
-  }
-  find "$datamove_dir" -type f -name '*.ctl' 2>/dev/null | LC_ALL=C sort > "$expected_file"
-  if [[ ! -s "$expected_file" ]]; then
-    log_error "Load postcondition failed: no expected SQL*Loader control file was found under $datamove_dir"
-    rc=1
-  elif ! LC_ALL=C awk -F '\t' '
-    NF != 8 || $1 != "0" || $2 == "" || $3 == "" || $4 == "" ||
-      $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || $8 == "" { invalid=1; next }
-    { print $3 }
-    END { if (invalid) exit 1 }
-  ' "$status_file" | LC_ALL=C sort > "$actual_file"; then
-    log_error "Load postcondition failed: SQL*Loader status evidence is malformed or contains a failed invocation"
-    rc=1
-  elif ! cmp -s "$expected_file" "$actual_file"; then
-    log_error "Load postcondition failed: SQL*Loader status records do not match the expected control files"
-    rc=1
-  fi
-
-  if (( rc == 0 )); then
-    while IFS=$'\t' read -r _ _ control_file data_file _; do
-      [[ -f "$control_file" ]] || {
-        log_error "Load postcondition failed: control file is missing: $control_file"
-        rc=1
-      }
-      [[ -f "$data_file" ]] || {
-        log_error "Load postcondition failed: input data file is missing: $data_file"
-        rc=1
-      }
-    done < "$status_file"
-  fi
-  rm -f "$expected_file" "$actual_file"
-  return "$rc"
-}
-
-manifest_relative_path() {
-  local path="$1"
-  [[ -z "${RUN_DIR:-}" || "$path" != "$RUN_DIR/"* ]] || path="${path#$RUN_DIR/}"
-  printf '%s\n' "$path"
-}
-
-expected_manifest_paths() {
-  local phase="$1"
-  local output_dir="$2"
-  local schema_dir include_path generated_sql cleanup_file
-
-  case "$phase" in
-    deploy)
-      if [[ -f "$output_dir/role.sql" && -f "$(role_setup_dir)/role_setup.sql" ]]; then
-        manifest_relative_path "$(role_setup_dir)/role_setup.sql"
-      fi
-      while IFS= read -r schema_dir; do
-        manifest_relative_path "$schema_dir/user.sql"
-        while IFS= read -r include_path; do
-          is_predata_sql "$include_path" || continue
-          manifest_relative_path "$output_dir/$include_path"
-        done < <(schema_master_includes "$output_dir" "$schema_dir")
-      done < <(schema_dirs "$output_dir")
-      if [[ -z "$(schema_dirs "$output_dir")" ]]; then
-        generated_sql="$(generated_sql_files "$output_dir")"
-        [[ -n "$generated_sql" ]] && manifest_relative_path "$generated_sql"
-      fi
-      ;;
-    postdeploy)
-      while IFS= read -r schema_dir; do
-        while IFS= read -r include_path; do
-          manifest_relative_path "$output_dir/$include_path"
-        done < <(schema_post_files "$output_dir" "$schema_dir")
-        [[ ! -f "$schema_dir/post.sql" ]] || manifest_relative_path "$schema_dir/post.sql"
-      done < <(schema_dirs "$output_dir")
-      ;;
-    cleanup)
-      cleanup_file="$(role_cleanup_dir)/role_cleanup.sql"
-      [[ ! -f "$cleanup_file" ]] || manifest_relative_path "$cleanup_file"
-      ;;
-  esac
-}
-
-verify_deploy_manifest_phase() {
-  local phase="$1"
-  local output_dir="$2"
-  local manifest expected_file path status
-  manifest="$(deploy_manifest_file)"
-  expected_file="$(mktemp "${TMPDIR:-/tmp}/sdcli_manifest_expected_XXXXXX")" || return 1
-  if ! expected_manifest_paths "$phase" "$output_dir" > "$expected_file"; then
-    rm -f "$expected_file"
-    return 1
-  fi
-  [[ -f "$manifest" ]] || {
-    if [[ ! -s "$expected_file" ]]; then
-      rm -f "$expected_file"
-      return 0
-    fi
-    log_error "${phase^} postcondition failed: deploy manifest is missing: $manifest"
-    rm -f "$expected_file"
-    return 1
-  }
-  if ! LC_ALL=C awk -F '\t' '
-    NR == 1 { if ($0 != "phase\tpath\tstatus\tnote") invalid=1; next }
-    NF != 4 || $1 == "" || $2 == "" { invalid=1; next }
-    $3 != "executed" && $3 != "failed" && $3 != "control" &&
-      $3 != "excluded" && $3 != "covered" && $3 != "not_run" &&
-      $3 != "pending" && $3 != "planned" { invalid=1 }
-    END { if (invalid) exit 1 }
-  ' "$manifest"; then
-    log_error "${phase^} postcondition failed: deploy manifest is malformed: $manifest"
-    rm -f "$expected_file"
-    return 1
-  fi
-
-  while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    status="$(awk -F '\t' -v phase="$phase" -v path="$path" '$1 == phase && $2 == path { status=$3 } END { print status }' "$manifest")"
-    if [[ "$status" != "executed" ]]; then
-      log_error "${phase^} postcondition failed: manifest has no successful result for $path"
-      rm -f "$expected_file"
-      return 1
-    fi
-  done < "$expected_file"
-  rm -f "$expected_file"
-}
-
-verify_validation_evidence() {
-  local checks_file="$AUTOKIT_DIR/validation_checks.tsv"
-  local summary_file="$AUTOKIT_DIR/validation_summary.txt"
-  local required_check
-
-  [[ -f "$checks_file" ]] || {
-    log_error "Validate postcondition failed: validation checks are missing: $checks_file"
-    return 1
-  }
-  if ! LC_ALL=C awk -F '\t' '
-    NR == 1 { if ($0 != "check\tstatus\tissues\tdetail") invalid=1; next }
-    NF != 4 || $1 == "" || $3 !~ /^[0-9]+$/ || $4 == "" { invalid=1; next }
-    $2 != "PASS" && $2 != "FAIL" && $2 != "INCOMPLETE" && $2 != "NOT_EVALUATED" { invalid=1 }
-    seen[$1]++
-    END {
-      required[1]="run_log"; required[2]="sdcli_error_log"; required[3]="sqlldr_logs"
-      required[4]="missing_evidence"; required[5]="reconciliation"; required[6]="target_objects"
-      required[7]="metadata_collection"
-      for (i=1; i<=7; i++) if (seen[required[i]] != 1) invalid=1
-      if (invalid) exit 1
-    }
-  ' "$checks_file"; then
-    log_error "Validate postcondition failed: validation checks are incomplete or malformed: $checks_file"
-    return 1
-  fi
-  [[ -f "$summary_file" ]] && grep -Fx 'status=PASS' "$summary_file" >/dev/null 2>&1 || {
-    log_error "Validate postcondition failed: validation summary does not report PASS: $summary_file"
-    return 1
-  }
-  for required_check in migration_report.html migration_report.txt; do
-    [[ -f "$AUTOKIT_DIR/$required_check" ]] || {
-      log_error "Validate postcondition failed: report is missing: $AUTOKIT_DIR/$required_check"
-      return 1
-    }
-  done
-}
-
-verify_phase_postcondition() {
-  local phase="$1"
-  local model_name="$2"
-  local project_name="$3"
-  local output_dir="$4"
-  local expected_model
-
-  $DRY_RUN && return 0
-  case "$phase" in
-    capture|convert)
-      if [[ "$SDCLI_LAST_ACTION" != "$phase" || "$SDCLI_LAST_SUCCESS_MARKER" != "true" ]]; then
-        log_error "${phase^} postcondition failed: exact '$phase completed successfully' marker was not observed"
-        return 1
-      fi
-      if [[ "$phase" == "capture" ]]; then
-        expected_model="$model_name"
-      else
-        expected_model="$(expected_run_model_name "$project_name")" || return 1
-      fi
-      lookup_sdcli_model_index "$phase" "$expected_model"
-      ;;
-    generate|datamove)
-      # These are SDCLI operations. Output layout is not an independent error;
-      # deploy/offload/load resolve their own inputs when those steps execute.
-      if [[ "$SDCLI_LAST_ACTION" != "$phase" || "$SDCLI_LAST_SUCCESS_MARKER" != "true" ]]; then
-        log_error "${phase^} did not report its completion marker"
-        return 1
-      fi
-      ;;
-    offload) verify_offload_evidence "$output_dir" ;;
-    deploy|postdeploy)
-      verify_deploy_manifest_phase "$phase" "$output_dir"
-      ;;
-    cleanup) verify_deploy_manifest_phase "$phase" "$output_dir" ;;
-    load) verify_load_evidence "$output_dir" ;;
-    validate) verify_validation_evidence ;;
-    *)
-      log_error "No postcondition is defined for phase '$phase'"
-      return 1
-      ;;
-  esac
 }
 
 # --- Phase orchestration -----------------------------------------------------
@@ -3259,6 +2999,10 @@ run_phase() {
       check_source_tcp_connectivity "$source_host" "$source_port"
       run_sdcli sdcli migration -actions=capture -conn="$src_conn_name" -dblist="$source_database" -model="$model_name" -project="$project_name" -append -output="$output_dir" \
         || fail "Capture failed for migration '$project_name'"
+      if ! $DRY_RUN; then
+        lookup_sdcli_model_index capture "$model_name" \
+          || fail "Cannot resolve captured model for migration '$project_name'"
+      fi
       ;;
     convert)
       if has_schema_mapping "$idx"; then
@@ -3276,6 +3020,10 @@ run_phase() {
       else
         run_sdcli sdcli migration -actions=convert -model="$model_name" -output="$output_dir" \
           || fail "Convert failed for migration '$project_name'"
+      fi
+      if ! $DRY_RUN; then
+        lookup_sdcli_model_index convert "$(expected_run_model_name "$project_name")" \
+          || fail "Cannot resolve converted model for migration '$project_name'"
       fi
       ;;
     generate)
@@ -3308,9 +3056,6 @@ run_phase() {
       fail "Unsupported phase: $phase_name"
       ;;
   esac
-
-  verify_phase_postcondition "$phase_name" "$model_name" "$project_name" "$output_dir" \
-    || fail "Postcondition failed for migration '$project_name' phase '$phase_name'"
 
   complete_phase_status "$phase_name"
 }

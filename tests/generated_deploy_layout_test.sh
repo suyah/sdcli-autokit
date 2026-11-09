@@ -116,4 +116,29 @@ assert_nested_layout_supported() {
 assert_nested_layout_supported nested-post post
 assert_nested_layout_supported nested-group group
 
-echo "generated deploy fallback test passed"
+# A producer failure inside process substitution must not become an empty plan
+# when the runner is called conditionally (as it is by run_phase).
+RUN_DIR="$tmpdir/bad-include"
+AUTOKIT_DIR="$RUN_DIR/autokit"
+mkdir -p "$AUTOKIT_DIR" "$RUN_DIR/sdcli/app"
+: > "$RUN_DIR/sdcli/passworddefinition.sql"
+touch "$RUN_DIR/sdcli/app/user.sql"
+printf '%s\n' '@@"app/tables.sql" unexpected_argument' > "$RUN_DIR/sdcli/app/master.sql"
+if ( run_deploy 0 "$RUN_DIR/sdcli" ) >/dev/null 2>&1; then
+  echo 'Deploy ignored an include discovery failure' >&2
+  exit 1
+fi
+if ( run_postdeploy 0 "$RUN_DIR/sdcli" ) >/dev/null 2>&1; then
+  echo 'Postdeploy ignored an include discovery failure' >&2
+  exit 1
+fi
+
+# Simulate discovery failing while scheduling, after preflight completed.
+check_deploy_inputs() { :; }
+schema_master_includes() { return 1; }
+if ( run_postdeploy 0 "$RUN_DIR/sdcli" ) >/dev/null 2>&1; then
+  echo 'Postdeploy reported success after its include-list producer failed' >&2
+  exit 1
+fi
+
+echo "generated deploy layout test passed"

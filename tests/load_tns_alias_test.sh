@@ -114,6 +114,7 @@ for arg in "$@"; do
   printf 'SQLLDR_ARG:%s\n' "$arg"
 done
 printf '%s\n' 'Path used:      Conventional'
+printf '%s\n' 'SQL*Loader-292: ROWS parameter ignored when an XML, LOB or VARRAY column is loaded'
 printf '%s\n' 'Commit point reached - logical record count 42'
 printf '%s\n' 'Save data point reached - logical record count 50000.'
 printf '%s\n' 'Table TPCC.CUSTOMER:'
@@ -164,7 +165,7 @@ RUN_LOG_FILE="$tmpdir/run.log"
 touch "$RUN_LOG_FILE"
 DRY_RUN=false
 
-run_load 0 "$output_dir"
+run_load 0 "$output_dir" > "$tmpdir/console.log"
 
 run_log="$(cat "$RUN_LOG_FILE")"
 load_wrappers="$(cat "$REPO_ROOT/sdcli-scripts/lib/load_wrappers.sh")"
@@ -191,6 +192,12 @@ assert_contains "$run_log" 'SQLLDR_ARG:userid=admin@SDCLI_LOAD_20260427_121621'
 assert_not_contains "$run_log" "BAD_SQLPLUS_USED"
 assert_not_contains "$run_log" "BAD_SQLLDR_USED"
 assert_not_contains "$run_log" "TargetPass1"
+warning='SQL*Loader-292: ROWS parameter ignored when an XML, LOB or VARRAY column is loaded'
+[[ "$(grep -Fc "$warning" "$RUN_LOG_FILE")" == 1 ]] || {
+  echo 'Native loader warning was written more than once to the run log' >&2
+  exit 1
+}
+grep -Fx "$warning" "$tmpdir/console.log" >/dev/null
 assert_not_contains "$run_log" "__SDCLI_LOAD_PASSWORD__@SDCLI_LOAD_20260427_121621"
 assert_contains "$run_log" "Save data point reached - logical record count 50000."
 assert_not_contains "$run_log" "SQL*Loader output: Save data point reached"
@@ -258,3 +265,13 @@ into table TPCC.NOT_INVOKED
 (ID)
 CTL
 assert_control_rejected "records=1 expected=2 unique_controls=1 issues=0"
+
+# A same-count invocation of the wrong control file must fail coverage.
+rm "$datamove_dir/tpcc/control/not_invoked.ctl"
+cp "$datamove_dir/tpcc/control/tpcc.customer.ctl" "$tmpdir/other.ctl"
+cat >> "$datamove_dir/tpcc/oracle_loader.sh" <<'SH'
+awk -F '\t' -v control="$UNEXPECTED_CONTROL" 'BEGIN { OFS="\t" } { $3=control; print }' "$ORACLE_SQLLDR_STATUS_FILE" > "$ORACLE_SQLLDR_STATUS_FILE.tmp"
+mv "$ORACLE_SQLLDR_STATUS_FILE.tmp" "$ORACLE_SQLLDR_STATUS_FILE"
+SH
+export UNEXPECTED_CONTROL="$tmpdir/other.ctl"
+assert_control_rejected "records=1 expected=1 unique_controls=1 issues=0"
